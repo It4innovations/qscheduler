@@ -44,6 +44,10 @@ impl Core {
         self.get_task_mut(task_id).set_state(state);
     }
 
+    pub fn task_state(&self, task_id: TaskId) -> Option<crate::task::TaskState> {
+        self.tasks.get(&task_id).map(|t| t.state().clone())
+    }
+
     pub(crate) fn backend_url(&self) -> &str {
         &self.config.machine.backend_url
     }

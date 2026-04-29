@@ -3,7 +3,7 @@ pub mod config;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::{Path, State}, http::StatusCode};
 use base64::Engine as _;
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -15,7 +15,7 @@ use runner::config::RunnerConfiguration;
 use runner::core::Core;
 use runner::machine::MachineId;
 use runner::reactor::submit_task;
-use runner::task::TaskConfig;
+use runner::task::{TaskConfig, TaskId, TaskState};
 use crate::config::ServiceConfiguration;
 
 struct AppState {
@@ -90,6 +90,24 @@ async fn create_task(
     Ok((StatusCode::CREATED, Json(task_id.as_u32())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/tasks/{id}",
+    params(("id" = u32, Path, description = "Task ID")),
+    responses(
+        (status = 200, description = "Task state", body = String),
+        (status = 404, description = "Task not found")
+    )
+)]
+async fn get_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u32>,
+) -> Result<Json<TaskState>, StatusCode> {
+    let task_id = TaskId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let task_state = state.core.lock().unwrap().task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(task_state))
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(CreateTaskRequest)))]
 struct ApiDoc;
@@ -103,6 +121,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration, runn
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(version_handler))
         .routes(routes!(create_task))
+        .routes(routes!(get_task))
         .with_state(state)
         .split_for_parts();
 

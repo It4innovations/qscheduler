@@ -25,7 +25,9 @@ impl TaskId {
     }
 }
 
-pub(crate) enum TaskState {
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
     Waiting,
     Compiling,
     Compiled,
@@ -66,8 +68,19 @@ impl Task {
         &self.config
     }
 
+    pub(crate) fn state(&self) -> &TaskState {
+        &self.state
+    }
+
     pub(crate) fn set_state(&mut self, state: TaskState) {
         self.state = state;
+    }
+}
+
+impl TryFrom<u32> for TaskId {
+    type Error = ();
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        NonZeroU32::new(v).map(TaskId).ok_or(())
     }
 }
 
