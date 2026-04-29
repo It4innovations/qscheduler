@@ -3,7 +3,7 @@ pub mod config;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{Json, extract::{Multipart, State}, http::StatusCode};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use utoipa::OpenApi;
@@ -22,15 +22,30 @@ struct AppState {
     core: Mutex<Core>,
 }
 
+/// Task configuration fields, sent as the `metadata` JSON part of a multipart request.
 #[derive(Deserialize, utoipa::ToSchema)]
-struct CreateTaskRequest {
+struct CreateTaskMetadata {
+    #[schema(example = 0)]
     machine_id: u32,
+    #[schema(example = 1)]
     repeats: u32,
+    #[schema(example = 30)]
     max_compile_time_secs: u64,
+    #[schema(example = 60)]
     max_waiting_time_secs: u64,
+    #[schema(example = 120)]
     max_compute_time_secs: u64,
+    #[schema(example = "https://example.com/callback")]
     callback_url: Option<String>,
+    #[schema(example = "secret-token")]
     callback_token: Option<String>,
+}
+
+/// Multipart form for creating a task: a JSON `metadata` part and a binary `payload` part.
+#[derive(utoipa::ToSchema)]
+struct CreateTaskRequest {
+    metadata: CreateTaskMetadata,
+    #[schema(value_type = String, format = Binary, content_media_type = "application/octet-stream")]
     payload: Vec<u8>,
 }
 
@@ -48,24 +63,45 @@ async fn version_handler(State(state): State<Arc<AppState>>) -> String {
 #[utoipa::path(
     post,
     path = "/tasks",
-    request_body = CreateTaskRequest,
+    request_body(content_type = "multipart/form-data", content = inline(CreateTaskRequest)),
     responses(
-        (status = 201, description = "Task created", body = u32)
+        (status = 201, description = "Task created", body = u32),
+        (status = 400, description = "Missing or invalid multipart parts")
     )
 )]
 async fn create_task(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateTaskRequest>,
-) -> (StatusCode, Json<u32>) {
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<u32>), StatusCode> {
+    let mut metadata: Option<CreateTaskMetadata> = None;
+    let mut payload: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        match field.name() {
+            Some("metadata") => {
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                metadata = Some(serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?);
+            }
+            Some("payload") => {
+                let bytes = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+                payload = Some(bytes.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let metadata = metadata.ok_or(StatusCode::BAD_REQUEST)?;
+    let payload = payload.unwrap_or_default();
+
     let task = TaskConfig {
-        machine_id: MachineId::from(req.machine_id),
-        repeats: req.repeats,
-        max_compile_time: Duration::from_secs(req.max_compile_time_secs),
-        max_waiting_time: Duration::from_secs(req.max_waiting_time_secs),
-        max_compute_time: Duration::from_secs(req.max_compute_time_secs),
-        callback_url: req.callback_url,
-        callback_token: req.callback_token,
-        payload: Arc::from(req.payload)
+        machine_id: MachineId::from(metadata.machine_id),
+        repeats: metadata.repeats,
+        max_compile_time: Duration::from_secs(metadata.max_compile_time_secs),
+        max_waiting_time: Duration::from_secs(metadata.max_waiting_time_secs),
+        max_compute_time: Duration::from_secs(metadata.max_compute_time_secs),
+        callback_url: metadata.callback_url,
+        callback_token: metadata.callback_token,
+        payload: Arc::from(payload),
     };
 
     let task_id = {
@@ -75,11 +111,11 @@ async fn create_task(
 
     tracing::info!(task_id = task_id.as_u32(), "task submitted");
 
-    (StatusCode::CREATED, Json(task_id.as_u32()))
+    Ok((StatusCode::CREATED, Json(task_id.as_u32())))
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(CreateTaskRequest)))]
+#[openapi(components(schemas(CreateTaskRequest, CreateTaskMetadata)))]
 struct ApiDoc;
 
 pub async fn run(version: &'static str, service_conf: ServiceConfiguration, runner_conf: RunnerConfiguration) {

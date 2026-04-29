@@ -3,7 +3,8 @@ resolver = "3"
 members = ["qscheduler", "runner", "service"]
 
 [workspace.dependencies]
-axum               = "0.8"
+axum               = { version = "0.8", features = ["multipart"] }
+serde_json         = "1"
 tokio              = { version = "1", features = ["rt", "net", "macros"] }
 clap               = { version = "4", features = ["derive"] }
 tracing            = "0.1"
