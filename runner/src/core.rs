@@ -31,4 +31,20 @@ impl Core {
         self.queue.push_back(task_id);
         task_id
     }
+
+    pub(crate) fn get_task(&self, task_id: TaskId) -> &Task {
+        self.tasks.get(&task_id).unwrap()
+    }
+
+    pub(crate) fn get_task_mut(&mut self, task_id: TaskId) -> &mut Task {
+        self.tasks.get_mut(&task_id).unwrap()
+    }
+
+    pub(crate) fn set_task_state(&mut self, task_id: TaskId, state: crate::task::TaskState) {
+        self.get_task_mut(task_id).set_state(state);
+    }
+
+    pub(crate) fn backend_url(&self) -> &str {
+        &self.config.machine.backend_url
+    }
 }

@@ -30,7 +30,8 @@ pub(crate) enum TaskState {
     Compiling,
     Compiled,
     Running,
-    Finished
+    Finished,
+    Failed,
 }
 
 pub struct TaskConfig {
@@ -63,6 +64,10 @@ impl Task {
     }
     pub fn config(&self) -> &TaskConfig {
         &self.config
+    }
+
+    pub(crate) fn set_state(&mut self, state: TaskState) {
+        self.state = state;
     }
 }
 

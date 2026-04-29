@@ -9,6 +9,8 @@ pub struct ServerConfiguration {
     pub machine: MachineConfiguration,
 }
 
-pub fn load_config(path: &Path) -> ServerConfiguration {
-    todo!()
+pub fn load_config(path: &Path) -> anyhow::Result<ServerConfiguration> {
+    let contents = std::fs::read_to_string(path)?;
+    let config = toml::from_str(&contents)?;
+    Ok(config)
 }

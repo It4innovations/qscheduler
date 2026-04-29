@@ -1,0 +1,6 @@
+[service]
+port = 3000
+
+[machine]
+name = "QComputer"
+backend_url = "http://localhost:8080"

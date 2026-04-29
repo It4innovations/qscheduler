@@ -10,6 +10,10 @@ clap               = { version = "4", features = ["derive"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde              = { version = "1", features = ["derive"] }
+toml               = "0.8"
+anyhow             = "1"
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+base64             = "0.22"
 utoipa             = { version = "5", features = ["axum_extras"] }
 utoipa-axum        = "0.2"
 utoipa-swagger-ui  = { version = "9", features = ["axum"] }

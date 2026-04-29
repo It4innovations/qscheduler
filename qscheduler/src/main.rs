@@ -25,6 +25,6 @@ async fn main() {
 
     let args = Cli::parse();
     tracing::info!(config = ?args.config, "starting qscheduler");
-    let config = load_config(&args.config);
+    let config = load_config(&args.config).expect("failed to load config");
     service::run(env!("CARGO_PKG_VERSION"), config.service, RunnerConfiguration { machine: config.machine }).await;
 }
