@@ -1,0 +1,14 @@
+[package]
+name = "service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+runner  = { path = "../runner" }
+axum    = { workspace = true }
+tokio   = { workspace = true }
+tracing = { workspace = true }
+serde             = { workspace = true }
+utoipa            = { workspace = true }
+utoipa-axum       = { workspace = true }
+utoipa-swagger-ui = { workspace = true }

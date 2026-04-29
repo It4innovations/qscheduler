@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["qscheduler", "runner", "service"]
+
+[workspace.dependencies]
+axum               = "0.8"
+tokio              = { version = "1", features = ["rt", "net", "macros"] }
+clap               = { version = "4", features = ["derive"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+serde              = { version = "1", features = ["derive"] }
+utoipa             = { version = "5", features = ["axum_extras"] }
+utoipa-axum        = "0.2"
+utoipa-swagger-ui  = { version = "9", features = ["axum"] }
