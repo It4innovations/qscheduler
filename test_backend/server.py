@@ -1,42 +1,69 @@
 #!/usr/bin/env python3
-"""Mock backend server for testing start_task."""
+"""Mock backend server: spawns per-task worker servers on demand."""
 
-import http.server
-import re
+import logging
+import threading
 
-PORT = 8080
+from flask import Flask, request
+from werkzeug.serving import make_server
 
-ROUTE_TASK   = re.compile(r"^/task$")
-ROUTE_START  = re.compile(r"^/task/(\d+)/start$")
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+class Worker:
 
-        if ROUTE_TASK.match(self.path):
-            print(f"[task]  received {len(body)} bytes")
-            self._reply(200)
+    def __init__(self):
+        pass
 
-        elif m := ROUTE_START.match(self.path):
-            task_id = m.group(1)
-            print(f"[start] task_id={task_id}")
-            self._reply(200)
+    def set_task(self, body: bytes):
+        print(f"[worker] task received: {len(body)} bytes")
+        print("[worker] compiling ...")
+        print("[worker] ... compiled")
 
-        else:
-            print(f"[404]   {self.path}")
-            self._reply(404)
+    def start_task(self):
+        print("[worker] task started")
 
-    def _reply(self, status: int):
-        self.send_response(status)
-        self.end_headers()
+    def delete_task(self):
+        print("[worker] task deleted")
 
-    def log_message(self, *_):
-        pass  # silence default access log; we print our own
+
+def make_worker_app(worker: Worker) -> Flask:
+    app = Flask(__name__)
+
+    @app.post("/task")
+    def accept_task():
+        body = request.get_data()
+        worker.set_task(body)
+        return "", 200
+
+    @app.post("/task/start")
+    def start_task():
+        worker.start_task()
+        return "", 200
+
+    @app.delete("/task")
+    def delete_task():
+        worker.delete_task()
+        return "", 200
+
+    return app
+
+
+main_app = Flask(__name__)
+
+
+@main_app.post("/worker")
+def new_worker():
+    worker = Worker()
+    app = make_worker_app(worker)
+    server = make_server("localhost", 0, app)
+    port = server.socket.getsockname()[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://localhost:{port}"
+    print(f"[main] worker started at {url}")
+    return url, 200
 
 
 if __name__ == "__main__":
-    with http.server.HTTPServer(("", PORT), Handler) as srv:
-        print(f"listening on http://localhost:{PORT}")
-        srv.serve_forever()
+    print("listening on http://localhost:8080")
+    main_app.run(port=8080, use_reloader=False)

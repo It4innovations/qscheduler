@@ -18,10 +18,24 @@ async fn start_task(core: Arc<Mutex<Core>>, task_id: TaskId) {
 
     let client = reqwest::Client::new();
 
+    let worker_url = match client
+        .post(format!("{backend_url}/worker"))
+        .send()
+        .await
+        .ok()
+        .filter(|r| r.status().is_success())
+    {
+        Some(r) => r.text().await.unwrap_or_default(),
+        None => {
+            core.lock().unwrap().set_task_state(task_id, TaskState::Failed);
+            return;
+        }
+    };
+
     core.lock().unwrap().set_task_state(task_id, TaskState::Compiling);
 
     let compile_ok = client
-        .post(format!("{backend_url}/task"))
+        .post(format!("{worker_url}/task"))
         .body(payload.to_vec())
         .send()
         .await
@@ -37,7 +51,7 @@ async fn start_task(core: Arc<Mutex<Core>>, task_id: TaskId) {
     core.lock().unwrap().set_task_state(task_id, TaskState::Running);
 
     let start_ok = client
-        .post(format!("{backend_url}/task/{}/start", task_id.as_u32()))
+        .post(format!("{worker_url}/task/start"))
         .send()
         .await
         .map(|r| r.status().is_success())
