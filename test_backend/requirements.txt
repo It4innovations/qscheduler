@@ -1,6 +1,6 @@
 fastapi==0.104.1
 uvicorn==0.24.0
-iqm-qiskit>=0.33.0
+iqm-client[qiskit]
 qiskit>=0.43.0
 qiskit_qasm3_import
 python-multipart

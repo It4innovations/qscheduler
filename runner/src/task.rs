@@ -29,8 +29,6 @@ impl TaskId {
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
     Waiting,
-    Compiling,
-    Compiled,
     Running,
     Finished,
     Failed,
@@ -39,7 +37,6 @@ pub enum TaskState {
 pub struct TaskConfig {
     pub machine_id: MachineId,
     pub repeats: u32,
-    pub max_compile_time: Duration,
     pub max_waiting_time: Duration,
     pub max_compute_time: Duration,
     pub callback_url: Option<String>,
