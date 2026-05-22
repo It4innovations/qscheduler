@@ -24,18 +24,20 @@ logging.getLogger("uvicorn").setLevel(logging.ERROR)
 # Business Logic and Interface  #
 #################################
 
+
 class QTask:
     def __init__(self, circuits: list[QuantumCircuit], execution_kwargs: dict):
         self._circuits = circuits
         self._execution_kwargs = execution_kwargs
-    
+
     @property
     def circuits(self):
         return self._circuits
-    
+
     @property
     def execution_kwargs(self):
         return self._execution_kwargs
+
 
 class IQMWorker:
     def __init__(self):
@@ -45,33 +47,41 @@ class IQMWorker:
             qubits=["QB1", "QB2", "QB3", "QB4", "QB5", "QB6"],
             computational_resonators=["CR1"],
             connectivity=[
-                ("CR1", "QB1"), ("CR1", "QB2"), ("CR1", "QB3"),
-                ("CR1", "QB4"), ("CR1", "QB5"), ("CR1", "QB6"),
+                ("CR1", "QB1"),
+                ("CR1", "QB2"),
+                ("CR1", "QB3"),
+                ("CR1", "QB4"),
+                ("CR1", "QB5"),
+                ("CR1", "QB6"),
             ],
         )
         self.metrics = self.iqm_backend.metrics
         self.prepared_circuits: dict[uuid.UUID, QTask] = {}
-        
+
         # Calibration ID from the fake backend
         self.calibration_id = self.iqm_backend.architecture.calibration_set_id
         print(f"[worker] initialized for calibration id {self.calibration_id}")
 
-    def set_task(self, calibration_id: uuid.UUID, execution_args: dict, qasm_content: str):
+    def set_task(
+        self, calibration_id: uuid.UUID, execution_args: dict, qasm_content: str
+    ):
         """Worker logic for preparing a task, now receiving clean types."""
         if calibration_id != self.calibration_id:
-            print(f"[worker] Calibration mismatch. Requested: {calibration_id}, Available: {self.calibration_id}")
+            print(
+                f"[worker] Calibration mismatch. Requested: {calibration_id}, Available: {self.calibration_id}"
+            )
             return {"error_msg": "Unsupported calibration identifier!"}, 400
-        
+
         task_id = uuid.uuid4()
         while task_id in self.prepared_circuits:
             task_id = uuid.uuid4()
-        
+
         try:
             circuit = qasm3loads(qasm_content)
             self.prepared_circuits[task_id] = QTask([circuit], execution_args)
         except Exception as e:
             return {"error_msg": f"Failed to load OpenQASM: {str(e)}"}, 400
-            
+
         print(f"[worker] task '{str(task_id)}' assigned and compiled")
         return {"qtask_id": str(task_id)}, 200
 
@@ -79,20 +89,20 @@ class IQMWorker:
         qtask = self.prepared_circuits.get(task_uuid)
         if qtask is None:
             return {"error_msg": f"Task {str(task_uuid)} not found!"}, 404
-        
+
         print(f"[worker] task '{str(task_uuid)}' started")
         qjob = self.iqm_backend.run(qtask.circuits, **qtask.execution_kwargs)
         qresult = qjob.result()
-        
+
         if not qresult.success:
             return {"error_msg": "Execution Failed!"}, 400
-        
+
         return qresult.to_dict(), 200
 
     def delete_task(self, task_uuid: uuid.UUID):
         if task_uuid not in self.prepared_circuits:
             return {"error_msg": f"Task {str(task_uuid)} not found!"}, 404
-        
+
         del self.prepared_circuits[task_uuid]
         return {"qtask_id": str(task_uuid), "status": "deleted"}, 200
 
@@ -102,8 +112,11 @@ def make_worker_app(worker: IQMWorker) -> FastAPI:
 
     @app.get("/architecture")
     def get_quantum_architecture():
-        return {"calibration_id": worker.calibration_id, "architecture": worker.architecture}
-    
+        return {
+            "calibration_id": worker.calibration_id,
+            "architecture": worker.architecture,
+        }
+
     @app.get("/metrics")
     def get_metrics():
         return {"calibration_id": worker.calibration_id, "metrics": worker.metrics}
@@ -112,7 +125,7 @@ def make_worker_app(worker: IQMWorker) -> FastAPI:
     async def accept_task(
         calibration_id: str = Form(...),
         execution_args: str = Form(...),
-        openqasm: UploadFile = File(...)
+        openqasm: UploadFile = File(...),
     ):
         """MIME-based task submission."""
         try:
@@ -122,14 +135,16 @@ def make_worker_app(worker: IQMWorker) -> FastAPI:
             qasm_bytes = await openqasm.read()
             qasm_str = qasm_bytes.decode("utf-8")
         except Exception as e:
-            return JSONResponse({"error_msg": f"MIME parsing failed: {str(e)}"}, status_code=400)
+            return JSONResponse(
+                {"error_msg": f"MIME parsing failed: {str(e)}"}, status_code=400
+            )
 
         content, status = worker.set_task(cal_uuid, exec_dict, qasm_str)
         return JSONResponse(content=content, status_code=status)
 
     @app.post("/task/start")
     async def start_task(request: Request):
-        # We'll keep the start/delete body as raw bytes for simplicity, 
+        # We'll keep the start/delete body as raw bytes for simplicity,
         # or you can change them to path parameters.
         try:
             task_uuid = uuid.UUID(bytes=await request.body())
@@ -154,22 +169,24 @@ def make_worker_app(worker: IQMWorker) -> FastAPI:
 async def lifespan(app: FastAPI):
     yield
 
+
 main_app = FastAPI(lifespan=lifespan)
+
 
 @main_app.post("/worker")
 def new_worker():
     worker = IQMWorker()
     app = make_worker_app(worker)
-    
+
     # Find an available port
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("localhost", 0))
     port = sock.getsockname()[1]
     sock.close()
-    
+
     config = uvicorn.Config(app, host="localhost", port=port, log_level="error")
     server = uvicorn.Server(config)
-    
+
     threading.Thread(target=server.run, daemon=True).start()
     url = f"http://localhost:{port}"
     print(f"[main] worker started at {url}")

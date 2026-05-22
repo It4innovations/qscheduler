@@ -1,12 +1,16 @@
+use crate::backend::BackendConfig;
+use crate::callback::NotifyConfig;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct MachineConfiguration {
+    pub id: u32,
     pub name: String,
-    pub backend_url: String,
+    pub notify: Option<NotifyConfig>,
+    pub backend: BackendConfig,
 }
 
 #[derive(Debug)]
 pub struct RunnerConfiguration {
-    pub machine: MachineConfiguration,
+    pub machines: Vec<MachineConfiguration>,
 }

@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use serde::Deserialize;
 use runner::config::MachineConfiguration;
+use serde::Deserialize;
 use service::config::ServiceConfiguration;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfiguration {
     pub log: Option<PathBuf>,
     pub service: ServiceConfiguration,
-    pub machine: MachineConfiguration,
+    pub machines: Vec<MachineConfiguration>,
 }
 
 pub fn load_config(path: &Path) -> anyhow::Result<ServerConfiguration> {

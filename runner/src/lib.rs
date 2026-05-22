@@ -1,5 +1,18 @@
+mod backend;
+mod callback;
+pub mod config;
 pub mod core;
-pub mod task;
+pub mod error;
+mod launcher;
 pub mod machine;
 pub mod reactor;
-pub mod config;
+mod session;
+pub mod task;
+
+use crate::error::RunnerError;
+
+pub use machine::MachineId;
+pub use session::{SessionConfig, SessionId, SessionState};
+pub use task::TaskId;
+
+type Result<T> = std::result::Result<T, RunnerError>;

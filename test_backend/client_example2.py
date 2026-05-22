@@ -18,7 +18,9 @@ qc_transpiled = transpile(qc, backend=backend)
 
 # 3. Serialize to OpenQASM 3 (patch missing 'move' gate definition before export)
 for instr in qc_transpiled.data:
-    if instr.operation.name == "move" and not getattr(instr.operation, "definition", None):
+    if instr.operation.name == "move" and not getattr(
+        instr.operation, "definition", None
+    ):
         dummy = QuantumCircuit(instr.operation.num_qubits)
         instr.operation.definition = dummy
 qasm_bytes = qasm3dumps(qc_transpiled).encode("utf-8")

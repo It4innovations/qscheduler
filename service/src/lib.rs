@@ -1,35 +1,49 @@
 pub mod config;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Json, body::Bytes, extract::{Path, Query, State}, http::StatusCode, routing::get};
+use crate::config::ServiceConfiguration;
+use axum::{
+    Json,
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::get,
+};
+use runner::config::RunnerConfiguration;
+use runner::core::{Core, CoreRef};
+use runner::error::RunnerError;
+use runner::reactor::{create_session, submit_task};
+use runner::task::{TaskConfig, TaskId, TaskState};
+use runner::{MachineId, SessionId};
+use runner::{SessionConfig, SessionState};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
-use runner::config::RunnerConfiguration;
-use runner::core::Core;
-use runner::machine::MachineId;
-use runner::reactor::submit_task;
-use runner::task::{TaskConfig, TaskId, TaskState};
-use crate::config::ServiceConfiguration;
 
 struct AppState {
     version: &'static str,
-    core: Arc<Mutex<Core>>,
+    core: CoreRef,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct CreateTaskParams {
+    session_id: Option<u64>,
+    machine_id: u32,
+    repeats: u32,
+    max_waiting_time_secs: Option<u64>,
+    max_compute_time_secs: u64,
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
-struct CreateTaskParams {
+struct CreateSessionParams {
     machine_id: u32,
-    repeats: u32,
-    max_waiting_time_secs: u64,
-    max_compute_time_secs: u64,
-    callback_url: Option<String>,
-    callback_token: Option<String>,
+    time_limit_secs: u64,
 }
 
 #[utoipa::path(
@@ -40,7 +54,7 @@ struct CreateTaskParams {
     )
 )]
 async fn version_handler(State(state): State<Arc<AppState>>) -> String {
-    format!("qscheduler {}", state.version)
+    format!("qscheduler v{}", state.version)
 }
 
 #[utoipa::path(
@@ -57,20 +71,36 @@ async fn create_task(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CreateTaskParams>,
     body: Bytes,
-) -> (StatusCode, Json<u32>) {
-    let task = TaskConfig {
-        machine_id: MachineId::from(params.machine_id),
-        repeats: params.repeats,
-        max_waiting_time: Duration::from_secs(params.max_waiting_time_secs),
-        max_compute_time: Duration::from_secs(params.max_compute_time_secs),
-        callback_url: params.callback_url,
-        callback_token: params.callback_token,
-        payload: Arc::from(body.as_ref()),
-    };
+) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
+    let task =
+        create_task_config(params, body).map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    tracing::debug!(task_config=?task, "new task");
+    let task_id = submit_task(Arc::clone(&state.core), task).map_err(|e| {
+        let status = match &e {
+            RunnerError::InvalidMachine(_)
+            | RunnerError::InvalidSession(_)
+            | RunnerError::NonRunningSession(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, e.to_string())
+    })?;
+    tracing::info!(%task_id, "task submitted");
+    Ok((StatusCode::CREATED, Json(task_id.as_u64())))
+}
 
-    let task_id = submit_task(Arc::clone(&state.core), task);
-    tracing::info!(task_id = task_id.as_u32(), "task submitted");
-    (StatusCode::CREATED, Json(task_id.as_u32()))
+fn create_task_config(params: CreateTaskParams, body: Bytes) -> Result<TaskConfig, String> {
+    Ok(TaskConfig {
+        machine_id: MachineId::from(params.machine_id),
+        session_id: params
+            .session_id
+            .map(SessionId::try_from)
+            .transpose()
+            .map_err(|_| "Invalid session_id")?,
+        repeats: params.repeats,
+        max_waiting_time: params.max_waiting_time_secs.map(Duration::from_secs),
+        max_compute_time: Duration::from_secs(params.max_compute_time_secs),
+        payload: Arc::from(body.as_ref()),
+    })
 }
 
 #[utoipa::path(
@@ -84,26 +114,77 @@ async fn create_task(
 )]
 async fn get_task(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<u32>,
+    Path(id): Path<u64>,
 ) -> Result<Json<TaskState>, StatusCode> {
     let task_id = TaskId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let task_state = state.core.lock().unwrap().task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(task_state))
+    let core = state.core.lock().unwrap();
+    let task_state = core.task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(task_state.clone()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/sessions/{id}",
+    params(("id" = u64, Path, description = "Session ID")),
+    responses(
+        (status = 200, description = "Session state", body = String),
+        (status = 404, description = "Session not found")
+    )
+)]
+async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<Json<SessionState>, StatusCode> {
+    let session_id = SessionId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let core = state.core.lock().unwrap();
+    let session_state = core
+        .session_state(session_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(session_state))
+}
+
+#[utoipa::path(
+    post,
+    path = "/sessions",
+    params(CreateSessionParams),
+    responses(
+        (status = 201, description = "Session created", body = u64),
+        (status = 400, description = "Missing or invalid fields")
+    )
+)]
+async fn create_session_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CreateSessionParams>,
+) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
+    let config = SessionConfig {
+        machine_id: MachineId::from(params.machine_id),
+        time_limit: Duration::from_secs(params.time_limit_secs),
+    };
+    let session_id = create_session(Arc::clone(&state.core), config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::info!(session_id = session_id.as_u64(), "session created");
+    Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
 
 #[derive(OpenApi)]
 struct ApiDoc;
 
-pub async fn run(version: &'static str, service_conf: ServiceConfiguration, runner_conf: RunnerConfiguration) {
+pub async fn run(
+    version: &'static str,
+    service_conf: ServiceConfiguration,
+    runner_conf: RunnerConfiguration,
+) {
     let state = Arc::new(AppState {
         version,
-        core: Arc::new(Mutex::new(Core::new(runner_conf))),
+        core: Core::new(runner_conf),
     });
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(version_handler))
         .routes(routes!(create_task))
         .routes(routes!(get_task))
+        .routes(routes!(get_session))
+        .routes(routes!(create_session_handler))
         .with_state(state)
         .split_for_parts();
 
@@ -119,7 +200,5 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration, runn
 
     tracing::info!("listening on {}", listener.local_addr().unwrap());
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.expect("server error");
 }

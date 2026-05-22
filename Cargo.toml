@@ -17,3 +17,4 @@ base64             = "0.22"
 utoipa             = { version = "5", features = ["axum_extras"] }
 utoipa-axum        = "0.2"
 utoipa-swagger-ui  = { version = "9", features = ["axum"] }
+thiserror = "2.0"

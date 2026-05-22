@@ -1,9 +1,9 @@
 mod config;
 
-use std::path::PathBuf;
+use crate::config::load_config;
 use clap::Parser;
 use runner::config::RunnerConfiguration;
-use crate::config::load_config;
+use std::path::PathBuf;
 
 /// qscheduler — task scheduler service
 #[derive(Parser)]
@@ -39,5 +39,12 @@ async fn main() {
     }
 
     tracing::info!(config = ?args.config, "starting qscheduler");
-    service::run(env!("CARGO_PKG_VERSION"), config.service, RunnerConfiguration { machine: config.machine }).await;
+    service::run(
+        env!("CARGO_PKG_VERSION"),
+        config.service,
+        RunnerConfiguration {
+            machines: config.machines,
+        },
+    )
+    .await;
 }
