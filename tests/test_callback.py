@@ -62,8 +62,8 @@ def test_callback_fires_on_task_finish(qscheduler_notify, callback_server):
 
     wait_for_callbacks(callback_server)
     cb = callback_server.callbacks[0]
-    assert cb["event"]["task_id"] == task_id
-    assert cb["event"]["state"] == "finished"
+    assert cb["task_id"] == task_id
+    assert cb["state"] == "finished"
     assert cb["token"] == NOTIFY_TOKEN
 
 
@@ -73,8 +73,8 @@ def test_callback_fires_on_task_fail(qscheduler_notify, callback_server):
 
     wait_for_callbacks(callback_server)
     cb = callback_server.callbacks[0]
-    assert cb["event"]["task_id"] == task_id
-    assert cb["event"]["state"] == "failed"
+    assert cb["task_id"] == task_id
+    assert cb["state"] == "failed"
     assert cb["token"] == NOTIFY_TOKEN
 
 
@@ -89,8 +89,6 @@ def test_callback_fires_on_task_cancel(qscheduler_notify, callback_server):
     qscheduler_notify.assert_task_canceled(t2)
 
     wait_for_callbacks(callback_server, count=2)
-    states = {
-        cb["event"]["task_id"]: cb["event"]["state"] for cb in callback_server.callbacks
-    }
+    states = {cb["task_id"]: cb["state"] for cb in callback_server.callbacks}
     assert states[t1] == "finished"
     assert states[t2] == "cancelled"

@@ -17,7 +17,9 @@ pub(crate) enum Backend {
 impl Backend {
     pub fn new(config: &BackendConfig) -> Self {
         match config {
-            BackendConfig::Iqm { backend_url } => Backend::Iqm { backend_url: backend_url.clone() },
+            BackendConfig::Iqm { backend_url } => Backend::Iqm {
+                backend_url: backend_url.clone(),
+            },
             BackendConfig::Test => Backend::Test,
         }
     }
@@ -26,7 +28,7 @@ impl Backend {
             Backend::Iqm { backend_url } => {
                 let _ = backend_url;
                 todo!()
-            },
+            }
             Backend::Test => {
                 let message: TestBackendMessage = serde_json::from_slice(payload.as_ref())
                     .map_err(|err| {
