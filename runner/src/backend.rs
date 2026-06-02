@@ -1,71 +1,41 @@
-use crate::error::RunnerError;
+use crate::backend_iqm::IqmBackendConfig;
+use bytes::Bytes;
 use serde::Deserialize;
-use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum BackendConfig {
-    Iqm { backend_url: String },
+    Iqm(IqmBackendConfig),
     Test,
 }
 
-#[derive(Clone)]
-pub(crate) enum Backend {
-    Iqm { backend_url: String },
-    Test,
+use crate::TaskId;
+use crate::backend_iqm::start_iqm_backend;
+use crate::backend_test::start_test_backend;
+use crate::task::TaskState;
+
+pub(crate) trait Backend: Send + Sync {
+    fn submit_task(&self, task_id: TaskId, payload: Bytes);
+    fn cancel_task(&self, task_id: TaskId, backend_id: &str);
 }
 
-impl Backend {
-    pub fn new(config: &BackendConfig) -> Self {
-        match config {
-            BackendConfig::Iqm { backend_url } => Backend::Iqm {
-                backend_url: backend_url.clone(),
-            },
-            BackendConfig::Test => Backend::Test,
-        }
+pub(crate) enum FromBackendMessage {
+    TaskSubmitted {
+        task_id: TaskId,
+        backend_task_id: String,
+    },
+    TaskStateChange {
+        task_id: TaskId,
+        state: TaskState,
+    },
+}
+
+pub fn create_backend(
+    config: &BackendConfig,
+) -> (Box<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
+    match config {
+        BackendConfig::Iqm(config) => start_iqm_backend(config),
+        BackendConfig::Test => start_test_backend(),
     }
-    pub async fn run_task(&self, payload: Arc<[u8]>) -> crate::Result<()> {
-        match self {
-            Backend::Iqm { backend_url } => {
-                let _ = backend_url;
-                todo!()
-            }
-            Backend::Test => {
-                let message: TestBackendMessage = serde_json::from_slice(payload.as_ref())
-                    .map_err(|err| {
-                        RunnerError::GenericError(format!(
-                            "Error deserializing test payload: {:?}",
-                            err
-                        ))
-                    })?;
-                message.process().await
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct TestBackendMessage {
-    result: TestBackendResult,
-    #[serde(default)]
-    wait: f32,
-}
-
-impl TestBackendMessage {
-    pub async fn process(self) -> crate::Result<()> {
-        if self.wait > 0.0 {
-            let ms = (self.wait * 1000.0).round() as u64;
-            tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
-        }
-        match self.result {
-            TestBackendResult::Ok => Ok(()),
-            TestBackendResult::Fail { message } => Err(RunnerError::TaskFail(message)),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum TestBackendResult {
-    Ok,
-    Fail { message: String },
 }

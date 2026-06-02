@@ -28,10 +28,8 @@ qasm_bytes = qasm3dumps(qc_transpiled).encode("utf-8")
 # 4. Submit to qscheduler — metadata as query params, circuit as raw body
 params = {
     "machine_id": 0,
-    "repeats": 1,
-    "max_waiting_time_secs": 60,
-    "max_compute_time_secs": 120,
 }
+
 resp = requests.post(
     f"{QSCHEDULER}/tasks",
     params=params,

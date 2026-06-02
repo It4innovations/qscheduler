@@ -6,6 +6,7 @@ use serde::Deserialize;
 pub struct MachineConfiguration {
     pub id: u32,
     pub name: String,
+    pub queue_size: usize,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }

@@ -9,11 +9,16 @@ OK_RESULT = {"type": "Ok"}
 
 class TestTask:
     def __init__(self):
-        self._wait = 0
+        self._submit_time = 0
+        self._compute_time = 0
         self._result = OK_RESULT
 
-    def wait(self, time: float):
-        self._wait = time
+    def submit_time(self, time: float):
+        self._submit_time = time
+        return self
+
+    def compute_time(self, time: float):
+        self._compute_time = time
         return self
 
     def error(self, message):
@@ -22,8 +27,10 @@ class TestTask:
 
     def create_payload(self) -> dict:
         msg = {"result": self._result}
-        if self._wait > 0:
-            msg["wait"] = self._wait
+        if self._compute_time > 0:
+            msg["compute_time"] = self._compute_time
+        if self._submit_time > 0:
+            msg["submit_time"] = self._submit_time
         data = json.dumps(msg)
         return data.encode()
 
@@ -33,27 +40,28 @@ class QScheduler:
         self,
         working_dir: str,
         port: int,
-        notify_url: str | None = None,
-        notify_token: str | None = None,
+        backend,
     ):
         self.working_dir = working_dir
         self.port = port
-        self.notify_url = notify_url
-        self.notify_token = notify_token
+        self.backend = backend
+        self.notify_url = None
+        self.notify_token = None
+        self.queue_size = 2
         self._process = None
         self._log_file = None
 
     def url(self, path: str):
         return f"http://127.0.0.1:{self.port}/{path}"
 
-    def start(self):
-        config_path = os.path.join(self.working_dir, "config.toml")
+    def _write_config(self, config_path):
         if self.notify_url and self.notify_token:
             notify_line = f'\nnotify = {{url = "{self.notify_url}", token = "{self.notify_token}"}}'
         elif self.notify_url:
             notify_line = f'\nnotify = {{url = "{self.notify_url}"}}'
         else:
             notify_line = ""
+        backend_config = self.backend.build_config()
         with open(config_path, "w") as f:
             f.write(f"""[service]
 port = {self.port}
@@ -61,9 +69,13 @@ port = {self.port}
 [[machines]]
 id = 1
 name = "TestMachine"
-backend = "Test"{notify_line}
+queue_size = {self.queue_size}
+{notify_line}
+[machines.backend]
+{backend_config}
 """)
 
+    def _start_binary(self, config_path):
         log_path = os.path.join(self.working_dir, "qscheduler.log")
         self._log_file = open(log_path, "w")
 
@@ -96,6 +108,12 @@ backend = "Test"{notify_line}
             time.sleep(0.1)
 
         raise RuntimeError("qscheduler did not start within 10 seconds")
+
+    def start(self):
+        self.backend.start()
+        config_path = os.path.join(self.working_dir, "config.toml")
+        self._write_config(config_path)
+        self._start_binary(config_path)
 
     def cleanup(self):
         if self._process is None:
@@ -195,16 +213,15 @@ backend = "Test"{notify_line}
             tp = state["state"]
             if tp == target:
                 return state
-            if tp in ("failed", "finished"):
+            if tp in ("failed", "finished", "cancelled"):
                 raise Exception(
-                    "Task {task_id}: expects state {target} but got {target} (full state: {state})"
+                    f"Task {task_id}: expects state {target} but got {tp} (full state: {state})"
                 )
             time.sleep(wait_time)
             wait_time += 0.1
-        if tp in ("failed", "finished"):
-            raise Exception(
-                "Task {task_id}: expects state {target} but got {target} (full state: {state}) after {TIMEOUT}s"
-            )
+        raise Exception(
+            f"Task {task_id}: expects state {target} but got {tp} (full state: {state}) after {TIMEOUT}s"
+        )
 
     def assert_task_finished(self, task_id: int):
         state = self.get_task_status(task_id)
@@ -223,6 +240,9 @@ backend = "Test"{notify_line}
 
     def wait_for_finished(self, task_id: int):
         self.wait_for_task_state(task_id, "finished")
+
+    def wait_for_cancelled(self, task_id: int):
+        self.wait_for_task_state(task_id, "cancelled")
 
     def wait_for_failed(self, task_id: int):
         return self.wait_for_task_state(task_id, "failed")

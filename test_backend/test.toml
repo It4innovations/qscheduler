@@ -3,6 +3,8 @@
 [service]
 port = 3000
 
-[machine]
+[[machines]]
 name = "QComputer"
-backend_url = "http://localhost:8080"
+queue_size=2
+[[machines.backend]]
+type = "iqm"

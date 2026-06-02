@@ -3,6 +3,7 @@ import time
 
 
 def test_session_empty(qscheduler):
+    qscheduler.start()
     s = qscheduler.new_session(time_limit=1)
     qscheduler.wait_for_session_open(s)
     qscheduler.wait_for_session_closed(s)
@@ -12,10 +13,12 @@ def test_session_empty(qscheduler):
 
 
 def test_session_fail_submit(qscheduler):
+    qscheduler.start()
     qscheduler.submit(TT(), session_id=123, expect_error=422)
 
 
 def test_session_submit_and_timeout(qscheduler):
+    qscheduler.start()
     s = qscheduler.new_session(time_limit=3)
     qscheduler.wait_for_session_open(s)
     t1 = qscheduler.submit(TT())
@@ -29,13 +32,27 @@ def test_session_submit_and_timeout(qscheduler):
 
 
 def test_session_submit_and_cancel(qscheduler):
-    s = qscheduler.new_session(time_limit=1)
+    qscheduler.start()
+    s = qscheduler.new_session(time_limit=2)
     qscheduler.wait_for_session_open(s)
     time.sleep(0.2)
-    t1 = qscheduler.submit(TT().wait(1), session_id=s)
-    t2 = qscheduler.submit(TT().wait(1), session_id=s)
-    t3 = qscheduler.submit(TT().wait(1), session_id=s)
+    ts = [qscheduler.submit(TT().compute_time(1), session_id=s) for _ in range(10)]
     qscheduler.wait_for_session_closed(s)
-    qscheduler.assert_task_finished(t1)
-    qscheduler.assert_task_canceled(t2)
-    qscheduler.assert_task_canceled(t3)
+    time.sleep(0.5)
+    qscheduler.assert_task_finished(ts[0])
+    qscheduler.assert_task_finished(ts[1])
+    for t in ts[2:]:
+        qscheduler.assert_task_canceled(t)
+        qscheduler.assert_task_canceled(t)
+
+
+def test_session_no_overlap(qscheduler):
+    qscheduler.queue_size = 2
+    qscheduler.start()
+    s1 = qscheduler.new_session(time_limit=1)
+    s2 = qscheduler.new_session(time_limit=2)
+    qscheduler.wait_for_session_open(s1)
+    assert qscheduler.get_session_state(s2) == "waiting"
+    qscheduler.wait_for_session_open(s2)
+    assert qscheduler.get_session_state(s1) == "closed"
+    qscheduler.wait_for_session_closed(s2)

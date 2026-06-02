@@ -4,3 +4,4 @@ iqm-client[qiskit]
 qiskit>=0.43.0
 qiskit_qasm3_import
 python-multipart
+matplotlib

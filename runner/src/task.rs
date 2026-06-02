@@ -1,11 +1,11 @@
+use crate::callback::NotifyTaskState;
 use crate::machine::MachineId;
 use crate::session::SessionId;
+use bytes::Bytes;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
-use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -54,13 +54,21 @@ pub enum TaskState {
     Cancelled,
 }
 
+impl TaskState {
+    pub(crate) fn to_notify(&self) -> Option<NotifyTaskState> {
+        match self {
+            TaskState::Waiting | TaskState::Running => None,
+            TaskState::Finished => Some(NotifyTaskState::Finished),
+            TaskState::Failed { .. } => Some(NotifyTaskState::Failed),
+            TaskState::Cancelled => Some(NotifyTaskState::Cancelled),
+        }
+    }
+}
+
 pub struct TaskConfig {
     pub machine_id: MachineId,
     pub session_id: Option<SessionId>,
-    pub repeats: u32,
-    pub max_waiting_time: Option<Duration>,
-    pub max_compute_time: Duration,
-    pub payload: Arc<[u8]>,
+    pub payload: Bytes,
 }
 
 impl Debug for TaskConfig {
@@ -68,9 +76,6 @@ impl Debug for TaskConfig {
         f.debug_struct("TaskConfig")
             .field("machine_id", &self.machine_id)
             .field("session_id", &self.session_id)
-            .field("repeats", &self.repeats)
-            .field("max_waiting_time", &self.max_waiting_time)
-            .field("max_compute_time", &self.max_compute_time)
             .field("payload", &format_args!("<{} bytes>", self.payload.len()))
             .finish()
     }
@@ -79,6 +84,7 @@ impl Debug for TaskConfig {
 pub(crate) struct Task {
     id: TaskId,
     state: TaskState,
+    backend_id: Option<String>,
     config: TaskConfig,
 }
 
@@ -87,6 +93,7 @@ impl Task {
         Task {
             id: task_id,
             state: TaskState::Waiting,
+            backend_id: None,
             config,
         }
     }
@@ -95,6 +102,13 @@ impl Task {
     }
     pub fn config(&self) -> &TaskConfig {
         &self.config
+    }
+    pub fn backend_id(&self) -> Option<&str> {
+        self.backend_id.as_deref()
+    }
+
+    pub fn set_backend_id(&mut self, backend_id: String) {
+        self.backend_id = Some(backend_id);
     }
 
     pub(crate) fn state(&self) -> &TaskState {

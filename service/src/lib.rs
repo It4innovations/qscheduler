@@ -34,9 +34,6 @@ struct AppState {
 struct CreateTaskParams {
     session_id: Option<u64>,
     machine_id: u32,
-    repeats: u32,
-    max_waiting_time_secs: Option<u64>,
-    max_compute_time_secs: u64,
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -96,10 +93,7 @@ fn create_task_config(params: CreateTaskParams, body: Bytes) -> Result<TaskConfi
             .map(SessionId::try_from)
             .transpose()
             .map_err(|_| "Invalid session_id")?,
-        repeats: params.repeats,
-        max_waiting_time: params.max_waiting_time_secs.map(Duration::from_secs),
-        max_compute_time: Duration::from_secs(params.max_compute_time_secs),
-        payload: Arc::from(body.as_ref()),
+        payload: body,
     })
 }
 

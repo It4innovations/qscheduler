@@ -25,26 +25,20 @@ pub(crate) enum QueueItem {
 
 pub struct MachineConfig {
     pub name: String,
+    pub queue_size: usize,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }
 
 struct RunningSession {
     session_id: SessionId,
-    running_task: Option<TaskId>,
     queue: VecDeque<TaskId>,
-}
-
-enum MachineState {
-    Idle,
-    RunningTask(TaskId),
-    RunningSession(RunningSession),
 }
 
 pub(crate) struct Machine {
     machine_id: MachineId,
     queue: VecDeque<QueueItem>,
-    state: MachineState,
+    running_session: Option<RunningSession>,
     config: MachineConfig,
     notifier: Arc<Notify>,
 }
@@ -54,7 +48,7 @@ impl Machine {
         Machine {
             machine_id,
             queue: VecDeque::new(),
-            state: MachineState::Idle,
+            running_session: None,
             config,
             notifier: Arc::new(Notify::new()),
         }
@@ -70,8 +64,8 @@ impl Machine {
 
     pub fn queue_task(&mut self, task: &Task) -> crate::Result<()> {
         if let Some(s_id) = task.config().session_id {
-            match &mut self.state {
-                MachineState::RunningSession(s) if s_id == s.session_id => {
+            match &mut self.running_session {
+                Some(s) if s_id == s.session_id => {
                     s.queue.push_back(task.id());
                 }
                 _ => return Err(RunnerError::NonRunningSession(s_id)),
@@ -87,112 +81,35 @@ impl Machine {
         Ok(())
     }
 
-    pub fn complete_task(&mut self, task_id: TaskId) {
-        match &mut self.state {
-            MachineState::Idle => unreachable!(),
-            MachineState::RunningTask(running_id) => {
-                assert_eq!(*running_id, task_id);
-                self.state = MachineState::Idle;
-            }
-            MachineState::RunningSession(s) => {
-                assert_eq!(s.running_task, Some(task_id));
-                s.running_task = None;
-            }
-        }
-    }
-
     pub fn wake_launcher(&self) {
         self.notifier.notify_one();
     }
 
-    // fn start_task(&mut self, core_ref: &CoreRef, task_map: &mut TaskMap, task_id: TaskId) {
-    //     {
-    //         let task = task_map.get_task_mut(task_id);
-    //         task.set_state(TaskState::Running);
-    //     }
-    //     let core_ref = core_ref.clone();
-    //     tokio::spawn(async move {
-    //         let r = run_task(&core_ref, task_id).await;
-    //         let mut core = core_ref.lock().unwrap();
-    //         let CoreSplitMut { task_map, machine_map, .. } = core.split_mut();
-    //         let task = task_map.get_task_mut(task_id);
-    //         match r {
-    //             Ok(()) => task.set_state(TaskState::Finished),
-    //             Err(e) => task.set_state(TaskState::Failed { error: e.to_string() })
-    //         }
-    //         let machine_id = task.config().machine_id;
-    //         let machine = machine_map.get_machine_mut(machine_id);
-    //         machine.complete_task(task_id);
-    //         machine.try_wake(&core_ref, task_map);
-    //     });
-    // }
-
-    // pub fn try_wake(&mut self, core_ref: &CoreRef, task_map: &mut TaskMap) {
-    //     match &mut self.state {
-    //         MachineState::Idle => {
-    //             match self.queue.pop_front() {
-    //                 Some(QueueItem::Task(task_id)) => {
-    //                     self.state = MachineState::RunningTask(task_id);
-    //                     self.start_task(core_ref, task_map, task_id);
-    //                 }
-    //                 Some(QueueItem::Session(session_id)) => {
-    //                     self.state = MachineState::RunningSession(RunningSession{
-    //                         session_id,
-    //                         running_task: None,
-    //                         queue: VecDeque::new(),
-    //                     });
-    //                 }
-    //                 None => return
-    //             }
-    //         }
-    //         | MachineState::RunningSession(s) if s.running_task.is_none() => {
-    //             if let Some(task_id) = s.queue.pop_front() {
-    //                 s.running_task = Some(task_id);
-    //                 self.start_task(core_ref, task_map, task_id);
-    //             }
-    //         }
-    //         _ => return
-    //     }
-    // }
-
     pub fn start_session(&mut self, session_id: SessionId) {
-        assert!(matches!(self.state, MachineState::Idle));
-        self.state = MachineState::RunningSession(RunningSession {
+        assert!(self.running_session.is_none());
+        self.running_session = Some(RunningSession {
             session_id,
-            running_task: None,
             queue: VecDeque::new(),
         });
     }
 
     pub fn close_session(&mut self) {
-        assert!(matches!(self.state, MachineState::RunningSession(_)));
-        self.state = MachineState::Idle;
+        assert!(self.running_session.is_some());
+        self.running_session = None;
     }
 
     #[inline]
     pub fn pop_session_task(&mut self) -> Option<TaskId> {
-        match self.state {
-            MachineState::RunningSession(ref mut s) => s.queue.pop_front(),
-            _ => None,
-        }
-    }
-
-    pub fn set_running_task(&mut self, task_id: TaskId) {
-        match self.state {
-            MachineState::RunningSession(ref mut s) => {
-                s.running_task = Some(task_id);
-            }
-            MachineState::Idle => {
-                self.state = MachineState::RunningTask(task_id);
-            }
-            MachineState::RunningTask(_) => {
-                unreachable!()
-            }
-        }
+        self.running_session
+            .as_mut()
+            .and_then(|s| s.queue.pop_front())
     }
 
     #[inline]
-    pub fn pop_queue_item(&mut self) -> Option<QueueItem> {
+    pub fn pop_queue_item(&mut self, allow_sessions: bool) -> Option<QueueItem> {
+        if !allow_sessions && let Some(QueueItem::Session(_)) = self.queue.front() {
+            return None;
+        }
         self.queue.pop_front()
     }
 

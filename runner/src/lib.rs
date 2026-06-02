@@ -1,4 +1,6 @@
 mod backend;
+mod backend_iqm;
+mod backend_test;
 mod callback;
 pub mod config;
 pub mod core;

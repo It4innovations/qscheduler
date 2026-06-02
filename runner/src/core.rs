@@ -41,6 +41,7 @@ impl Core {
                 machine_id,
                 MachineConfig {
                     name: m.name,
+                    queue_size: m.queue_size,
                     notify: m.notify,
                     backend: m.backend,
                 },
@@ -67,12 +68,7 @@ impl Core {
     pub(crate) fn start_launchers(&self) {
         let core_ref = self.core_ref.as_ref().unwrap();
         for m in self.machine_map.iter() {
-            start_launcher(
-                core_ref,
-                m.id(),
-                &m.config().backend,
-                m.config().notify.as_ref(),
-            )
+            start_launcher(core_ref, m.id(), m.config())
         }
     }
 
