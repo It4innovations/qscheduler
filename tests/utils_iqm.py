@@ -42,6 +42,13 @@ class IqmFakeBackend:
         self.machine_name = "start24"
         self.token = "test-token-1234"
 
+    def _check_auth(self, request):
+        expected = f"Bearer {self.token}"
+        return request.headers.get("Authorization") == expected
+
+    def _auth_error(self):
+        return Response("Unauthorized", status=401)
+
     def start(self):
         self.httpserver.expect_request(
             f"/api/v1/jobs/{self.machine_name}/circuit",
@@ -49,6 +56,8 @@ class IqmFakeBackend:
         ).respond_with_handler(self._handle_submit)
 
     def _handle_submit(self, request):
+        if not self._check_auth(request):
+            return self._auth_error()
         config = request.json
         submit_time = config.get("submit_time")
         if submit_time is not None:
@@ -59,12 +68,16 @@ class IqmFakeBackend:
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}",
             method="GET",
-        ).respond_with_handler(lambda request: make_result(task.status()))
+        ).respond_with_handler(
+            lambda request: self._auth_error() if not self._check_auth(request) else make_result(task.status())
+        )
 
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}/cancel",
             method="POST",
-        ).respond_with_handler(lambda request: task.cancel())
+        ).respond_with_handler(
+            lambda request: self._auth_error() if not self._check_auth(request) else make_result(task.cancel() or {})
+        )
 
         return make_result({"id": task_id})
 
