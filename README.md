@@ -28,7 +28,7 @@ The service is configured with a single TOML file passed as a command-line argum
 |-------|------|----------|-------------|
 | `log` | string | no | Path to a log file. If omitted, logs are written to stdout. |
 | `[service]` | table | yes | HTTP service settings (see below). |
-| `[[machines]]` | array of tables | yes | One entry per execution target (see below). |
+| `[[machines]]` | array of tables | yes | One or more execution targets (see below). |
 
 ### `[service]`
 
@@ -44,23 +44,54 @@ Each machine represents one execution target. Multiple `[[machines]]` entries ar
 |-------|------|----------|-------------|
 | `id` | integer | yes | Unique machine ID referenced when submitting tasks. |
 | `name` | string | yes | Human-readable label (used in logs). |
-| `backend` | string or table | yes | Backend type. See [Backends](#backends). |
-| `notify` | table | no | Callback configuration for task completion events. See [Notifications](#notifications). |
+| `queue_size` | integer | yes | Maximum number of tasks that can be queued on this machine. |
+| `[machines.backend]` | table | yes | Backend configuration. See [Backends](#backends). |
+| `[machines.notify]` | table | no | Callback configuration for task completion events. See [Notifications](#notifications). |
 
 ### Backends
 
-**`Test`** — in-process test backend.
+The backend is configured as a TOML table with a `type` field.
+
+**`test`** — in-process test backend. Useful for development and integration testing.
 
 ```toml
-backend = "Test"
+[machines.backend]
+type = "test"
 ```
 
 The task payload must be a JSON object:
 
 ```json
 {"result": {"type": "Ok"}}
-{"result": {"type": "Fail", "message": "error text"}, "wait": 1.5}
+{"result": {"type": "Fail", "message": "error text"}, "submit_time": 0.5, "compute_time": 1.5}
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `result` | object | yes | Either `{"type": "Ok"}` or `{"type": "Fail", "message": "..."}`. |
+| `submit_time` | float | no | Seconds to wait before acknowledging submission (default: 0). |
+| `compute_time` | float | no | Seconds to wait before reporting the final result (default: 0). |
+
+---
+
+**`iqm`** — IQM quantum computing backend.
+
+```toml
+[machines.backend]
+type = "iqm"
+url = "https://example.iqm.fi"
+token = "your-bearer-token"
+machine_name = "star24"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `url` | string | yes | Base URL of the IQM service. |
+| `token` | string | yes | Bearer token for authentication. |
+| `machine_name` | string | yes | Name of the target quantum device. |
+| `check_interval_ms` | integer | no | Polling interval in milliseconds for job status (default: 1000). |
+
+The task payload must be a JSON circuit description accepted by the IQM API (`POST /api/v1/jobs/{machine_name}/circuit`).
 
 
 ### Notifications
@@ -95,11 +126,25 @@ port = 3000
 [[machines]]
 id = 1
 name = "SimulatorMachine"
-backend = "Test"
+queue_size = 4
+
+[machines.backend]
+type = "test"
 
 [machines.notify]
 url = "https://my-app.example.com/callbacks/qscheduler"
 token = "supersecret"
+
+[[machines]]
+id = 2
+name = "QuantumDevice"
+queue_size = 2
+
+[machines.backend]
+type = "iqm"
+url = "https://example.iqm.fi"
+token = "your-bearer-token"
+machine_name = "star24"
 ```
 
 ## API
