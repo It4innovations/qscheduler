@@ -160,6 +160,9 @@ async fn create_session_handler(
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
 
+// TODO: GET /machine/<machine_id>/arch call get_arch from backend of the machine
+// TODO: GET /machine/<machine_id>/calibration/<calibration>/<endpoint> call get_calibration from backend of the machine
+
 #[derive(OpenApi)]
 struct ApiDoc;
 

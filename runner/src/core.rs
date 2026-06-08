@@ -4,6 +4,8 @@ use crate::machine::{Machine, MachineConfig, MachineId, MachineMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskMap, TaskState};
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+use crate::backend::create_backend;
 
 #[allow(dead_code)]
 pub(crate) struct CoreSplit<'a> {
@@ -35,8 +37,10 @@ pub type CoreRef = Arc<Mutex<Core>>;
 impl Core {
     pub fn new(config: RunnerConfiguration) -> CoreRef {
         let mut machine_map: MachineMap = Default::default();
+        let mut backends = Vec::with_capacity(config.machines.len());
         for m in config.machines {
             let machine_id = MachineId::from(m.id);
+            let (backend, backend_receiver) = create_backend(&m.backend);
             machine_map.insert(Machine::new(
                 machine_id,
                 MachineConfig {
@@ -45,7 +49,9 @@ impl Core {
                     notify: m.notify,
                     backend: m.backend,
                 },
+                backend.clone()
             ));
+            backends.push((backend, backend_receiver));
         }
         let core_ref = Arc::new(Mutex::new(Core {
             machine_map,
@@ -129,6 +135,11 @@ impl Core {
 
     pub fn session_state(&self, session_id: SessionId) -> Option<SessionState> {
         self.session_map.find_session(session_id).map(|s| s.state)
+    }
+
+    pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+        let machine = self.machine_map.find_machine(machine_id)?;
+        todo!()
     }
 
     // pub(crate) fn get_task(&self, task_id: TaskId) -> &Task {

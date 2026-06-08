@@ -6,11 +6,13 @@ use reqwest::{Method, RequestBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::select;
-use tokio::sync::mpsc;
+use tokio::{select, spawn};
+use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot::Receiver;
 use tokio::time::{MissedTickBehavior, sleep};
 use tracing::{debug, log};
+use crate::error::RunnerError;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IqmBackendConfig {
@@ -66,7 +68,7 @@ impl Backend for IqmBackend {
         tokio::spawn(async move {
             let url = &format!("{}/cancel", backend_id);
             for _ in 0..10 {
-                let builder = backend.inner.setup_request(Method::POST, url, false);
+                let builder = backend.inner.setup_job_request(Method::POST, url, false);
                 let result = builder.send().await;
                 match result {
                     Ok(resp) if resp.status().is_success() => {
@@ -91,7 +93,7 @@ impl Backend for IqmBackend {
         let backend = self.clone();
         tokio::spawn(async move {
             let url = &format!("{}/circuit", backend.inner.config.machine_name);
-            let builder = backend.inner.setup_request(Method::POST, url, true);
+            let builder = backend.inner.setup_job_request(Method::POST, url, true);
             log::debug!("Connecting to {url}");
             let result = builder.body(payload).send().await;
             match result {
@@ -138,17 +140,60 @@ impl Backend for IqmBackend {
             }
         });
     }
+
+    fn get_arch(&self) -> oneshot::Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let request = self
+            .inner
+            .setup_qc_request(Method::GET, "artifacts/static-quantum-architectures");
+        fetch_to_oneshot(request, sx);
+        rx
+    }
+
+    fn get_calibration(&self, calibration_id: &str, end_point: &str) -> Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let request = self
+            .inner
+            .setup_calibration_request(Method::GET, calibration_id, end_point);
+        fetch_to_oneshot(request, sx);
+        rx
+    }
 }
 
 impl IqmBackendInner {
-    pub fn setup_request(
+
+    pub fn setup_qc_request(&self, method: Method, end_point: &str) -> RequestBuilder {
+        let url = format!(
+            "{}/api/v1/quantum-computers/{}/{}",
+            self.config.url, self.config.machine_name, end_point
+        );
+        debug!(%method, %url, "IQM QC request");
+        self.client
+            .request(method, &url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+    }
+
+    pub fn setup_calibration_request(&self, method: Method, calibration_id: &str, end_point: &str) -> RequestBuilder {
+        let url = format!(
+            "{}/api/v1/calibration-sets/{}/{}/{}",
+            self.config.url, self.config.machine_name, calibration_id, end_point
+        );
+        debug!(%method, %url, "IQM calibration request");
+        self.client
+            .request(method, &url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json")
+    }
+
+    pub fn setup_job_request(
         &self,
         method: Method,
         end_point: &str,
         content_type: bool,
     ) -> RequestBuilder {
         let url = format!("{}/api/v1/jobs/{}", self.config.url, end_point);
-        debug!(%method, %url, "IQM request");
+        debug!(%method, %url, "IQM job request");
         let mut builder = self
             .client
             .request(method, &url)
@@ -169,6 +214,28 @@ impl IqmBackendInner {
             .backend_sender
             .send(FromBackendMessage::TaskStateChange { task_id, state });
     }
+}
+
+fn fetch_to_oneshot(request: RequestBuilder, sx: oneshot::Sender<crate::Result<String>>) {
+    spawn(async move {
+        let result = match request.send().await {
+            Err(e) => Err(RunnerError::GenericError(format!("IQM request failed: {e}"))),
+            Ok(resp) => {
+                let http_status = resp.status();
+                if !http_status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(RunnerError::GenericError(format!(
+                        "IQM backend HTTP {http_status}: {body}"
+                    )))
+                } else {
+                    resp.text().await.map_err(|e| {
+                        RunnerError::GenericError(format!("Failed to read IQM response: {e}"))
+                    })
+                }
+            }
+        };
+        let _ = sx.send(result);
+    });
 }
 
 pub fn start_iqm_backend(
@@ -223,7 +290,7 @@ async fn iqm_main(backend: IqmBackend, mut monitor_receiver: UnboundedReceiver<M
             _ = interval.tick(), if !monitored_tasks.is_empty() => {
                 to_delete.clear();
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
-                    let request = backend.inner.setup_request(Method::GET, &task.iqm_task_id, false);
+                    let request = backend.inner.setup_job_request(Method::GET, &task.iqm_task_id, false);
                     let result = request.send().await;
                     if let Some(new_state) = process_result(task, result).await {
                         if !matches!(&new_state, TaskState::Running) {

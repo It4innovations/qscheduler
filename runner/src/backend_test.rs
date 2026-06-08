@@ -5,8 +5,10 @@ use bytes::Bytes;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot::Receiver;
+use crate::error::RunnerError;
 
 struct TestBackend {
     backend_sender: UnboundedSender<FromBackendMessage>,
@@ -81,6 +83,18 @@ impl Backend for TestBackend {
                 state: new_state,
             });
         });
+    }
+
+    fn get_arch(&self) -> Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let _ = sx.send(Ok("{\"arch\": \"Test\"}".to_string()));
+        rx
+    }
+
+    fn get_calibration(&self, _calibration_id: &str, _endpoint: &str) -> Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let _ = sx.send(Err(RunnerError::GenericError("get_calibration not supported by test backend".to_string())));
+        rx
     }
 }
 

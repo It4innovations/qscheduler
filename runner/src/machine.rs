@@ -1,4 +1,4 @@
-use crate::backend::BackendConfig;
+use crate::backend::{Backend, BackendConfig};
 use crate::callback::NotifyConfig;
 use crate::error::RunnerError;
 use crate::session::{Session, SessionId};
@@ -41,16 +41,18 @@ pub(crate) struct Machine {
     running_session: Option<RunningSession>,
     config: MachineConfig,
     notifier: Arc<Notify>,
+    backend: Box<dyn Backend>,
 }
 
 impl Machine {
-    pub fn new(machine_id: MachineId, config: MachineConfig) -> Self {
+    pub fn new(machine_id: MachineId, config: MachineConfig, backend: Box<dyn Backend>) -> Self {
         Machine {
             machine_id,
             queue: VecDeque::new(),
             running_session: None,
             config,
             notifier: Arc::new(Notify::new()),
+            backend
         }
     }
 
@@ -128,11 +130,11 @@ impl From<u32> for MachineId {
 pub(crate) struct MachineMap(HashMap<MachineId, Machine>);
 
 impl MachineMap {
-    // pub fn find_machine(&self, machine_id: MachineId) -> crate::Result<&Machine> {
-    //     self.0
-    //         .get(&machine_id)
-    //         .ok_or(RunnerError::InvalidMachine(machine_id))
-    // }
+    pub fn find_machine(&self, machine_id: MachineId) -> crate::Result<&Machine> {
+        self.0
+            .get(&machine_id)
+            .ok_or(RunnerError::InvalidMachine(machine_id))
+    }
     pub fn find_machine_mut(&mut self, machine_id: MachineId) -> crate::Result<&mut Machine> {
         self.0
             .get_mut(&machine_id)
