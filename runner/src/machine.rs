@@ -41,11 +41,11 @@ pub(crate) struct Machine {
     running_session: Option<RunningSession>,
     config: MachineConfig,
     notifier: Arc<Notify>,
-    backend: Box<dyn Backend>,
+    backend: Arc<dyn Backend>,
 }
 
 impl Machine {
-    pub fn new(machine_id: MachineId, config: MachineConfig, backend: Box<dyn Backend>) -> Self {
+    pub fn new(machine_id: MachineId, config: MachineConfig, backend: Arc<dyn Backend>) -> Self {
         Machine {
             machine_id,
             queue: VecDeque::new(),
@@ -62,6 +62,10 @@ impl Machine {
 
     pub fn config(&self) -> &MachineConfig {
         &self.config
+    }
+
+    pub fn backend(&self) -> &Arc<dyn Backend> {
+        &self.backend
     }
 
     pub fn queue_task(&mut self, task: &Task) -> crate::Result<()> {

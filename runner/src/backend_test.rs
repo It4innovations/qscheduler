@@ -32,7 +32,7 @@ struct TestBackendTaskBody {
 }
 
 impl Backend for TestBackend {
-    fn cancel_task(&self, task_id: TaskId, _backend_id: &str) {
+    fn cancel_task(self: Arc<Self>, task_id: TaskId, _backend_id: &str) {
         self.cancelled_tasks.lock().unwrap().insert(task_id);
         let _ = self
             .backend_sender
@@ -42,7 +42,7 @@ impl Backend for TestBackend {
             });
     }
 
-    fn submit_task(&self, task_id: TaskId, payload: Bytes) {
+    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
         let sender = self.backend_sender.clone();
         let cancelled_tasks = self.cancelled_tasks.clone();
         tokio::spawn(async move {
@@ -85,24 +85,24 @@ impl Backend for TestBackend {
         });
     }
 
-    fn get_arch(&self) -> Receiver<crate::Result<String>> {
+    fn get_arch(self: Arc<Self>) -> Receiver<crate::Result<String>> {
         let (sx, rx) = oneshot::channel();
         let _ = sx.send(Ok("{\"arch\": \"Test\"}".to_string()));
         rx
     }
 
-    fn get_calibration(&self, _calibration_id: &str, _endpoint: &str) -> Receiver<crate::Result<String>> {
+    fn get_calibration(self: Arc<Self>, _calibration_id: &str, _endpoint: &str) -> Receiver<crate::Result<String>> {
         let (sx, rx) = oneshot::channel();
         let _ = sx.send(Err(RunnerError::GenericError("get_calibration not supported by test backend".to_string())));
         rx
     }
 }
 
-pub fn start_test_backend() -> (Box<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
+pub fn start_test_backend() -> (Arc<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
     let (b_sender, b_receiver) = mpsc::unbounded_channel();
     let backend = TestBackend {
         backend_sender: b_sender,
         cancelled_tasks: Arc::new(Mutex::new(HashSet::new())),
     };
-    (Box::new(backend), b_receiver)
+    (Arc::new(backend) as Arc<dyn Backend>, b_receiver)
 }

@@ -139,7 +139,12 @@ impl Core {
 
     pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
         let machine = self.machine_map.find_machine(machine_id)?;
-        todo!()
+        Ok(Arc::clone(machine.backend()).get_arch())
+    }
+
+    pub fn get_calibration(&self, machine_id: MachineId, calibration_id: &str, endpoint: &str) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+        let machine = self.machine_map.find_machine(machine_id)?;
+        Ok(Arc::clone(machine.backend()).get_calibration(calibration_id, endpoint))
     }
 
     // pub(crate) fn get_task(&self, task_id: TaskId) -> &Task {

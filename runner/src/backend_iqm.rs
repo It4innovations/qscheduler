@@ -27,21 +27,16 @@ fn check_interval_default() -> u32 {
     1000
 }
 
-struct IqmBackendInner {
-    config: IqmBackendConfig,
-    client: reqwest::Client,
-    backend_sender: UnboundedSender<FromBackendMessage>,
-    monitor_sender: UnboundedSender<MonitorCommand>,
-}
-
 enum MonitorCommand {
     NewTask { task_id: TaskId, backend_id: String },
     UnregisterTask { task_id: TaskId },
 }
 
-#[derive(Clone)]
 struct IqmBackend {
-    inner: Arc<IqmBackendInner>,
+    config: IqmBackendConfig,
+    client: reqwest::Client,
+    backend_sender: UnboundedSender<FromBackendMessage>,
+    monitor_sender: UnboundedSender<MonitorCommand>,
 }
 
 #[derive(Deserialize)]
@@ -62,13 +57,12 @@ struct JobStatusResponse {
 }
 
 impl Backend for IqmBackend {
-    fn cancel_task(&self, task_id: TaskId, backend_id: &str) {
-        let backend = self.clone();
+    fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str) {
         let backend_id = backend_id.to_string();
         tokio::spawn(async move {
             let url = &format!("{}/cancel", backend_id);
             for _ in 0..10 {
-                let builder = backend.inner.setup_job_request(Method::POST, url, false);
+                let builder = self.setup_job_request(Method::POST, url, false);
                 let result = builder.send().await;
                 match result {
                     Ok(resp) if resp.status().is_success() => {
@@ -82,29 +76,26 @@ impl Backend for IqmBackend {
                 sleep(Duration::from_millis(2000)).await;
             }
             log::error!("Failed to cancel task from backend");
-            let _ = backend
-                .inner
+            let _ = self
                 .monitor_sender
                 .send(MonitorCommand::UnregisterTask { task_id });
         });
     }
 
-    fn submit_task(&self, task_id: TaskId, payload: Bytes) {
-        let backend = self.clone();
+    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
         tokio::spawn(async move {
-            let url = &format!("{}/circuit", backend.inner.config.machine_name);
-            let builder = backend.inner.setup_job_request(Method::POST, url, true);
+            let url = &format!("{}/circuit", self.config.machine_name);
+            let builder = self.setup_job_request(Method::POST, url, true);
             log::debug!("Connecting to {url}");
             let result = builder.body(payload).send().await;
             match result {
-                Err(e) => backend
-                    .inner
+                Err(e) => self
                     .send_task_error(task_id, format!("IQM request failed: {}", e)),
                 Ok(resp) => {
                     let http_status = resp.status();
                     if !http_status.is_success() {
                         let body = resp.text().await.unwrap_or_default();
-                        backend.inner.send_task_error(
+                        self.send_task_error(
                             task_id,
                             format!("IQM backend HTTP {}: {}", http_status, body),
                         );
@@ -112,22 +103,20 @@ impl Backend for IqmBackend {
                     }
                     match resp.json::<IdField>().await {
                         Err(e) => {
-                            backend.inner.send_task_error(
+                            self.send_task_error(
                                 task_id,
                                 format!("Parsing IQM backend failed: {e}"),
                             );
                         }
                         Ok(id_field) => {
-                            backend
-                                .inner
+                            self
                                 .backend_sender
                                 .send(FromBackendMessage::TaskSubmitted {
                                     task_id,
                                     backend_task_id: id_field.id.clone(),
                                 })
                                 .unwrap();
-                            backend
-                                .inner
+                            self
                                 .monitor_sender
                                 .send(MonitorCommand::NewTask {
                                     task_id,
@@ -141,26 +130,24 @@ impl Backend for IqmBackend {
         });
     }
 
-    fn get_arch(&self) -> oneshot::Receiver<crate::Result<String>> {
+    fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>> {
         let (sx, rx) = oneshot::channel();
         let request = self
-            .inner
             .setup_qc_request(Method::GET, "artifacts/static-quantum-architectures");
         fetch_to_oneshot(request, sx);
         rx
     }
 
-    fn get_calibration(&self, calibration_id: &str, end_point: &str) -> Receiver<crate::Result<String>> {
+    fn get_calibration(self: Arc<Self>, calibration_id: &str, end_point: &str) -> Receiver<crate::Result<String>> {
         let (sx, rx) = oneshot::channel();
         let request = self
-            .inner
             .setup_calibration_request(Method::GET, calibration_id, end_point);
         fetch_to_oneshot(request, sx);
         rx
     }
 }
 
-impl IqmBackendInner {
+impl IqmBackend {
 
     pub fn setup_qc_request(&self, method: Method, end_point: &str) -> RequestBuilder {
         let url = format!(
@@ -240,22 +227,20 @@ fn fetch_to_oneshot(request: RequestBuilder, sx: oneshot::Sender<crate::Result<S
 
 pub fn start_iqm_backend(
     config: &IqmBackendConfig,
-) -> (Box<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
+) -> (Arc<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
     let (b_sender, b_receiver) = mpsc::unbounded_channel();
     let (m_sender, m_receiver) = mpsc::unbounded_channel();
-    let backend = IqmBackend {
-        inner: Arc::new(IqmBackendInner {
+    let backend = Arc::new(IqmBackend {
             backend_sender: b_sender,
             monitor_sender: m_sender,
             config: config.clone(),
             client: reqwest::Client::new(),
-        }),
-    };
+    });
     let backend2 = backend.clone();
     tokio::spawn(async move {
         iqm_main(backend2, m_receiver).await;
     });
-    (Box::new(backend), b_receiver)
+    (backend, b_receiver)
 }
 
 struct MonitoredTask {
@@ -266,10 +251,10 @@ struct MonitoredTask {
 
 const MAX_FAILS: u32 = 120;
 
-async fn iqm_main(backend: IqmBackend, mut monitor_receiver: UnboundedReceiver<MonitorCommand>) {
+async fn iqm_main(backend: Arc<IqmBackend>, mut monitor_receiver: UnboundedReceiver<MonitorCommand>) {
     let mut monitored_tasks: Vec<MonitoredTask> = Vec::new();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(
-        backend.inner.config.check_interval_ms.into(),
+        backend.config.check_interval_ms.into(),
     ));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate first tick
@@ -290,13 +275,13 @@ async fn iqm_main(backend: IqmBackend, mut monitor_receiver: UnboundedReceiver<M
             _ = interval.tick(), if !monitored_tasks.is_empty() => {
                 to_delete.clear();
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
-                    let request = backend.inner.setup_job_request(Method::GET, &task.iqm_task_id, false);
+                    let request = backend.setup_job_request(Method::GET, &task.iqm_task_id, false);
                     let result = request.send().await;
                     if let Some(new_state) = process_result(task, result).await {
                         if !matches!(&new_state, TaskState::Running) {
                             to_delete.push(idx);
                         }
-                        let _ = backend.inner.backend_sender.send(FromBackendMessage::TaskStateChange {
+                        let _ = backend.backend_sender.send(FromBackendMessage::TaskStateChange {
                             task_id: task.task_id,
                             state: new_state,
                         });

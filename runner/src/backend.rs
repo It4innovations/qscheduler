@@ -18,10 +18,10 @@ use crate::backend_test::start_test_backend;
 use crate::task::TaskState;
 
 pub(crate) trait Backend: Send + Sync {
-    fn submit_task(&self, task_id: TaskId, payload: Bytes);
-    fn cancel_task(&self, task_id: TaskId, backend_id: &str);
-    fn get_arch(&self) -> oneshot::Receiver<crate::Result<String>>;
-    fn get_calibration(&self, calibration_id: &str, endpoint: &str) -> oneshot::Receiver<crate::Result<String>>;
+    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes);
+    fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str);
+    fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>>;
+    fn get_calibration(self: Arc<Self>, calibration_id: &str, endpoint: &str) -> oneshot::Receiver<crate::Result<String>>;
 }
 
 pub(crate) enum FromBackendMessage {
@@ -37,7 +37,7 @@ pub(crate) enum FromBackendMessage {
 
 pub fn create_backend(
     config: &BackendConfig,
-) -> (Box<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
+) -> (Arc<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
     match config {
         BackendConfig::Iqm(config) => start_iqm_backend(config),
         BackendConfig::Test => start_test_backend(),

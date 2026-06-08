@@ -7,6 +7,7 @@ use crate::{MachineId, SessionId, SessionState, TaskId};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::pending;
+use std::sync::Arc;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, sleep_until};
@@ -103,7 +104,7 @@ enum LauncherEvent {
 async fn launcher_main(
     core_ref: CoreRef,
     machine_id: MachineId,
-    backend: Box<dyn Backend>,
+    backend: Arc<dyn Backend>,
     mut backend_receiver: UnboundedReceiver<FromBackendMessage>,
     notify_sender: Option<UnboundedSender<NotifyEvent>>,
 ) {
@@ -149,7 +150,7 @@ async fn launcher_main(
                         let task = task_map.get_task_mut(*task_id);
                         if let Some(backend_id) = task.backend_id() {
                             debug!(%task_id, "Cancelling submitted task");
-                            backend.cancel_task(*task_id, backend_id);
+                            Arc::clone(&backend).cancel_task(*task_id, backend_id);
                         } else {
                             debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
                         }
@@ -181,7 +182,7 @@ async fn launcher_main(
                         task.set_backend_id(backend_task_id);
                     } else {
                         debug!(task_id = %task_id, "Finished submitting of already canceled task");
-                        backend.cancel_task(task_id, &backend_task_id);
+                        Arc::clone(&backend).cancel_task(task_id, &backend_task_id);
                     }
                 }
                 FromBackendMessage::TaskStateChange { task_id, state } => {
@@ -211,7 +212,7 @@ async fn launcher_main(
                 submitted_tasks.is_empty(),
             )
         {
-            backend.submit_task(task_id, payload);
+            backend.clone().submit_task(task_id, payload);
             submitted_tasks.insert(task_id, false);
         }
     }

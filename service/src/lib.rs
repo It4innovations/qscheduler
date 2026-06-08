@@ -160,8 +160,70 @@ async fn create_session_handler(
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
 
-// TODO: GET /machine/<machine_id>/arch call get_arch from backend of the machine
-// TODO: GET /machine/<machine_id>/calibration/<calibration>/<endpoint> call get_calibration from backend of the machine
+#[utoipa::path(
+    get,
+    path = "/machine/{machine_id}/arch",
+    params(("machine_id" = u32, Path, description = "Machine ID")),
+    responses(
+        (status = 200, description = "Architecture JSON", body = String),
+        (status = 404, description = "Machine not found"),
+        (status = 500, description = "Backend error")
+    )
+)]
+async fn get_machine_arch(
+    State(state): State<Arc<AppState>>,
+    Path(machine_id): Path<u32>,
+) -> Result<String, (StatusCode, String)> {
+    let receiver = {
+        let core = state.core.lock().unwrap();
+        core.get_arch(MachineId::from(machine_id)).map_err(|e| {
+            let status = match &e {
+                RunnerError::InvalidMachine(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?
+    };
+    receiver
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "backend channel closed".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/machine/{machine_id}/calibration/{calibration}/{endpoint}",
+    params(
+        ("machine_id" = u32, Path, description = "Machine ID"),
+        ("calibration" = String, Path, description = "Calibration name"),
+        ("endpoint" = String, Path, description = "Endpoint")
+    ),
+    responses(
+        (status = 200, description = "Calibration JSON", body = String),
+        (status = 404, description = "Machine not found"),
+        (status = 500, description = "Backend error")
+    )
+)]
+async fn get_machine_calibration(
+    State(state): State<Arc<AppState>>,
+    Path((machine_id, calibration, endpoint)): Path<(u32, String, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let receiver = {
+        let core = state.core.lock().unwrap();
+        core.get_calibration(MachineId::from(machine_id), &calibration, &endpoint)
+            .map_err(|e| {
+                let status = match &e {
+                    RunnerError::InvalidMachine(_) => StatusCode::NOT_FOUND,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (status, e.to_string())
+            })?
+    };
+    receiver
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "backend channel closed".to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
 
 #[derive(OpenApi)]
 struct ApiDoc;
@@ -182,6 +244,8 @@ pub async fn run(
         .routes(routes!(get_task))
         .routes(routes!(get_session))
         .routes(routes!(create_session_handler))
+        .routes(routes!(get_machine_arch))
+        .routes(routes!(get_machine_calibration))
         .with_state(state)
         .split_for_parts();
 
