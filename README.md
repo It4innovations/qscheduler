@@ -18,6 +18,8 @@ The service is configured via a TOML file.
 docker run -it --network host -v ./test.toml:/config.toml qscheduler /config.toml
 ```
 
+Once running, the OpenAPI spec is served at `GET /api-docs/openapi.json`.
+
 ## Configuration TOML
 
 The service is configured with a single TOML file passed as a command-line argument.
