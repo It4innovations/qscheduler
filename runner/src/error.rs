@@ -12,6 +12,16 @@ pub enum RunnerError {
     NonRunningSession(SessionId),
     #[error("Task fails with: {0}")]
     TaskFail(String),
+    #[error("Machine '{0}' already exists")]
+    MachineAlreadyExists(String),
+    #[error("Project '{0}' already exists")]
+    ProjectAlreadyExists(String),
+    #[error("Project '{0}' not found")]
+    ProjectNotFound(String),
+    #[error("Project '{0}' has exceeded its time limit")]
+    ProjectLimitExceeded(String),
+    #[error("Database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
 
     #[error("Error: {0}")]
     GenericError(String),

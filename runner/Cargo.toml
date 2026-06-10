@@ -11,4 +11,5 @@ tracing    = { workspace = true }
 reqwest    = { workspace = true, features = ["multipart", "json"] }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "macros", "uuid"] }
+sqlx = { workspace = true, features = ["macros", "uuid", "migrate"] }
+chrono = { workspace = true }

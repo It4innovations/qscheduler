@@ -20,6 +20,18 @@ docker run -it --network host -v ./test.toml:/config.toml qscheduler /config.tom
 
 Once running, the OpenAPI spec is served at `GET /api-docs/openapi.json`.
 
+## Database
+
+The service requires the `DATABASE_URL` environment variable set to a PostgreSQL connection string:
+
+```
+DATABASE_URL=postgres://user:password@host/dbname
+```
+
+The database schema is created automatically on startup; no manual migration step is needed.
+
+> **Local development:** A `compose.yml` is included. Run `docker compose up -d` to start a local PostgreSQL instance.
+
 ## Configuration TOML
 
 The service is configured with a single TOML file passed as a command-line argument.

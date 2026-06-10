@@ -1,12 +1,105 @@
-use crate::core::Core;
+use std::time::Duration;
+use crate::core::{Core, CoreRef};
+use crate::db;
+use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
-use std::sync::{Arc, Mutex};
 
-pub fn submit_task(core: Arc<Mutex<Core>>, config: TaskConfig) -> crate::Result<TaskId> {
-    core.lock().unwrap().add_task(config)
+pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
+    tracing::debug!("Submitting task");
+    let pool = {
+        let core = core_ref.lock().unwrap();
+        core.validate_task_config(&config)?;
+        core.pool().clone()
+    };
+    let task_id = db::insert_task(&pool, &config).await?;
+    tracing::debug!(%task_id, "New task");
+    let result = core_ref.lock().unwrap().add_task(task_id, config);
+    if result.is_err() {
+        tracing::debug!("Deleting task after failed submit");
+        db::delete_task(&pool, task_id).await;
+    }
+    result
 }
 
-pub fn create_session(core: Arc<Mutex<Core>>, config: SessionConfig) -> crate::Result<SessionId> {
-    core.lock().unwrap().add_session(config)
+pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate::Result<SessionId> {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    let session_id = db::insert_session(&pool, &config).await?;
+    tracing::debug!(%session_id, "New session");
+    let result = core_ref.lock().unwrap().add_session(session_id, config);
+    if result.is_err() {
+        tracing::debug!("Deleting session after failed submit");
+        db::delete_session(&pool, session_id).await;
+    }
+    result
+}
+
+pub async fn create_project(
+    core_ref: &CoreRef,
+    name: String,
+    active: bool,
+    limit: Duration,
+) -> crate::Result<ProjectId> {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    tracing::debug!(name, active_ms=active, limit_ms=limit.as_millis(), "New project");
+    let id = db::insert_project(&pool, name.as_str(), active, limit).await?;
+    let mut core = core_ref.lock().unwrap();
+    if core.split().project_map.find_project_by_name(&name).is_none() {
+        core.split_mut().project_map.add_project(Project {
+            id,
+            name,
+            active,
+            consumed: Duration::ZERO,
+            limit,
+        });
+    }
+    Ok(id)
+}
+
+pub async fn list_projects(core_ref: &CoreRef) -> crate::Result<Vec<Project>> {
+    tracing::debug!("Listing projects");
+    let pool = core_ref.lock().unwrap().pool().clone();
+    db::list_projects(&pool).await
+}
+
+pub async fn get_project_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<Option<Project>> {
+    let cached = {
+        let core = core_ref.lock().unwrap();
+        let map = &core.split().project_map;
+        map.find_project_by_name(name).cloned()
+    };
+    if let Some(project) = cached {
+        return Ok(Some(project));
+    }
+    let pool = core_ref.lock().unwrap().pool().clone();
+    let project = db::find_project_by_name(&pool, name).await?;
+    if let Some(p) = &project {
+        let mut core = core_ref.lock().unwrap();
+        // Re-check under lock: project may have been cached (and updated) while we
+        // were fetching from DB. Prefer the cached version to avoid overwriting a
+        // more recent consumed value with a stale one from the DB read.
+        if let Some(cached) = core.split().project_map.find_project_by_name(name).cloned() {
+            return Ok(Some(cached));
+        }
+        core.split_mut().project_map.add_project(p.clone());
+    }
+    Ok(project)
+}
+
+pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<ProjectId> {
+    let cached = core_ref.lock().unwrap().split().project_map.find_project_id_by_name(name);
+    match cached {
+        Some(id) => Ok(id),
+        None => {
+            let pool = core_ref.lock().unwrap().pool().clone();
+            let project = db::find_project_by_name(&pool, name).await?
+                .ok_or_else(|| crate::error::RunnerError::ProjectNotFound(name.to_string()))?;
+            let id = project.id;
+            let mut core = core_ref.lock().unwrap();
+            if core.split().project_map.find_project_id_by_name(name).is_none() {
+                core.split_mut().project_map.add_project(project);
+            }
+            Ok(id)
+        }
+    }
 }

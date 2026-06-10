@@ -2,6 +2,7 @@ use crate::TaskId;
 use crate::backend::{Backend, FromBackendMessage};
 use crate::task::TaskState;
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use reqwest::{Method, RequestBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -14,17 +15,12 @@ use tokio::time::{MissedTickBehavior, sleep};
 use tracing::{debug, log};
 use crate::error::RunnerError;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct IqmBackendConfig {
     pub url: String,
     pub token: String,
     pub machine_name: String,
-    #[serde(default = "check_interval_default")]
-    pub check_interval_ms: u32,
-}
-
-fn check_interval_default() -> u32 {
-    1000
+    pub check_interval: Duration,
 }
 
 enum MonitorCommand {
@@ -50,10 +46,37 @@ struct JobError {
 }
 
 #[derive(Deserialize)]
+struct TimelineEntry {
+    status: String,
+    timestamp: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Default)]
+struct JobData {
+    #[serde(default)]
+    timeline: Vec<TimelineEntry>,
+}
+
+#[derive(Deserialize)]
 struct JobStatusResponse {
     status: String,
     #[serde(default)]
     errors: Vec<JobError>,
+    #[serde(default)]
+    data: JobData,
+}
+
+impl JobStatusResponse {
+    fn get_exec_time(&self) -> Option<Duration> {
+        let timeline = &self.data.timeline;
+        let start_idx = timeline.iter().position(|e| e.status == "execution_started")?;
+        let started = &timeline[start_idx];
+        let ended = timeline[start_idx + 1..].iter().find(|e| {
+            e.status == "execution_ended" || e.status == "cancelled" || e.status == "failed"
+        })?;
+        let diff = ended.timestamp - started.timestamp;
+        diff.to_std().ok()
+    }
 }
 
 impl Backend for IqmBackend {
@@ -80,6 +103,15 @@ impl Backend for IqmBackend {
                 .monitor_sender
                 .send(MonitorCommand::UnregisterTask { task_id });
         });
+    }
+
+    fn resume_task(self: Arc<Self>, task_id: TaskId, backend_id: String, _payload: Bytes) {
+        // The job already exists on the backend; re-register it for polling so the
+        // monitor reconciles its current state. Do not re-submit the circuit.
+        debug!(%task_id, %backend_id, "Resuming monitoring of IQM job");
+        let _ = self
+            .monitor_sender
+            .send(MonitorCommand::NewTask { task_id, backend_id });
     }
 
     fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
@@ -193,13 +225,13 @@ impl IqmBackend {
     }
 
     pub fn send_task_error(&self, task_id: TaskId, message: String) {
-        self.send_task_state(task_id, TaskState::Failed { error: message })
+        self.send_task_state(task_id, TaskState::Failed { error: message }, Duration::ZERO)
     }
 
-    pub fn send_task_state(&self, task_id: TaskId, state: TaskState) {
+    pub fn send_task_state(&self, task_id: TaskId, state: TaskState, exec_time: Duration) {
         let _ = self
             .backend_sender
-            .send(FromBackendMessage::TaskStateChange { task_id, state });
+            .send(FromBackendMessage::TaskStateChange { task_id, state, exec_time });
     }
 }
 
@@ -253,9 +285,7 @@ const MAX_FAILS: u32 = 120;
 
 async fn iqm_main(backend: Arc<IqmBackend>, mut monitor_receiver: UnboundedReceiver<MonitorCommand>) {
     let mut monitored_tasks: Vec<MonitoredTask> = Vec::new();
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(
-        backend.config.check_interval_ms.into(),
-    ));
+    let mut interval = tokio::time::interval(backend.config.check_interval.into());
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate first tick
     let mut to_delete: Vec<usize> = Vec::new();
@@ -277,13 +307,14 @@ async fn iqm_main(backend: Arc<IqmBackend>, mut monitor_receiver: UnboundedRecei
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
                     let request = backend.setup_job_request(Method::GET, &task.iqm_task_id, false);
                     let result = request.send().await;
-                    if let Some(new_state) = process_result(task, result).await {
+                    if let Some((new_state, exec_time)) = process_result(task, result).await {
                         if !matches!(&new_state, TaskState::Running) {
                             to_delete.push(idx);
                         }
                         let _ = backend.backend_sender.send(FromBackendMessage::TaskStateChange {
                             task_id: task.task_id,
                             state: new_state,
+                            exec_time,
                         });
                     }
 
@@ -299,15 +330,15 @@ async fn iqm_main(backend: Arc<IqmBackend>, mut monitor_receiver: UnboundedRecei
 async fn process_result(
     task: &mut MonitoredTask,
     result: Result<reqwest::Response, reqwest::Error>,
-) -> Option<TaskState> {
+) -> Option<(TaskState, Duration)> {
     match result {
         Err(e) => {
             log::error!("IQM polling job {}: {}", task.iqm_task_id, e);
             task.fails += 1;
             if task.fails > MAX_FAILS {
-                return Some(TaskState::Failed {
+                return Some((TaskState::Failed {
                     error: format!("IQM poll do not respond: {}", e),
-                });
+                }, Duration::ZERO));
             }
             None
         }
@@ -321,30 +352,39 @@ async fn process_result(
                 );
                 task.fails += 1;
                 if task.fails > MAX_FAILS {
-                    return Some(TaskState::Failed {
+                    return Some((TaskState::Failed {
                         error: format!("IQM poll do not respond: {http_status}"),
-                    });
+                    }, Duration::ZERO));
                 }
                 return None;
             }
             match resp.json::<JobStatusResponse>().await {
-                Err(_) => Some(TaskState::Failed {
+                Err(_) => Some((TaskState::Failed {
                     error: "Could not parse IQM response".to_string(),
-                }),
-                Ok(data) => match data.status.as_str() {
-                    "waiting" => None,
-                    "processing" => Some(TaskState::Running),
-                    "completed" => Some(TaskState::Finished),
-                    "failed" => {
-                        let msgs: Vec<_> = data.errors.into_iter().map(|e| e.message).collect();
-                        let error = msgs.join("; ");
-                        Some(TaskState::Failed { error })
+                }, Duration::ZERO)),
+                Ok(data) => {
+                    let status = data.status.as_str();
+                    match status {
+                            "waiting" => return None,
+                            status => {
+                                let exec_time = data.get_exec_time().unwrap_or_default();
+                                let new_state = match status {
+                                    "processing" => TaskState::Running,
+                                    "completed" => TaskState::Finished,
+                                    "failed" => {
+                                        let msgs: Vec<_> = data.errors.into_iter().map(|e| e.message).collect();
+                                        let error = msgs.join("; ");
+                                        TaskState::Failed { error }
+                                    }
+                                    "cancelled" => TaskState::Cancelled,
+                                    state_name => TaskState::Failed {
+                                        error: format!("Invalid task state: {state_name}"),
+                                    }
+                                };
+                                Some((new_state, exec_time))
+                            }
                     }
-                    "cancelled" => Some(TaskState::Cancelled),
-                    state_name => Some(TaskState::Failed {
-                        error: format!("Invalid task state: {state_name}"),
-                    }),
-                },
+                }
             }
         }
     }

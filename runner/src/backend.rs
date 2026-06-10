@@ -2,10 +2,11 @@ use crate::backend_iqm::IqmBackendConfig;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BackendConfig {
     Iqm(IqmBackendConfig),
@@ -19,6 +20,10 @@ use crate::task::TaskState;
 
 pub(crate) trait Backend: Send + Sync {
     fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes);
+    /// Re-attach to a task that was already submitted before a restart, using the
+    /// backend job id persisted in the database. The backend resumes monitoring it
+    /// and reports its current state via [`FromBackendMessage`].
+    fn resume_task(self: Arc<Self>, task_id: TaskId, backend_id: String, payload: Bytes);
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str);
     fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>>;
     fn get_calibration(self: Arc<Self>, calibration_id: &str, endpoint: &str) -> oneshot::Receiver<crate::Result<String>>;
@@ -32,6 +37,7 @@ pub(crate) enum FromBackendMessage {
     TaskStateChange {
         task_id: TaskId,
         state: TaskState,
+        exec_time: Duration,
     },
 }
 

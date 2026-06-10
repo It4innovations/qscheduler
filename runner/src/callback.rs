@@ -6,8 +6,8 @@ use tracing::debug;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotifyConfig {
-    url: String,
-    token: Option<String>,
+    pub url: String,
+    pub token: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
