@@ -43,9 +43,6 @@ impl TryFrom<u64> for TaskId {
     }
 }
 
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-#[serde(tag = "state")]
 pub enum TaskState {
     Waiting,
     Running,

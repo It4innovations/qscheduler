@@ -97,23 +97,74 @@ fn create_task_config(params: CreateTaskParams, body: Bytes) -> Result<TaskConfi
     })
 }
 
+/// Current state of a task.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+#[serde(tag = "state")]
+enum TaskStateResponse {
+    /// Task is queued and waiting to be assigned to a machine.
+    Waiting,
+    /// Task is currently executing on a machine.
+    Running,
+    /// Task completed successfully.
+    Finished,
+    /// Task failed. The `error` field contains the failure reason.
+    Failed { error: String },
+    /// Task was cancelled before it could finish.
+    Cancelled,
+}
+
+impl From<&TaskState> for TaskStateResponse {
+    fn from(s: &TaskState) -> Self {
+        match s {
+            TaskState::Waiting => Self::Waiting,
+            TaskState::Running => Self::Running,
+            TaskState::Finished => Self::Finished,
+            TaskState::Failed { error } => Self::Failed { error: error.clone() },
+            TaskState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/tasks/{id}",
-    params(("id" = u32, Path, description = "Task ID")),
+    params(("id" = u64, Path, description = "Task ID")),
     responses(
-        (status = 200, description = "Task state", body = String),
+        (status = 200, description = "Task state", body = TaskStateResponse),
         (status = 404, description = "Task not found")
     )
 )]
 async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> Result<Json<TaskState>, StatusCode> {
+) -> Result<Json<TaskStateResponse>, StatusCode> {
     let task_id = TaskId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
     let core = state.core.lock().unwrap();
     let task_state = core.task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(task_state.clone()))
+    Ok(Json(TaskStateResponse::from(task_state)))
+}
+
+/// Current state of a session.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum SessionStateResponse {
+    /// Session is queued and waiting for the machine to become available.
+    Waiting,
+    /// Session is open and ready to accept tasks.
+    Open,
+    /// Session has ended and no longer accepts tasks.
+    Closed,
+}
+
+impl From<SessionState> for SessionStateResponse {
+    fn from(s: SessionState) -> Self {
+        match s {
+            SessionState::Waiting => Self::Waiting,
+            SessionState::Open => Self::Open,
+            SessionState::Closed => Self::Closed,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -121,20 +172,20 @@ async fn get_task(
     path = "/sessions/{id}",
     params(("id" = u64, Path, description = "Session ID")),
     responses(
-        (status = 200, description = "Session state", body = String),
+        (status = 200, description = "Session state", body = SessionStateResponse),
         (status = 404, description = "Session not found")
     )
 )]
 async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> Result<Json<SessionState>, StatusCode> {
+) -> Result<Json<SessionStateResponse>, StatusCode> {
     let session_id = SessionId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
     let core = state.core.lock().unwrap();
     let session_state = core
         .session_state(session_id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(session_state))
+    Ok(Json(SessionStateResponse::from(session_state)))
 }
 
 #[utoipa::path(
