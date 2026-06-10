@@ -1,3 +1,4 @@
+from typing import Sequence
 import requests
 import os
 import subprocess
@@ -35,16 +36,21 @@ class TestTask:
         return data.encode()
 
 
+MACHINE_NAME = "TestMachine"
+
+
 class QScheduler:
     def __init__(
         self,
         working_dir: str,
         port: int,
         backend,
+        database_url: str,
     ):
         self.working_dir = working_dir
         self.port = port
         self.backend = backend
+        self.database_url = database_url
         self.notify_url = None
         self.notify_token = None
         self.queue_size = 2
@@ -54,42 +60,36 @@ class QScheduler:
     def url(self, path: str):
         return f"http://127.0.0.1:{self.port}/{path}"
 
-    def _write_config(self, config_path):
-        if self.notify_url and self.notify_token:
-            notify_line = f'\nnotify = {{url = "{self.notify_url}", token = "{self.notify_token}"}}'
-        elif self.notify_url:
-            notify_line = f'\nnotify = {{url = "{self.notify_url}"}}'
-        else:
-            notify_line = ""
-        backend_config = self.backend.build_config()
-        with open(config_path, "w") as f:
-            f.write(f"""[service]
-port = {self.port}
-
-[[machines]]
-id = 1
-name = "TestMachine"
-queue_size = {self.queue_size}
-{notify_line}
-[machines.backend]
-{backend_config}
-""")
-
-    def _start_binary(self, config_path):
-        log_path = os.path.join(self.working_dir, "qscheduler.log")
-        self._log_file = open(log_path, "w")
-
-        binary = os.path.join(
+    @property
+    def _binary(self):
+        return os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "target",
             "debug",
             "qscheduler",
         )
+
+    def _add_machine(self):
+        args = [self._binary, "machine", "add", MACHINE_NAME, f"--queue-size={self.queue_size}"]
+        if self.notify_url:
+            args.append(f"--notify-url={self.notify_url}")
+        if self.notify_token:
+            args.append(f"--notify-token={self.notify_token}")
+        args += self.backend.machine_args()
+        subprocess.run(
+            args,
+            check=True,
+            env={**os.environ, "DATABASE_URL": self.database_url},
+        )
+
+    def _start_binary(self, log_name="qscheduler.log"):
+        log_path = os.path.join(self.working_dir, log_name)
+        self._log_file = open(log_path, "w")
         self._process = subprocess.Popen(
-            [binary, config_path],
+            [self._binary, "serve", "--port", str(self.port)],
             stdout=self._log_file,
             stderr=self._log_file,
-            env={"RUST_LOG": "debug"},
+            env={"RUST_LOG": "debug", "DATABASE_URL": self.database_url},
             cwd=self.working_dir,
         )
 
@@ -109,11 +109,12 @@ queue_size = {self.queue_size}
 
         raise RuntimeError("qscheduler did not start within 10 seconds")
 
-    def start(self):
+    def start(self, add_test_project=True):
         self.backend.start()
-        config_path = os.path.join(self.working_dir, "config.toml")
-        self._write_config(config_path)
-        self._start_binary(config_path)
+        self._add_machine()
+        self._start_binary()
+        if add_test_project:
+            self.add_project("test-project", 1000)
 
     def cleanup(self):
         if self._process is None:
@@ -134,25 +135,77 @@ queue_size = {self.queue_size}
             if self._log_file:
                 self._log_file.close()
 
+    def stop(self, kill=True):
+        """Stop the running service process without tearing down the DB.
+
+        With kill=True the process is SIGKILLed to simulate an abrupt crash, so no
+        graceful shutdown logic runs and recovery happens purely from the database.
+        """
+        if self._process is None:
+            return
+        if self._process.poll() is None:
+            if kill:
+                self._process.kill()
+            else:
+                self._process.terminate()
+            try:
+                self._process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait()
+        if self._log_file:
+            self._log_file.close()
+            self._log_file = None
+        self._process = None
+
+    def restart(self, kill=True):
+        """Simulate a crash and restart: stop the process and start a fresh one
+        against the same database and port."""
+        self.stop(kill=kill)
+        self._start_binary(log_name="qscheduler-restart.log")
+
+    def add_project(self, name: str, limit_ms: int, active: bool = True, expect_status_code=None):
+        r = requests.post(
+            self.url("projects"),
+            json={"name": name, "limit_ms": limit_ms, "active": active},
+            timeout=5,
+        )
+        if expect_status_code is None:
+            r.raise_for_status()
+        else:
+            assert r.status_code == expect_status_code, (
+                f"Expected HTTP {expect_status_code}, got {r.status_code}: {r.text}"
+            )
+
+    def list_projects(self) -> list[dict]:
+        r = requests.get(self.url("projects"), timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    def get_project(self, name: str) -> dict:
+        r = requests.get(self.url(f"projects/{name}"), timeout=5)
+        r.raise_for_status()
+        return r.json()
+
     def submit(
         self,
         task: TestTask,
         session_id: int | None = None,
         machine_id: int = 1,
-        repeats: int = 1,
-        max_compute_time: int = 1,
-        max_waiting_time: int | None = None,
+        project: str | None = None,
         expect_error: int | None = None,
     ):
+        if session_id is not None and project is not None:
+            raise Exception("Cannot set both session_id and project")
+        if session_id is None and project is None:
+            # Attach to default project
+            project = "test-project"
         payload = task.create_payload()
         msg = {
             "session_id": session_id,
             "machine_id": machine_id,
-            "repeats": repeats,
-            "max_compute_time_secs": max_compute_time,
+            "project": project
         }
-        if max_waiting_time is not None:
-            msg["max_waiting_time"] = max_waiting_time
         if session_id is not None:
             msg["session_id"] = session_id
 
@@ -168,7 +221,8 @@ queue_size = {self.queue_size}
                 f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
             )
             return r
-        r.raise_for_status()
+        if not r.ok:
+            raise Exception(f"HTTP {r.status_code} submitting task: {r.text}")
         return r.json()
 
     def new_session(self, time_limit: int, machine_id: int = 1):
@@ -204,14 +258,16 @@ queue_size = {self.queue_size}
             f"Session {session_id}: expected state {target} but got {state} after {TIMEOUT}s"
         )
 
-    def wait_for_task_state(self, task_id: int, target: str):
+    def wait_for_task_state(self, task_id: int, target: str | Sequence[str]):
+        if isinstance(target, str):
+            target = (target,)
         TIMEOUT = 10
         deadline = time.monotonic() + TIMEOUT
         wait_time = 0.1
         while time.monotonic() < deadline:
             state = self.get_task_status(task_id)
             tp = state["state"]
-            if tp == target:
+            if tp in target:
                 return state
             if tp in ("failed", "finished", "cancelled"):
                 raise Exception(
@@ -243,6 +299,9 @@ queue_size = {self.queue_size}
 
     def wait_for_cancelled(self, task_id: int):
         self.wait_for_task_state(task_id, "cancelled")
+
+    def wait_for_finished_or_canceled(self, task_id: int):
+        self.wait_for_task_state(task_id, ("cancelled", "finished"))
 
     def wait_for_failed(self, task_id: int):
         return self.wait_for_task_state(task_id, "failed")

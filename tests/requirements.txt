@@ -2,3 +2,5 @@ pytest
 ruff
 requests
 pytest-httpserver
+psycopg2-binary
+python-dotenv

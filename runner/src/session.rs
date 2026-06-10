@@ -31,11 +31,24 @@ impl SessionId {
     pub fn as_u64(&self) -> u64 {
         self.0.get()
     }
+
+    #[inline]
+    pub fn as_i64(&self) -> i64 {
+        self.0.get() as i64
+    }
 }
 
 impl TryFrom<u64> for SessionId {
     type Error = ();
     fn try_from(v: u64) -> Result<Self, Self::Error> {
+        NonZeroU64::new(v).map(SessionId).ok_or(())
+    }
+}
+
+impl TryFrom<i64> for SessionId {
+    type Error = ();
+    fn try_from(v: i64) -> Result<Self, Self::Error> {
+        let v = u64::try_from(v).map_err(|_| ())?;
         NonZeroU64::new(v).map(SessionId).ok_or(())
     }
 }

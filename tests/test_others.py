@@ -1,3 +1,3 @@
-def test_version(qscheduler):
-    qscheduler.start()
-    assert qscheduler.version().startswith("qscheduler v")
+def test_version(qscheduler_test):
+    qscheduler_test.start()
+    assert qscheduler_test.version().startswith("qscheduler v")

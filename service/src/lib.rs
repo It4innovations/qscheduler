@@ -14,9 +14,9 @@ use axum::{
 use runner::config::RunnerConfiguration;
 use runner::core::{Core, CoreRef};
 use runner::error::RunnerError;
-use runner::reactor::{create_session, submit_task};
-use runner::task::{TaskConfig, TaskId, TaskState};
-use runner::{MachineId, SessionId};
+use runner::reactor::{create_session, create_project, get_project_by_name, list_projects as list_projects_reactor, submit_task, get_project_id_by_name};
+use runner::task::{TaskConfig, TaskId, TaskParent, TaskState};
+use runner::{MachineId, Project, SessionId};
 use runner::{SessionConfig, SessionState};
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -33,6 +33,7 @@ struct AppState {
 #[into_params(parameter_in = Query)]
 struct CreateTaskParams {
     session_id: Option<u64>,
+    project: Option<String>,
     machine_id: u32,
 }
 
@@ -70,29 +71,38 @@ async fn create_task(
     body: Bytes,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
     let task =
-        create_task_config(params, body).map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        create_task_config(&state.core, params, body).await.map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     tracing::debug!(task_config=?task, "new task");
-    let task_id = submit_task(Arc::clone(&state.core), task).map_err(|e| {
-        let status = match &e {
+    let task_id = submit_task(&state.core, task).await.map_err(|e| {
+        match &e {
             RunnerError::InvalidMachine(_)
             | RunnerError::InvalidSession(_)
-            | RunnerError::NonRunningSession(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, e.to_string())
+            | RunnerError::NonRunningSession(_) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+            RunnerError::ProjectLimitExceeded(_) => (StatusCode::PAYMENT_REQUIRED, e.to_string()),
+            _ => internal_error(&e),
+        }
     })?;
     tracing::info!(%task_id, "task submitted");
     Ok((StatusCode::CREATED, Json(task_id.as_u64())))
 }
 
-fn create_task_config(params: CreateTaskParams, body: Bytes) -> Result<TaskConfig, String> {
+async fn create_task_config(core_ref: &CoreRef, params: CreateTaskParams, body: Bytes) -> runner::Result<TaskConfig> {
+    if params.session_id.is_some() == params.project.is_some() {
+        return Err(RunnerError::GenericError("Task has to fill 'project' or 'session_id' but not both".to_string()));
+    }
+    let session_id = params
+        .session_id
+        .map(SessionId::try_from)
+        .transpose()
+        .map_err(|_| RunnerError::GenericError("Invalid session_id".to_string()))?;
+    let project_id = if let Some(name) = params.project {
+        Some(get_project_id_by_name(core_ref, &name).await?)
+    } else {
+        None
+    };
     Ok(TaskConfig {
         machine_id: MachineId::from(params.machine_id),
-        session_id: params
-            .session_id
-            .map(SessionId::try_from)
-            .transpose()
-            .map_err(|_| "Invalid session_id")?,
+        parent: TaskParent::new(session_id, project_id),
         payload: body,
     })
 }
@@ -205,8 +215,9 @@ async fn create_session_handler(
         machine_id: MachineId::from(params.machine_id),
         time_limit: Duration::from_secs(params.time_limit_secs),
     };
-    let session_id = create_session(Arc::clone(&state.core), config)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_id = create_session(&state.core, config)
+        .await
+        .map_err(|e| internal_error(e))?;
     tracing::info!(session_id = session_id.as_u64(), "session created");
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
@@ -227,18 +238,15 @@ async fn get_machine_arch(
 ) -> Result<String, (StatusCode, String)> {
     let receiver = {
         let core = state.core.lock().unwrap();
-        core.get_arch(MachineId::from(machine_id)).map_err(|e| {
-            let status = match &e {
-                RunnerError::InvalidMachine(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, e.to_string())
+        core.get_arch(MachineId::from(machine_id)).map_err(|e| match &e {
+            RunnerError::InvalidMachine(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            _ => internal_error(&e),
         })?
     };
     receiver
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "backend channel closed".to_string()))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|_| internal_error("backend channel closed"))?
+        .map_err(|e| internal_error(e))
 }
 
 #[utoipa::path(
@@ -262,18 +270,110 @@ async fn get_machine_calibration(
     let receiver = {
         let core = state.core.lock().unwrap();
         core.get_calibration(MachineId::from(machine_id), &calibration, &endpoint)
-            .map_err(|e| {
-                let status = match &e {
-                    RunnerError::InvalidMachine(_) => StatusCode::NOT_FOUND,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                (status, e.to_string())
+            .map_err(|e| match &e {
+                RunnerError::InvalidMachine(_) => (StatusCode::NOT_FOUND, e.to_string()),
+                _ => internal_error(&e),
             })?
     };
     receiver
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "backend channel closed".to_string()))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|_| internal_error("backend channel closed"))?
+        .map_err(|e| internal_error(e))
+}
+
+fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
+    let msg = e.to_string();
+    tracing::error!("{msg}");
+    (StatusCode::INTERNAL_SERVER_ERROR, msg)
+}
+
+fn default_active() -> bool { true }
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct CreateProjectRequest {
+    name: String,
+    limit_ms: i64,
+    #[serde(default = "default_active")]
+    #[schema(default = true)]
+    active: bool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct ProjectResponse {
+    name: String,
+    consumed_ms: i64,
+    limit_ms: i64,
+    active: bool,
+}
+
+impl ProjectResponse {
+    pub fn from_project(project: Project) -> ProjectResponse {
+        ProjectResponse {
+            name: project.name,
+            consumed_ms: project.consumed.as_millis() as i64,
+            limit_ms: project.limit.as_millis() as i64,
+            active: project.active,
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/projects/{name}",
+    params(("name" = String, Path, description = "Project name")),
+    responses(
+        (status = 200, description = "Project info", body = ProjectResponse),
+        (status = 404, description = "Project not found")
+    )
+)]
+async fn get_project_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
+    let project = get_project_by_name(&state.core, &name)
+        .await
+        .map_err(|e| internal_error(&e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project '{name}' not found")))?;
+    Ok(Json(ProjectResponse::from_project(project)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects",
+    request_body = CreateProjectRequest,
+    responses(
+        (status = 201, description = "Project created", body = ProjectResponse),
+        (status = 409, description = "Project already exists")
+    )
+)]
+async fn create_project_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateProjectRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let limit = Duration::from_millis(body.limit_ms as u64);
+    create_project(&state.core, body.name, body.active, limit)
+        .await
+        .map_err(|e| match &e {
+            RunnerError::ProjectAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
+            _ => internal_error(&e),
+        })?;
+    Ok(StatusCode::CREATED)
+}
+
+#[utoipa::path(
+    get,
+    path = "/projects",
+    responses(
+        (status = 200, description = "List of projects", body = Vec<ProjectResponse>)
+    )
+)]
+async fn list_projects_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ProjectResponse>>, (StatusCode, String)> {
+    let rows = list_projects_reactor(&state.core)
+        .await
+        .map_err(|e| internal_error(e))?;
+    Ok(Json(rows.into_iter().map(ProjectResponse::from_project).collect()))
 }
 
 #[derive(OpenApi)]
@@ -282,11 +382,21 @@ struct ApiDoc;
 pub async fn run(
     version: &'static str,
     service_conf: ServiceConfiguration,
-    runner_conf: RunnerConfiguration,
-) {
+) -> runner::Result<()> {
+    let pool = runner::db::create_pool().await?;
+    let machines = runner::db::load_machines(&pool).await?;
+    if machines.is_empty() {
+        tracing::warn!("no machines found in database");
+    } else {
+        tracing::info!(count = machines.len(), "loaded machines from database");
+        for m in &machines {
+            tracing::info!(id = m.id, name = %m.name, backend = ?m.backend, "machine loaded");
+        }
+    }
+    let runner_conf = RunnerConfiguration { machines };
     let state = Arc::new(AppState {
         version,
-        core: Core::new(runner_conf),
+        core: Core::new(runner_conf, pool).await?,
     });
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -297,6 +407,9 @@ pub async fn run(
         .routes(routes!(create_session_handler))
         .routes(routes!(get_machine_arch))
         .routes(routes!(get_machine_calibration))
+        .routes(routes!(create_project_handler))
+        .routes(routes!(list_projects_handler))
+        .routes(routes!(get_project_handler))
         .with_state(state)
         .split_for_parts();
 
@@ -313,4 +426,5 @@ pub async fn run(
     tracing::info!("listening on {}", listener.local_addr().unwrap());
 
     axum::serve(listener, app).await.expect("server error");
+    Ok(())
 }

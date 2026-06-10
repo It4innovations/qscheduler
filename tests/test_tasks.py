@@ -60,3 +60,12 @@ def test_submit_fails2(qscheduler):
         "state": "failed",
     }
     qscheduler.wait_for_finished(t2)
+
+
+def test_session_closed_but_task_may_finished(qscheduler_test):
+    qscheduler_test.start()
+    session_id = qscheduler_test.new_session(time_limit=1)
+    qscheduler_test.wait_for_session_open(session_id)
+    task_id = qscheduler_test.submit(TT().submit_time(3), session_id=session_id)
+    qscheduler_test.wait_for_session_closed(session_id)
+    qscheduler_test.wait_for_finished_or_canceled(task_id)

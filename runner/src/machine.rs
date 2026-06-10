@@ -3,6 +3,7 @@ use crate::callback::NotifyConfig;
 use crate::error::RunnerError;
 use crate::session::{Session, SessionId};
 use crate::task::{Task, TaskId};
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -33,6 +34,14 @@ pub struct MachineConfig {
 struct RunningSession {
     session_id: SessionId,
     queue: VecDeque<TaskId>,
+}
+
+/// A task that was already submitted to the backend before a restart and must be
+/// re-attached to the launcher's backend on startup instead of being re-queued.
+pub(crate) struct ResumeTask {
+    pub task_id: TaskId,
+    pub backend_id: String,
+    pub payload: Bytes,
 }
 
 pub(crate) struct Machine {
@@ -69,7 +78,7 @@ impl Machine {
     }
 
     pub fn queue_task(&mut self, task: &Task) -> crate::Result<()> {
-        if let Some(s_id) = task.config().session_id {
+        if let Some(s_id) = task.config().parent.session_id() {
             match &mut self.running_session {
                 Some(s) if s_id == s.session_id => {
                     s.queue.push_back(task.id());
@@ -119,6 +128,10 @@ impl Machine {
         self.queue.pop_front()
     }
 
+    pub fn running_session_id(&self) -> Option<SessionId> {
+        self.running_session.as_ref().map(|s| s.session_id)
+    }
+
     pub fn notifier(&self) -> &Arc<Notify> {
         &self.notifier
     }
@@ -127,6 +140,12 @@ impl Machine {
 impl From<u32> for MachineId {
     fn from(v: u32) -> Self {
         MachineId(v)
+    }
+}
+
+impl MachineId {
+    pub fn as_u32(&self) -> u32 {
+        self.0
     }
 }
 

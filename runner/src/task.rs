@@ -1,4 +1,3 @@
-use crate::callback::NotifyTaskState;
 use crate::machine::MachineId;
 use crate::session::SessionId;
 use bytes::Bytes;
@@ -6,6 +5,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
+use crate::Project;
+use crate::project::ProjectId;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -43,6 +44,7 @@ impl TryFrom<u64> for TaskId {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum TaskState {
     Waiting,
     Running,
@@ -52,29 +54,70 @@ pub enum TaskState {
 }
 
 impl TaskState {
-    pub(crate) fn to_notify(&self) -> Option<NotifyTaskState> {
+    pub fn is_final(&self) -> bool {
         match self {
-            TaskState::Waiting | TaskState::Running => None,
-            TaskState::Finished => Some(NotifyTaskState::Finished),
-            TaskState::Failed { .. } => Some(NotifyTaskState::Failed),
-            TaskState::Cancelled => Some(NotifyTaskState::Cancelled),
+            TaskState::Waiting |
+            TaskState::Running => false,
+            TaskState::Finished |
+            TaskState::Failed { .. } |
+            TaskState::Cancelled => true,
+        }
+    }
+}
+
+
+pub enum TaskParent {
+    Session(SessionId),
+    Project(ProjectId),
+}
+
+impl TaskParent {
+    pub fn new(session_id: Option<SessionId>, project_id: Option<ProjectId>) -> Self {
+        assert_ne!(session_id.is_some(), project_id.is_some());
+        if let Some(session_id) = session_id {
+            TaskParent::Session(session_id)
+        } else if let Some(project_id) = project_id {
+            TaskParent::Project(project_id)
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[inline]
+    pub fn session_id(&self) -> Option<SessionId> {
+        match self {
+            TaskParent::Session(s) => Some(*s),
+            TaskParent::Project(_) => None
+        }
+    }
+
+    #[inline]
+    pub fn project_id(&self) -> Option<ProjectId> {
+        match self {
+            TaskParent::Project(p) => Some(*p),
+            TaskParent::Session(_) => None,
         }
     }
 }
 
 pub struct TaskConfig {
     pub machine_id: MachineId,
-    pub session_id: Option<SessionId>,
+    pub parent: TaskParent,
     pub payload: Bytes,
 }
 
 impl Debug for TaskConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskConfig")
-            .field("machine_id", &self.machine_id)
-            .field("session_id", &self.session_id)
-            .field("payload", &format_args!("<{} bytes>", self.payload.len()))
-            .finish()
+        let mut f = f.debug_struct("TaskConfig");
+        f.field("machine_id", &self.machine_id);
+        match self.parent {
+            TaskParent::Project(project_id) => {
+                f.field("parent", &project_id)
+            }
+            TaskParent::Session(session_id) => f.field("session", &session_id),
+        };
+        f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
+        f.finish()
     }
 }
 
