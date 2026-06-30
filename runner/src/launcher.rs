@@ -3,9 +3,10 @@ use crate::callback::{NotifyEvent, NotifyTaskState, notify_worker};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
 use crate::machine::{MachineConfig, QueueItem, ResumeTask};
-use crate::task::TaskState;
 use crate::project::ProjectId;
-use crate::{MachineId, SessionId, SessionState, TaskId};
+use crate::session::SessionState;
+use crate::task::TaskState;
+use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::pending;
@@ -13,10 +14,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tracing::debug;
 
-pub fn start_launcher(core_ref: &CoreRef, machine_id: MachineId, machine_config: &MachineConfig, restore_tasks: Vec<ResumeTask>) {
+pub fn start_launcher(
+    core_ref: &CoreRef,
+    machine_id: MachineId,
+    machine_config: &MachineConfig,
+    restore_tasks: Vec<ResumeTask>,
+) {
     let core_ref = core_ref.clone();
     let (backend, backend_receiver) = create_backend(&machine_config.backend);
     let notify_sender = machine_config.notify.as_ref().map(|nc| {
@@ -46,16 +52,40 @@ pub fn start_launcher(core_ref: &CoreRef, machine_id: MachineId, machine_config:
 
 struct RunningSession {
     session_id: SessionId,
+    project_id: ProjectId,
     deadline: Instant,
+    opened_at: Instant,
+    exec_time: Duration,
 }
 
 enum DbUpdate {
-    TaskSubmitted { task_id: TaskId, backend_id: String },
-    TaskFinished { task_id: TaskId, exec_time: Duration },
-    TaskFailed { task_id: TaskId, exec_time: Duration, error: String  },
-    TaskCancelled { task_id: TaskId, exec_time: Duration },
+    TaskSubmitted {
+        task_id: TaskId,
+        backend_id: String,
+    },
+    TaskFinished {
+        task_id: TaskId,
+        exec_time: Duration,
+    },
+    TaskFailed {
+        task_id: TaskId,
+        exec_time: Duration,
+        error: String,
+    },
+    TaskCancelled {
+        task_id: TaskId,
+        exec_time: Duration,
+    },
     SessionOpened(SessionId),
-    SessionClosed { session_id: SessionId, cancelled_tasks: Vec<TaskId> },
+    SessionClosed {
+        session_id: SessionId,
+        exec_time: Duration,
+        cancelled_tasks: Vec<TaskId>,
+    },
+    SessionExecTime {
+        session_id: SessionId,
+        exec_time_ms: i64,
+    },
 }
 
 fn pick_task(
@@ -69,6 +99,7 @@ fn pick_task(
         machine_map,
         task_map,
         session_map,
+        project_map,
         ..
     } = core.split_mut();
     let machine = machine_map.get_machine_mut(machine_id);
@@ -96,11 +127,17 @@ fn pick_task(
                         continue;
                     };
                     assert!(running_session.is_none());
+
+                    let project_id = session.config.project_id;
+                    let now = Instant::now();
                     session.state = SessionState::Open;
                     machine.start_session(session_id);
                     *running_session = Some(RunningSession {
                         session_id,
-                        deadline: Instant::now() + session.config.time_limit,
+                        project_id,
+                        deadline: now + session.config.time_limit,
+                        opened_at: now,
+                        exec_time: Duration::ZERO,
                     });
                     db_updates.push(DbUpdate::SessionOpened(session_id));
                     continue;
@@ -113,9 +150,9 @@ fn pick_task(
 enum LauncherEvent {
     Notified,
     SessionEnd,
+    SessionQuotaCheck,
     BackendMessage(FromBackendMessage),
 }
-
 
 async fn launcher_main(
     core_ref: CoreRef,
@@ -126,10 +163,18 @@ async fn launcher_main(
     resume_tasks: Vec<ResumeTask>,
 ) {
     debug!(%machine_id, "Starting launcher");
-    let (notifier, queue_size) = {
+    let (notifier, queue_size, mut session_check_interval) = {
         let core = core_ref.lock().unwrap();
         let machine = core.split().machine_map.get_machine(machine_id);
-        (machine.notifier().clone(), machine.config().queue_size)
+        let mut session_check_interval =
+            tokio::time::interval(machine.config().session_check_interval);
+        session_check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let queue_size = machine.config().queue_size;
+        (
+            machine.notifier().clone(),
+            queue_size,
+            session_check_interval,
+        )
     };
     let pool = core_ref.lock().unwrap().pool().clone();
     assert!(queue_size > 0);
@@ -137,11 +182,17 @@ async fn launcher_main(
 
     for rt in resume_tasks {
         debug!(task_id = %rt.task_id, "Re-attaching submitted task to backend");
-        backend.clone().resume_task(rt.task_id, rt.backend_id, rt.payload);
-        submitted_tasks.insert(rt.task_id, false);
+        // resume_task re-registers the task with the backend before acting on `cancel`,
+        // so cancel_task can't be called separately here: the backend wouldn't know the
+        // task yet and would panic (or error) looking it up.
+        backend
+            .clone()
+            .resume_task(rt.task_id, rt.backend_id, rt.payload, rt.cancel);
+        submitted_tasks.insert(rt.task_id, rt.cancel);
     }
 
     let mut running_session: Option<RunningSession> = None;
+
     loop {
         let event = select! {
             _ = notifier.notified() =>
@@ -154,6 +205,14 @@ async fn launcher_main(
                 }
             } =>
                 LauncherEvent::SessionEnd,
+            _ = async {
+                if running_session.is_some() {
+                    session_check_interval.tick().await;
+                } else {
+                    pending().await
+                }
+            } =>
+                LauncherEvent::SessionQuotaCheck,
             msg = backend_receiver.recv() =>
                 LauncherEvent::BackendMessage(msg.unwrap())
         };
@@ -170,42 +229,60 @@ async fn launcher_main(
             } = core.split_mut();
             match event {
                 LauncherEvent::Notified => { /* Do nothing */ }
-                LauncherEvent::SessionEnd => {
-                    let s = running_session.take().unwrap();
-                    debug!(session_id = %s.session_id, "Session overtime");
-                    for (task_id, cancelling) in submitted_tasks.iter_mut() {
-                        if !*cancelling {
-                            *cancelling = true;
-                            let task = task_map.get_task_mut(*task_id);
-                            if let Some(backend_id) = task.backend_id() {
-                                debug!(%task_id, "Cancelling submitted task");
-                                Arc::clone(&backend).cancel_task(*task_id, backend_id);
-                            } else {
-                                debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
-                            }
-                        }
-                    }
-                    let session = session_map.get_session_mut(s.session_id);
-                    session.state = SessionState::Closed;
-                    let machine = machine_map.get_machine_mut(machine_id);
-                    let mut cancelled_tasks = Vec::new();
-                    while let Some(task_id) = machine.pop_session_task() {
-                        debug!(%task_id, "Cancelling unsubmitted task");
-                        let task = task_map.get_task_mut(task_id);
-                        task.set_state(TaskState::Cancelled);
-                        if let Some(sender) = &notify_sender {
-                            let _ = sender.send(NotifyEvent {
-                                task_id,
-                                state: NotifyTaskState::Cancelled,
+                LauncherEvent::SessionEnd | LauncherEvent::SessionQuotaCheck => {
+                    if let Some(s) = running_session.as_mut() {
+                        let exec_time = Instant::now() - s.opened_at;
+                        let delta = exec_time - s.exec_time;
+                        s.exec_time = exec_time;
+                        let project = project_map.get_project_mut(s.project_id);
+                        project.update_consumed(delta);
+                        if matches!(event, LauncherEvent::SessionQuotaCheck)
+                            && !project.is_over_limit()
+                        {
+                            debug!(session_id = %s.session_id, delta_ms=delta.as_millis(), "Session check passed");
+                            db_updates.push(DbUpdate::SessionExecTime {
+                                session_id: s.session_id,
+                                exec_time_ms: exec_time.as_millis() as i64,
                             });
+                        } else {
+                            debug!(session_id=%s.session_id, "Session overtime/end of session");
+                            for (task_id, cancelling) in submitted_tasks.iter_mut() {
+                                if !*cancelling {
+                                    *cancelling = true;
+                                    let task = task_map.get_task_mut(*task_id);
+                                    if let Some(backend_id) = task.backend_id() {
+                                        debug!(%task_id, "Cancelling submitted task");
+                                        Arc::clone(&backend).cancel_task(*task_id, backend_id);
+                                    } else {
+                                        debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
+                                    }
+                                }
+                            }
+                            let session = session_map.get_session_mut(s.session_id);
+                            session.state = SessionState::Closed;
+                            let machine = machine_map.get_machine_mut(machine_id);
+                            let mut cancelled_tasks = Vec::new();
+                            while let Some(task_id) = machine.pop_session_task() {
+                                debug!(%task_id, "Cancelling unsubmitted task");
+                                let task = task_map.get_task_mut(task_id);
+                                task.set_state(TaskState::Cancelled);
+                                if let Some(sender) = &notify_sender {
+                                    let _ = sender.send(NotifyEvent {
+                                        task_id,
+                                        state: NotifyTaskState::Cancelled,
+                                    });
+                                }
+                                cancelled_tasks.push(task_id);
+                            }
+                            machine.close_session();
+                            db_updates.push(DbUpdate::SessionClosed {
+                                session_id: s.session_id,
+                                exec_time,
+                                cancelled_tasks,
+                            });
+                            running_session = None;
                         }
-                        cancelled_tasks.push(task_id);
                     }
-                    machine.close_session();
-                    db_updates.push(DbUpdate::SessionClosed {
-                        session_id: s.session_id,
-                        cancelled_tasks,
-                    });
                 }
                 LauncherEvent::BackendMessage(msg) => match msg {
                     FromBackendMessage::TaskSubmitted {
@@ -226,7 +303,11 @@ async fn launcher_main(
                             Arc::clone(&backend).cancel_task(task_id, &backend_task_id);
                         }
                     }
-                    FromBackendMessage::TaskStateChange { task_id, state, exec_time } => {
+                    FromBackendMessage::TaskStateChange {
+                        task_id,
+                        state,
+                        exec_time,
+                    } => {
                         let mut update_state = true;
                         match &state {
                             TaskState::Waiting => unreachable!(),
@@ -273,8 +354,12 @@ async fn launcher_main(
                         if update_state {
                             let task = task_map.get_task_mut(task_id);
                             task.set_state(state);
-                            if !exec_time.is_zero() && let Some(project_id) = task.config().parent.project_id() {
-                                project_map.get_project_mut(project_id).update_consumed(exec_time);
+                            if !exec_time.is_zero()
+                                && let Some(project_id) = task.config().parent.project_id()
+                            {
+                                project_map
+                                    .get_project_mut(project_id)
+                                    .update_consumed(exec_time);
                             }
                         }
                     }
@@ -289,38 +374,56 @@ async fn launcher_main(
                     &mut db_updates,
                 )
             {
-                let CoreSplitMut { task_map, project_map, .. } = core.split_mut();
-
-                // Check that project has enough time
-                if task_map.find_task(task_id)
-                    .and_then(|t| t.config().parent.project_id())
-                    .map(|pid| {
-                        let p = project_map.find_project(pid).expect("Project has to be cached");
-                        p.consumed > p.limit
-                    }).unwrap_or(false) {
-                        let error = "Project time limit exceeded".to_string();
-                        core.split_mut().task_map.get_task_mut(task_id)
-                            .set_state(TaskState::Failed { error: error.clone() });
-                        if let Some(sender) = &notify_sender {
-                            let _ = sender.send(NotifyEvent { task_id, state: NotifyTaskState::Failed });
-                        }
-                        db_updates.push(DbUpdate::TaskFailed { task_id, exec_time: Duration::ZERO, error });
-                        continue;
+                let project_limit_exceeded = {
+                    let split = core.split();
+                    split
+                        .task_map
+                        .find_task(task_id)
+                        .and_then(|t| t.config().parent.project_id())
+                        .and_then(|pid| split.project_map.find_project(pid))
+                        .map(|p| p.is_over_limit())
+                        .unwrap_or(false)
+                };
+                if project_limit_exceeded {
+                    let error = "Project time limit exceeded".to_string();
+                    core.split_mut()
+                        .task_map
+                        .get_task_mut(task_id)
+                        .set_state(TaskState::Failed {
+                            error: error.clone(),
+                        });
+                    if let Some(sender) = &notify_sender {
+                        let _ = sender.send(NotifyEvent {
+                            task_id,
+                            state: NotifyTaskState::Failed,
+                        });
+                    }
+                    db_updates.push(DbUpdate::TaskFailed {
+                        task_id,
+                        exec_time: Duration::ZERO,
+                        error,
+                    });
+                } else {
+                    backend.clone().submit_task(task_id, payload);
+                    submitted_tasks.insert(task_id, false);
                 }
-                backend.clone().submit_task(task_id, payload);
-                submitted_tasks.insert(task_id, false);
             }
         }
 
         for update in db_updates {
             match update {
-                DbUpdate::TaskSubmitted { task_id, backend_id } => {
-                    db::update_task_backend_id(&pool, task_id, &backend_id).await
-                }
+                DbUpdate::TaskSubmitted {
+                    task_id,
+                    backend_id,
+                } => db::update_task_backend_id(&pool, task_id, &backend_id).await,
                 DbUpdate::TaskFinished { task_id, exec_time } => {
                     db::update_task_finished(&pool, task_id, exec_time).await;
                 }
-                DbUpdate::TaskFailed { task_id, exec_time, error } => {
+                DbUpdate::TaskFailed {
+                    task_id,
+                    exec_time,
+                    error,
+                } => {
                     db::update_task_failed(&pool, task_id, exec_time, &error).await;
                 }
                 DbUpdate::TaskCancelled { task_id, exec_time } => {
@@ -329,9 +432,18 @@ async fn launcher_main(
                 DbUpdate::SessionOpened(session_id) => {
                     db::update_session_opened(&pool, session_id).await
                 }
-                DbUpdate::SessionClosed { session_id, cancelled_tasks } => {
-                    db::close_session_with_tasks(&pool, session_id, &cancelled_tasks).await
+                DbUpdate::SessionClosed {
+                    session_id,
+                    exec_time,
+                    cancelled_tasks,
+                } => {
+                    db::close_session_with_tasks(&pool, session_id, exec_time, &cancelled_tasks)
+                        .await
                 }
+                DbUpdate::SessionExecTime {
+                    session_id,
+                    exec_time_ms,
+                } => db::update_session_exec_time(&pool, session_id, exec_time_ms).await,
             }
         }
     }

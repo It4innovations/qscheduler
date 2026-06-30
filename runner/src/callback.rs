@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
 use tracing::debug;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotifyConfig {
     pub url: String,
     pub token: Option<String>,

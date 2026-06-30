@@ -1,8 +1,8 @@
+use crate::SessionId;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
-use crate::SessionId;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct ProjectId(NonZeroU32);
@@ -34,8 +34,6 @@ impl ProjectId {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct Project {
     pub id: ProjectId,
@@ -49,6 +47,14 @@ impl Project {
     pub fn update_consumed(&mut self, delta: Duration) {
         self.consumed += delta;
     }
+
+    pub fn is_over_limit(&self) -> bool {
+        self.consumed >= self.limit
+    }
+
+    pub fn has_time_for(&self, duration: Duration) -> bool {
+        self.consumed + duration < self.limit
+    }
 }
 
 #[derive(Default)]
@@ -58,7 +64,6 @@ pub(crate) struct ProjectMap {
 }
 
 impl ProjectMap {
-
     pub fn get_project_mut(&mut self, id: ProjectId) -> &mut Project {
         self.projects.get_mut(&id).unwrap()
     }
@@ -77,7 +82,8 @@ impl ProjectMap {
     }
 
     pub fn add_project(&mut self, project: Project) {
-        self.projects_by_name.insert(project.name.clone(), project.id);
+        self.projects_by_name
+            .insert(project.name.clone(), project.id);
         self.projects.insert(project.id, project);
     }
 }

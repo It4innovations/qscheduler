@@ -9,12 +9,12 @@ _CALIBRATION_SET_ID = "00000000-0000-0000-0000-000000000001"
 
 # Cumulative seconds for each compilation step (total ~0.5 s).
 _COMPILE_STEPS = [
-    ("iqm-server",          "created",             0),
-    ("iqm-station-control", "received",            0.14),
-    ("iqm-station-control", "validation_started",  0.027),
-    ("iqm-station-control", "validation_ended",    0.001),
+    ("iqm-server", "created", 0),
+    ("iqm-station-control", "received", 0.14),
+    ("iqm-station-control", "validation_started", 0.027),
+    ("iqm-station-control", "validation_ended", 0.001),
     ("iqm-station-control", "compilation_started", 0.013),
-    ("iqm-station-control", "compilation_ended",   0.316),
+    ("iqm-station-control", "compilation_ended", 0.316),
 ]
 _COMPILE_DURATION = sum(d for _, _, d in _COMPILE_STEPS)
 
@@ -65,18 +65,40 @@ class Task:
             if self.cancelled_at <= exec_start:
                 # Cancelled during compilation — execution never started.
                 timeline = [
-                    {"source": "iqm-server", "status": "created",   "timestamp": _fmt_ts(self.created_at)},
-                    {"source": "iqm-server", "status": "cancelled",  "timestamp": _fmt_ts(self.cancelled_at)},
+                    {
+                        "source": "iqm-server",
+                        "status": "created",
+                        "timestamp": _fmt_ts(self.created_at),
+                    },
+                    {
+                        "source": "iqm-server",
+                        "status": "cancelled",
+                        "timestamp": _fmt_ts(self.cancelled_at),
+                    },
                 ]
             else:
                 # Cancelled after execution started — include full compile pipeline.
                 if self.pre_exec_secs > _COMPILE_DURATION:
                     timeline = _build_timeline(self.created_at, _COMPILE_STEPS)
                 else:
-                    timeline = [{"source": "iqm-server", "status": "created", "timestamp": _fmt_ts(self.created_at)}]
+                    timeline = [
+                        {
+                            "source": "iqm-server",
+                            "status": "created",
+                            "timestamp": _fmt_ts(self.created_at),
+                        }
+                    ]
                 timeline += [
-                    {"source": "iqm-station-control", "status": "execution_started", "timestamp": _fmt_ts(exec_start)},
-                    {"source": "iqm-station-control", "status": "cancelled",         "timestamp": _fmt_ts(self.cancelled_at)},
+                    {
+                        "source": "iqm-station-control",
+                        "status": "execution_started",
+                        "timestamp": _fmt_ts(exec_start),
+                    },
+                    {
+                        "source": "iqm-station-control",
+                        "status": "cancelled",
+                        "timestamp": _fmt_ts(self.cancelled_at),
+                    },
                 ]
             return {
                 "job_id": self.task_id,
@@ -98,27 +120,32 @@ class Task:
         if now < exec_start:
             return {"status": "waiting"}
 
-        if self.compute_time is not None and now < exec_start + timedelta(seconds=self.compute_time):
+        if self.compute_time is not None and now < exec_start + timedelta(
+            seconds=self.compute_time
+        ):
             return {"status": "processing"}
 
         r = self.config["result"]
         if r["type"] == "Ok":
             exec_s = self.compute_time if self.compute_time is not None else 0.5
             exec_ms = int(exec_s * 1000)
-            timeline = _build_timeline(self.created_at, [
-                ("iqm-server",          "created",                 0),
-                ("iqm-station-control", "received",                0.14),
-                ("iqm-station-control", "validation_started",      0.027),
-                ("iqm-station-control", "validation_ended",        0.001),
-                ("iqm-station-control", "compilation_started",     0.013),
-                ("iqm-station-control", "compilation_ended",       0.316),
-                ("iqm-station-control", "execution_started",       4.82),
-                ("iqm-station-control", "execution_ended",         exec_s),
-                ("iqm-station-control", "post_processing_started", 0.001),
-                ("iqm-station-control", "post_processing_ended",   0.05),
-                ("iqm-server",          "ready",                   0.01),
-                ("iqm-server",          "completed",               0.001),
-            ])
+            timeline = _build_timeline(
+                self.created_at,
+                [
+                    ("iqm-server", "created", 0),
+                    ("iqm-station-control", "received", 0.14),
+                    ("iqm-station-control", "validation_started", 0.027),
+                    ("iqm-station-control", "validation_ended", 0.001),
+                    ("iqm-station-control", "compilation_started", 0.013),
+                    ("iqm-station-control", "compilation_ended", 0.316),
+                    ("iqm-station-control", "execution_started", 4.82),
+                    ("iqm-station-control", "execution_ended", exec_s),
+                    ("iqm-station-control", "post_processing_started", 0.001),
+                    ("iqm-station-control", "post_processing_ended", 0.05),
+                    ("iqm-server", "ready", 0.01),
+                    ("iqm-server", "completed", 0.001),
+                ],
+            )
             return {
                 "job_id": self.task_id,
                 "status": "completed",
@@ -134,7 +161,11 @@ class Task:
                     "execution": {"progress": {}},
                     "runtime_ms": exec_ms,
                     "timeline": timeline,
-                    "artifacts": ["runtime_estimates", "measurements", "measurement_counts"],
+                    "artifacts": [
+                        "runtime_estimates",
+                        "measurements",
+                        "measurement_counts",
+                    ],
                     "messages": [],
                 },
             }
@@ -174,14 +205,22 @@ class IqmFakeBackend:
             f"/api/v1/jobs/{task_id}",
             method="GET",
         ).respond_with_handler(
-            lambda request: self._auth_error() if not self._check_auth(request) else make_result(task.status())
+            lambda request: (
+                self._auth_error()
+                if not self._check_auth(request)
+                else make_result(task.status())
+            )
         )
 
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}/cancel",
             method="POST",
         ).respond_with_handler(
-            lambda request: self._auth_error() if not self._check_auth(request) else make_result(task.cancel() or {})
+            lambda request: (
+                self._auth_error()
+                if not self._check_auth(request)
+                else make_result(task.cancel() or {})
+            )
         )
 
         submit_delay = config.get("submit_time")

@@ -1,6 +1,8 @@
 use clap::Parser;
+use runner::config::MachineConfiguration;
 use runner::error::RunnerError;
-use runner::{BackendConfig, IqmBackendConfig};
+use runner::machine::MachineConfig;
+use runner::{BackendConfig, IqmBackendConfig, NotifyConfig};
 use service::config::ServiceConfiguration;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -43,7 +45,6 @@ enum MachineCommand {
     Update(MachineConfigArgs),
 }
 
-
 #[derive(Parser)]
 struct MachineConfigArgs {
     /// Machine name
@@ -51,7 +52,7 @@ struct MachineConfigArgs {
 
     /// Maximum number of queued tasks
     #[arg(long, default_value = "4")]
-    queue_size: u32,
+    queue_size: usize,
     /// URL to POST task completion callbacks to
     #[arg(long)]
     notify_url: Option<String>,
@@ -59,8 +60,28 @@ struct MachineConfigArgs {
     #[arg(long)]
     notify_token: Option<String>,
 
+    /// How often is session consumption stored into DB.
+    #[arg(long, value_parser = parse_human_time, default_value = "5s")]
+    session_check_interval: Duration,
+
     #[clap(subcommand)]
     backend: MachineBackendArgs,
+}
+
+impl MachineConfigArgs {
+    pub fn into_machine_configuration(self) -> MachineConfiguration {
+        let notify = self.notify_url.map(|url| NotifyConfig {
+            url,
+            token: self.notify_token,
+        });
+        MachineConfiguration {
+            name: self.name,
+            queue_size: self.queue_size,
+            session_check_interval_ms: self.session_check_interval.as_millis() as u32,
+            notify,
+            backend: self.backend.into_config(),
+        }
+    }
 }
 
 fn parse_human_time(s: &str) -> Result<Duration, humantime::DurationError> {
@@ -84,7 +105,6 @@ struct IqmBackendArgs {
     check_interval: Duration,
 }
 
-
 // #[derive(Parser)]
 // struct MachineSetupArgs {
 //     /// Machine name
@@ -106,22 +126,16 @@ enum MachineBackendArgs {
 impl MachineBackendArgs {
     pub fn into_config(self) -> BackendConfig {
         match self {
-            MachineBackendArgs::Test =>
-                BackendConfig::Test,
-            MachineBackendArgs::Iqm(args) => {
-                BackendConfig::Iqm(IqmBackendConfig {
-                    url: args.url,
-                    token: args.token,
-                    machine_name: args.machine_name,
-                    check_interval: args.check_interval,
-                })
-            }
+            MachineBackendArgs::Test => BackendConfig::Test,
+            MachineBackendArgs::Iqm(args) => BackendConfig::Iqm(IqmBackendConfig {
+                url: args.url,
+                token: args.token,
+                machine_name: args.machine_name,
+                check_interval: args.check_interval,
+            }),
         }
     }
 }
-
-
-
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -176,23 +190,20 @@ async fn connect_db() -> sqlx::postgres::PgPool {
 
 async fn cmd_machine_add(args: MachineConfigArgs) {
     let pool = connect_db().await;
-    let backend = args.backend.into_config();
-    match runner::db::insert_machine(
-        &pool,
-        &args.name,
-        args.queue_size as i32,
-        &backend,
-        args.notify_url.as_deref(),
-        args.notify_token.as_deref(),
-    )
-    .await
-    {
+    let config = args.into_machine_configuration();
+    match runner::db::insert_machine(&pool, &config).await {
         Ok(id) => {
-            println!("Machine '{name}' added successfully (id={id}).", name=args.name);
+            println!(
+                "Machine '{name}' added successfully (id={id}).",
+                name = config.name
+            );
             println!("Restart the service for the change to take effect.");
         }
         Err(RunnerError::MachineAlreadyExists(_)) => {
-            eprintln!("Error: a machine named '{name}' already exists.", name=args.name);
+            eprintln!(
+                "Error: a machine named '{name}' already exists.",
+                name = config.name
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -205,7 +216,7 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
 async fn cmd_machine_update(args: MachineConfigArgs) {
     let pool = connect_db().await;
     match runner::db::get_machine_by_name(&pool, &args.name).await {
-        Ok(Some(_)) => {},
+        Ok(Some(_)) => {}
         Ok(None) => {
             eprintln!("Error: machine '{}' not found.", args.name);
             std::process::exit(1);

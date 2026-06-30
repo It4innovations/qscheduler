@@ -14,7 +14,10 @@ use axum::{
 use runner::config::RunnerConfiguration;
 use runner::core::{Core, CoreRef};
 use runner::error::RunnerError;
-use runner::reactor::{create_session, create_project, get_project_by_name, list_projects as list_projects_reactor, submit_task, get_project_id_by_name};
+use runner::reactor::{
+    create_project, create_session, get_project_by_name, get_project_id_by_name,
+    list_projects as list_projects_reactor, submit_task,
+};
 use runner::task::{TaskConfig, TaskId, TaskParent, TaskState};
 use runner::{MachineId, Project, SessionId};
 use runner::{SessionConfig, SessionState};
@@ -26,7 +29,7 @@ use utoipa_axum::routes;
 
 struct AppState {
     version: &'static str,
-    core: CoreRef,
+    core_ref: CoreRef,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -41,6 +44,7 @@ struct CreateTaskParams {
 #[into_params(parameter_in = Query)]
 struct CreateSessionParams {
     machine_id: u32,
+    project: String,
     time_limit_secs: u64,
 }
 
@@ -70,25 +74,34 @@ async fn create_task(
     Query(params): Query<CreateTaskParams>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
-    let task =
-        create_task_config(&state.core, params, body).await.map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    let task = create_task_config(&state.core_ref, params, body)
+        .await
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     tracing::debug!(task_config=?task, "new task");
-    let task_id = submit_task(&state.core, task).await.map_err(|e| {
-        match &e {
+    let task_id = submit_task(&state.core_ref, task)
+        .await
+        .map_err(|e| match &e {
             RunnerError::InvalidMachine(_)
             | RunnerError::InvalidSession(_)
-            | RunnerError::NonRunningSession(_) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+            | RunnerError::NonRunningSession(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+            }
             RunnerError::ProjectLimitExceeded(_) => (StatusCode::PAYMENT_REQUIRED, e.to_string()),
             _ => internal_error(&e),
-        }
-    })?;
+        })?;
     tracing::info!(%task_id, "task submitted");
     Ok((StatusCode::CREATED, Json(task_id.as_u64())))
 }
 
-async fn create_task_config(core_ref: &CoreRef, params: CreateTaskParams, body: Bytes) -> runner::Result<TaskConfig> {
+async fn create_task_config(
+    core_ref: &CoreRef,
+    params: CreateTaskParams,
+    body: Bytes,
+) -> runner::Result<TaskConfig> {
     if params.session_id.is_some() == params.project.is_some() {
-        return Err(RunnerError::GenericError("Task has to fill 'project' or 'session_id' but not both".to_string()));
+        return Err(RunnerError::GenericError(
+            "Task has to fill 'project' or 'session_id' but not both".to_string(),
+        ));
     }
     let session_id = params
         .session_id
@@ -130,7 +143,9 @@ impl From<&TaskState> for TaskStateResponse {
             TaskState::Waiting => Self::Waiting,
             TaskState::Running => Self::Running,
             TaskState::Finished => Self::Finished,
-            TaskState::Failed { error } => Self::Failed { error: error.clone() },
+            TaskState::Failed { error } => Self::Failed {
+                error: error.clone(),
+            },
             TaskState::Cancelled => Self::Cancelled,
         }
     }
@@ -150,7 +165,7 @@ async fn get_task(
     Path(id): Path<u64>,
 ) -> Result<Json<TaskStateResponse>, StatusCode> {
     let task_id = TaskId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let core = state.core.lock().unwrap();
+    let core = state.core_ref.lock().unwrap();
     let task_state = core.task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(TaskStateResponse::from(task_state)))
 }
@@ -191,7 +206,7 @@ async fn get_session(
     Path(id): Path<u64>,
 ) -> Result<Json<SessionStateResponse>, StatusCode> {
     let session_id = SessionId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let core = state.core.lock().unwrap();
+    let core = state.core_ref.lock().unwrap();
     let session_state = core
         .session_state(session_id)
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -211,11 +226,15 @@ async fn create_session_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CreateSessionParams>,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
+    let project_id = get_project_id_by_name(&state.core_ref, &params.project)
+        .await
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     let config = SessionConfig {
         machine_id: MachineId::from(params.machine_id),
+        project_id,
         time_limit: Duration::from_secs(params.time_limit_secs),
     };
-    let session_id = create_session(&state.core, config)
+    let session_id = create_session(&state.core_ref, config)
         .await
         .map_err(|e| internal_error(e))?;
     tracing::info!(session_id = session_id.as_u64(), "session created");
@@ -237,11 +256,12 @@ async fn get_machine_arch(
     Path(machine_id): Path<u32>,
 ) -> Result<String, (StatusCode, String)> {
     let receiver = {
-        let core = state.core.lock().unwrap();
-        core.get_arch(MachineId::from(machine_id)).map_err(|e| match &e {
-            RunnerError::InvalidMachine(_) => (StatusCode::NOT_FOUND, e.to_string()),
-            _ => internal_error(&e),
-        })?
+        let core = state.core_ref.lock().unwrap();
+        core.get_arch(MachineId::from(machine_id))
+            .map_err(|e| match &e {
+                RunnerError::InvalidMachine(_) => (StatusCode::NOT_FOUND, e.to_string()),
+                _ => internal_error(&e),
+            })?
     };
     receiver
         .await
@@ -268,7 +288,7 @@ async fn get_machine_calibration(
     Path((machine_id, calibration, endpoint)): Path<(u32, String, String)>,
 ) -> Result<String, (StatusCode, String)> {
     let receiver = {
-        let core = state.core.lock().unwrap();
+        let core = state.core_ref.lock().unwrap();
         core.get_calibration(MachineId::from(machine_id), &calibration, &endpoint)
             .map_err(|e| match &e {
                 RunnerError::InvalidMachine(_) => (StatusCode::NOT_FOUND, e.to_string()),
@@ -287,7 +307,9 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
-fn default_active() -> bool { true }
+fn default_active() -> bool {
+    true
+}
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 struct CreateProjectRequest {
@@ -330,7 +352,7 @@ async fn get_project_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
-    let project = get_project_by_name(&state.core, &name)
+    let project = get_project_by_name(&state.core_ref, &name)
         .await
         .map_err(|e| internal_error(&e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project '{name}' not found")))?;
@@ -351,7 +373,7 @@ async fn create_project_handler(
     Json(body): Json<CreateProjectRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let limit = Duration::from_millis(body.limit_ms as u64);
-    create_project(&state.core, body.name, body.active, limit)
+    create_project(&state.core_ref, body.name, body.active, limit)
         .await
         .map_err(|e| match &e {
             RunnerError::ProjectAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
@@ -370,33 +392,34 @@ async fn create_project_handler(
 async fn list_projects_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ProjectResponse>>, (StatusCode, String)> {
-    let rows = list_projects_reactor(&state.core)
+    let rows = list_projects_reactor(&state.core_ref)
         .await
         .map_err(|e| internal_error(e))?;
-    Ok(Json(rows.into_iter().map(ProjectResponse::from_project).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(ProjectResponse::from_project)
+            .collect(),
+    ))
 }
 
 #[derive(OpenApi)]
 struct ApiDoc;
 
-pub async fn run(
-    version: &'static str,
-    service_conf: ServiceConfiguration,
-) -> runner::Result<()> {
+pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> runner::Result<()> {
     let pool = runner::db::create_pool().await?;
     let machines = runner::db::load_machines(&pool).await?;
     if machines.is_empty() {
         tracing::warn!("no machines found in database");
     } else {
         tracing::info!(count = machines.len(), "loaded machines from database");
-        for m in &machines {
-            tracing::info!(id = m.id, name = %m.name, backend = ?m.backend, "machine loaded");
+        for (machine_id, m) in &machines {
+            tracing::info!(id = %machine_id, name = %m.name, backend = ?m.backend, "machine loaded");
         }
     }
     let runner_conf = RunnerConfiguration { machines };
     let state = Arc::new(AppState {
         version,
-        core: Core::new(runner_conf, pool).await?,
+        core_ref: Core::new(runner_conf, pool).await?,
     });
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())

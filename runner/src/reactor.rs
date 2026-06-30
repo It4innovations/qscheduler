@@ -1,9 +1,9 @@
-use std::time::Duration;
 use crate::core::{Core, CoreRef};
 use crate::db;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
+use std::time::Duration;
 
 pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
     tracing::debug!("Submitting task");
@@ -23,7 +23,11 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
 }
 
 pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate::Result<SessionId> {
-    let pool = core_ref.lock().unwrap().pool().clone();
+    let pool = {
+        let core = core_ref.lock().unwrap();
+        core.validate_session_config(&config)?;
+        core.pool().clone()
+    };
     let session_id = db::insert_session(&pool, &config).await?;
     tracing::debug!(%session_id, "New session");
     let result = core_ref.lock().unwrap().add_session(session_id, config);
@@ -41,10 +45,20 @@ pub async fn create_project(
     limit: Duration,
 ) -> crate::Result<ProjectId> {
     let pool = core_ref.lock().unwrap().pool().clone();
-    tracing::debug!(name, active_ms=active, limit_ms=limit.as_millis(), "New project");
+    tracing::debug!(
+        name,
+        active_ms = active,
+        limit_ms = limit.as_millis(),
+        "New project"
+    );
     let id = db::insert_project(&pool, name.as_str(), active, limit).await?;
     let mut core = core_ref.lock().unwrap();
-    if core.split().project_map.find_project_by_name(&name).is_none() {
+    if core
+        .split()
+        .project_map
+        .find_project_by_name(&name)
+        .is_none()
+    {
         core.split_mut().project_map.add_project(Project {
             id,
             name,
@@ -87,16 +101,27 @@ pub async fn get_project_by_name(core_ref: &CoreRef, name: &str) -> crate::Resul
 }
 
 pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<ProjectId> {
-    let cached = core_ref.lock().unwrap().split().project_map.find_project_id_by_name(name);
+    let cached = core_ref
+        .lock()
+        .unwrap()
+        .split()
+        .project_map
+        .find_project_id_by_name(name);
     match cached {
         Some(id) => Ok(id),
         None => {
             let pool = core_ref.lock().unwrap().pool().clone();
-            let project = db::find_project_by_name(&pool, name).await?
+            let project = db::find_project_by_name(&pool, name)
+                .await?
                 .ok_or_else(|| crate::error::RunnerError::ProjectNotFound(name.to_string()))?;
             let id = project.id;
             let mut core = core_ref.lock().unwrap();
-            if core.split().project_map.find_project_id_by_name(name).is_none() {
+            if core
+                .split()
+                .project_map
+                .find_project_id_by_name(name)
+                .is_none()
+            {
                 core.split_mut().project_map.add_project(project);
             }
             Ok(id)

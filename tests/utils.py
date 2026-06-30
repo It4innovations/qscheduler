@@ -6,6 +6,7 @@ import time
 import json
 
 OK_RESULT = {"type": "Ok"}
+TEST_PROJECT = "test-project"
 
 
 class TestTask:
@@ -70,7 +71,13 @@ class QScheduler:
         )
 
     def _add_machine(self):
-        args = [self._binary, "machine", "add", MACHINE_NAME, f"--queue-size={self.queue_size}"]
+        args = [
+            self._binary,
+            "machine",
+            "add",
+            MACHINE_NAME,
+            f"--queue-size={self.queue_size}",
+        ]
         if self.notify_url:
             args.append(f"--notify-url={self.notify_url}")
         if self.notify_token:
@@ -114,7 +121,7 @@ class QScheduler:
         self._add_machine()
         self._start_binary()
         if add_test_project:
-            self.add_project("test-project", 1000)
+            self.add_project(TEST_PROJECT, 100_000)
 
     def cleanup(self):
         if self._process is None:
@@ -164,7 +171,9 @@ class QScheduler:
         self.stop(kill=kill)
         self._start_binary(log_name="qscheduler-restart.log")
 
-    def add_project(self, name: str, limit_ms: int, active: bool = True, expect_status_code=None):
+    def add_project(
+        self, name: str, limit_ms: int, active: bool = True, expect_status_code=None
+    ):
         r = requests.post(
             self.url("projects"),
             json={"name": name, "limit_ms": limit_ms, "active": active},
@@ -199,13 +208,9 @@ class QScheduler:
             raise Exception("Cannot set both session_id and project")
         if session_id is None and project is None:
             # Attach to default project
-            project = "test-project"
+            project = TEST_PROJECT
         payload = task.create_payload()
-        msg = {
-            "session_id": session_id,
-            "machine_id": machine_id,
-            "project": project
-        }
+        msg = {"session_id": session_id, "machine_id": machine_id, "project": project}
         if session_id is not None:
             msg["session_id"] = session_id
 
@@ -225,10 +230,13 @@ class QScheduler:
             raise Exception(f"HTTP {r.status_code} submitting task: {r.text}")
         return r.json()
 
-    def new_session(self, time_limit: int, machine_id: int = 1):
+    def new_session(
+        self, time_limit: int, machine_id: int = 1, project: str = TEST_PROJECT
+    ):
         msg = {
             "machine_id": machine_id,
             "time_limit_secs": time_limit,
+            "project": TEST_PROJECT,
         }
         r = requests.post(self.url("sessions"), params=msg, timeout=5)
         r.raise_for_status()
