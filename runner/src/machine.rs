@@ -7,6 +7,7 @@ use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Default)]
@@ -27,6 +28,7 @@ pub(crate) enum QueueItem {
 pub struct MachineConfig {
     pub name: String,
     pub queue_size: usize,
+    pub session_check_interval: Duration,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }
@@ -42,6 +44,7 @@ pub(crate) struct ResumeTask {
     pub task_id: TaskId,
     pub backend_id: String,
     pub payload: Bytes,
+    pub cancel: bool,
 }
 
 pub(crate) struct Machine {
@@ -61,7 +64,7 @@ impl Machine {
             running_session: None,
             config,
             notifier: Arc::new(Notify::new()),
-            backend
+            backend,
         }
     }
 

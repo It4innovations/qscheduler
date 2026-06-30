@@ -1,5 +1,6 @@
 from utils import TestTask as TT
 
+
 def test_create_and_list_projects(qscheduler_test):
     qscheduler_test.start(add_test_project=False)
 
@@ -12,9 +13,24 @@ def test_create_and_list_projects(qscheduler_test):
     assert len(projects) == 3
     by_id = {p["name"]: p for p in projects}
 
-    assert by_id["alpha"] == {"name": "alpha", "consumed_ms": 0, "limit_ms": 10_000, "active": True}
-    assert by_id["beta"] == {"name": "beta", "consumed_ms": 0, "limit_ms": 20_000, "active": False}
-    assert by_id["gamma"] == {"name": "gamma", "consumed_ms": 0, "limit_ms": 30_000, "active": True}
+    assert by_id["alpha"] == {
+        "name": "alpha",
+        "consumed_ms": 0,
+        "limit_ms": 10_000,
+        "active": True,
+    }
+    assert by_id["beta"] == {
+        "name": "beta",
+        "consumed_ms": 0,
+        "limit_ms": 20_000,
+        "active": False,
+    }
+    assert by_id["gamma"] == {
+        "name": "gamma",
+        "consumed_ms": 0,
+        "limit_ms": 30_000,
+        "active": True,
+    }
 
 
 def test_duplicate_name_fail(qscheduler_test):

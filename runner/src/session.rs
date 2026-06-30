@@ -1,4 +1,5 @@
 use crate::machine::MachineId;
+use crate::project::ProjectId;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -69,6 +70,7 @@ pub enum SessionState {
 
 pub struct SessionConfig {
     pub machine_id: MachineId,
+    pub project_id: ProjectId,
     pub time_limit: Duration,
 }
 

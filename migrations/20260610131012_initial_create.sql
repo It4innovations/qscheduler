@@ -5,10 +5,7 @@ CREATE TABLE machines (
     id SERIAL PRIMARY KEY CHECK (id <> 0),
     name VARCHAR(250) NOT NULL UNIQUE,
     type machine_type NOT NULL,
-    queue_size INTEGER NOT NULL DEFAULT 100,
-    config JSON NOT NULL,
-    notify_url TEXT,
-    notify_token TEXT
+    config JSON NOT NULL
 );
 
 CREATE TABLE projects (
@@ -22,10 +19,12 @@ CREATE TABLE projects (
 CREATE TABLE sessions (
     id BIGSERIAL PRIMARY KEY CHECK (id <> 0),
     machine_id INTEGER NOT NULL REFERENCES machines(id),
-    project_id INTEGER REFERENCES projects(id),
-    time_limit_secs INTEGER NOT NULL,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    time_limit_ms BIGINT NOT NULL,
     opened_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
     closed_at TIMESTAMPTZ,
+    exec_time_ms BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -59,4 +58,8 @@ $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER task_exec_time_changed
     AFTER UPDATE OF exec_time_ms ON tasks
+    FOR EACH ROW EXECUTE FUNCTION update_project_consumed_ms();
+
+CREATE TRIGGER session_exec_time_changed
+    AFTER UPDATE OF exec_time_ms ON sessions
     FOR EACH ROW EXECUTE FUNCTION update_project_consumed_ms();

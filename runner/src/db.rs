@@ -1,9 +1,13 @@
-use std::time::Duration;
+use crate::MachineId;
+use crate::config::MachineConfiguration;
+use crate::error::RunnerError;
+use crate::machine::MachineConfig;
+use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
-use crate::project::{Project, ProjectId};
+use std::time::Duration;
 
 pub async fn create_pool() -> sqlx::Result<PgPool> {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -23,39 +27,30 @@ pub fn is_already_exists_error(err: &sqlx::Error) -> bool {
     }
 }
 
-pub async fn insert_machine(
-    pool: &PgPool,
-    name: &str,
-    queue_size: i32,
-    config: &crate::backend::BackendConfig,
-    notify_url: Option<&str>,
-    notify_token: Option<&str>,
-) -> crate::Result<i32> {
-    let machine_type = match config {
+pub async fn insert_machine(pool: &PgPool, config: &MachineConfiguration) -> crate::Result<i32> {
+    let machine_type = match config.backend {
         crate::backend::BackendConfig::Iqm(_) => "iqm",
         crate::backend::BackendConfig::Test => "test",
     };
     let config_str = serde_json::to_string(config)
         .map_err(|e| crate::error::RunnerError::GenericError(e.to_string()))?;
     let row = sqlx::query(
-        "INSERT INTO machines (name, type, queue_size, config, notify_url, notify_token) \
-         VALUES ($1, $2::machine_type, $3, $4::json, $5, $6) RETURNING id",
+        "INSERT INTO machines (name, type, config) \
+         VALUES ($1, $2::machine_type, $3::json) RETURNING id",
     )
-    .bind(name)
+    .bind(&config.name)
     .bind(machine_type)
-    .bind(queue_size)
     .bind(&config_str)
-    .bind(notify_url)
-    .bind(notify_token)
     .fetch_one(pool)
     .await
     .map_err(|e| {
         if is_already_exists_error(&e) {
-            crate::error::RunnerError::MachineAlreadyExists(name.to_string())
+            crate::error::RunnerError::MachineAlreadyExists(config.name.to_string())
         } else {
             crate::error::RunnerError::Sqlx(e)
         }
     })?;
+    use sqlx::Row;
     Ok(row.get("id"))
 }
 
@@ -66,31 +61,32 @@ pub struct MachineRow {
     pub notify_token: Option<String>,
 }
 
-pub async fn get_machine_by_name(
-    pool: &PgPool,
-    name: &str,
-) -> crate::Result<Option<MachineRow>> {
-    let row = sqlx::query(
-        "SELECT queue_size, config::text AS config_text, notify_url, notify_token \
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for MachineRow {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        let config_str: String = row.try_get("config")?;
+        let config = serde_json::from_str(&config_str).map_err(|e| sqlx::Error::ColumnDecode {
+            index: "config".to_string(),
+            source: e.into(),
+        })?;
+        Ok(MachineRow {
+            queue_size: row.try_get("queue_size")?,
+            config,
+            notify_url: row.try_get("notify_url")?,
+            notify_token: row.try_get("notify_token")?,
+        })
+    }
+}
+
+pub async fn get_machine_by_name(pool: &PgPool, name: &str) -> crate::Result<Option<MachineRow>> {
+    sqlx::query_as::<_, MachineRow>(
+        "SELECT queue_size, config::text AS config, notify_url, notify_token \
          FROM machines WHERE name = $1",
     )
     .bind(name)
     .fetch_optional(pool)
-    .await?;
-    if let Some(row) = row {
-        let queue_size: i32 = row.get("queue_size");
-        let config_text: String = row.get("config_text");
-        let config: crate::backend::BackendConfig = serde_json::from_str(&config_text)
-            .map_err(|e| crate::error::RunnerError::GenericError(e.to_string()))?;
-        Ok(Some(MachineRow {
-            queue_size,
-            config,
-            notify_url: row.get("notify_url"),
-            notify_token: row.get("notify_token"),
-        }))
-    } else {
-        Ok(None)
-    }
+    .await
+    .map_err(crate::error::RunnerError::Sqlx)
 }
 
 pub async fn update_machine(
@@ -118,6 +114,7 @@ pub async fn update_machine(
 }
 
 /// A non-terminal task loaded from the database during startup restoration.
+#[derive(sqlx::FromRow)]
 pub struct RestoredTask {
     pub id: i64,
     pub machine_id: i32,
@@ -128,85 +125,110 @@ pub struct RestoredTask {
 }
 
 /// A non-terminal session loaded from the database during startup restoration.
+#[derive(sqlx::FromRow)]
 pub struct RestoredSession {
     pub id: i64,
     pub machine_id: i32,
-    pub time_limit_secs: i32,
-    /// True if the session had been opened (`opened_at` is set) but not yet closed.
+    pub project_id: i32,
+    pub time_limit_ms: i64,
     pub opened: bool,
+    pub closed: bool,
 }
 
 fn exec_time_ms(exec_time: Duration) -> Option<i64> {
-    if exec_time.is_zero() { None } else { Some(exec_time.as_millis() as i64) }
+    if exec_time.is_zero() {
+        None
+    } else {
+        Some(exec_time.as_millis() as i64)
+    }
 }
 
+#[derive(sqlx::FromRow)]
 pub struct ProjectRow {
-    pub id: String,
+    pub id: i32,
+    pub name: String,
     pub consumed_ms: i64,
     pub limit_ms: i64,
     pub active: bool,
 }
 
-pub(crate) async fn insert_project(pool: &PgPool, name: &str, active: bool, limit: Duration) -> crate::Result<ProjectId> {
-    sqlx::query(
-        "INSERT INTO projects (name, limit_ms, active) VALUES ($1, $2, $3) RETURNING id",
+impl From<ProjectRow> for Project {
+    fn from(r: ProjectRow) -> Self {
+        Project {
+            id: ProjectId::try_from(r.id).unwrap(),
+            name: r.name,
+            consumed: Duration::from_millis(r.consumed_ms as u64),
+            limit: Duration::from_millis(r.limit_ms as u64),
+            active: r.active,
+        }
+    }
+}
+
+pub(crate) async fn insert_project(
+    pool: &PgPool,
+    name: &str,
+    active: bool,
+    limit: Duration,
+) -> crate::Result<ProjectId> {
+    sqlx::query("INSERT INTO projects (name, limit_ms, active) VALUES ($1, $2, $3) RETURNING id")
+        .bind(name)
+        .bind(limit.as_millis() as i64)
+        .bind(active)
+        .fetch_one(pool)
+        .await
+        .map(|row| {
+            use sqlx::Row;
+            let id: i32 = row.get("id");
+            ProjectId::try_from(id).unwrap()
+        })
+        .map_err(|e| {
+            if is_already_exists_error(&e) {
+                crate::error::RunnerError::ProjectAlreadyExists(name.to_string())
+            } else {
+                crate::error::RunnerError::Sqlx(e)
+            }
+        })
+}
+
+pub(crate) async fn find_project_by_name(
+    pool: &PgPool,
+    name: &str,
+) -> crate::Result<Option<Project>> {
+    sqlx::query_as::<_, ProjectRow>(
+        "SELECT id, name, consumed_ms, limit_ms, active FROM projects WHERE name = $1",
     )
     .bind(name)
-    .bind(limit.as_millis() as i64)
-    .bind(active)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .map(|row| { let id: i32 = row.get("id"); ProjectId::try_from(id).unwrap() })
-    .map_err(|e| {
-        if is_already_exists_error(&e) {
-            crate::error::RunnerError::ProjectAlreadyExists(name.to_string())
-        } else {
-            crate::error::RunnerError::Sqlx(e)
-        }
-    })
+    .map(|opt| opt.map(Project::from))
+    .map_err(crate::error::RunnerError::Sqlx)
 }
 
-pub(crate) async fn find_project_by_name(pool: &PgPool, name: &str) -> crate::Result<Option<Project>> {
-    sqlx::query("SELECT id, consumed_ms, limit_ms, active FROM projects WHERE name = $1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .map(|opt| opt.map(|row| {
-            let id: i32 = row.get("id");
-            let consumed_ms: i64 = row.get("consumed_ms");
-            let limit_ms: i64 = row.get("limit_ms");
-            Project {
-                id: ProjectId::try_from(id).unwrap(),
-                name: name.to_string(),
-                consumed: Duration::from_millis(consumed_ms as u64),
-                limit: Duration::from_millis(limit_ms as u64),
-                active: row.get("active"),
-            }
-        }))
-        .map_err(crate::error::RunnerError::Sqlx)
-}
-
-pub async fn list_projects(pool: &PgPool) -> crate::Result<Vec<(Project)>> {
-    let rows = sqlx::query(
+pub async fn list_projects(pool: &PgPool) -> crate::Result<Vec<Project>> {
+    sqlx::query_as::<_, ProjectRow>(
         "SELECT id, name, consumed_ms, limit_ms, active FROM projects ORDER BY id",
     )
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let id: i32 = row.get("id");
-            let consumed_ms: i64 = row.get("consumed_ms");
-            let limit_ms: i64 = row.get("limit_ms");
-            (Project {
-                id: ProjectId::try_from(id).unwrap(),
-                name: row.get("name"),
-                consumed: Duration::from_millis(consumed_ms as u64),
-            limit: Duration::from_millis(limit_ms as u64),
-            active: row.get("active"),
-        })
-        })
-        .collect())
+    .await
+    .map(|rows| rows.into_iter().map(Project::from).collect())
+    .map_err(crate::error::RunnerError::Sqlx)
+}
+
+/// Load only the projects referenced by the given ids, for restoring [`ProjectMap`]
+/// with just the entries needed by restored tasks (rather than every project).
+pub async fn load_projects_by_ids(
+    pool: &PgPool,
+    ids: impl Iterator<Item = &ProjectId>,
+) -> crate::Result<Vec<Project>> {
+    let ids: Vec<i32> = ids.map(|id| id.as_i32()).collect();
+    sqlx::query_as::<_, ProjectRow>(
+        "SELECT id, name, consumed_ms, limit_ms, active FROM projects WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .map(|rows| rows.into_iter().map(Project::from).collect())
+    .map_err(crate::error::RunnerError::Sqlx)
 }
 
 pub async fn update_task_finished(pool: &PgPool, task_id: TaskId, exec_time: Duration) {
@@ -236,6 +258,18 @@ pub async fn update_task_failed(pool: &PgPool, task_id: TaskId, exec_time: Durat
     }
 }
 
+pub async fn update_tasks_cancelled(pool: &PgPool, task_ids: &[TaskId]) {
+    let task_ids: Vec<i64> = task_ids.into_iter().map(|id| id.as_i64()).collect();
+    if let Err(e) =
+        sqlx::query("UPDATE tasks SET state = 'cancelled', finished_at = NOW() WHERE id = ANY($1)")
+            .bind(task_ids.as_slice())
+            .execute(pool)
+            .await
+    {
+        tracing::error!(?task_ids, error = %e, "failed to update task cancelled in db");
+    }
+}
+
 pub async fn update_task_cancelled(pool: &PgPool, task_id: TaskId, exec_time: Duration) {
     if let Err(e) = sqlx::query(
         "UPDATE tasks SET state = 'cancelled', finished_at = NOW(), exec_time_ms = $2 WHERE id = $1",
@@ -250,10 +284,11 @@ pub async fn update_task_cancelled(pool: &PgPool, task_id: TaskId, exec_time: Du
 }
 
 pub async fn update_session_opened(pool: &PgPool, session_id: SessionId) {
-    if let Err(e) = sqlx::query("UPDATE sessions SET opened_at = NOW() WHERE id = $1")
-        .bind(session_id.as_u64() as i64)
-        .execute(pool)
-        .await
+    if let Err(e) =
+        sqlx::query("UPDATE sessions SET opened_at = NOW(), updated_at = NOW() WHERE id = $1")
+            .bind(session_id.as_u64() as i64)
+            .execute(pool)
+            .await
     {
         tracing::error!(%session_id, error = %e, "failed to update session opened_at in db");
     }
@@ -262,9 +297,22 @@ pub async fn update_session_opened(pool: &PgPool, session_id: SessionId) {
 pub async fn close_session_with_tasks(
     pool: &PgPool,
     session_id: SessionId,
+    exec_time: Duration,
     cancelled_tasks: &[TaskId],
 ) {
-    if let Err(e) = try_close_session_with_tasks(pool, session_id, cancelled_tasks).await {
+    if let Err(e) = try_close_session_with_tasks(pool, session_id, exec_time, cancelled_tasks).await
+    {
+        tracing::error!(%session_id, error = %e, "failed to close session in db, changes rolled back");
+    }
+}
+
+pub async fn close_dead_session(pool: &PgPool, session_id: SessionId) {
+    if let Err(e) =
+        sqlx::query("UPDATE sessions SET updated_at = NULL, closed_at = NOW() WHERE id = $1")
+            .bind(session_id.as_u64() as i64)
+            .execute(pool)
+            .await
+    {
         tracing::error!(%session_id, error = %e, "failed to close session in db, changes rolled back");
     }
 }
@@ -272,13 +320,17 @@ pub async fn close_session_with_tasks(
 async fn try_close_session_with_tasks(
     pool: &PgPool,
     session_id: SessionId,
+    exec_time: Duration,
     cancelled_tasks: &[TaskId],
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE sessions SET closed_at = NOW() WHERE id = $1")
-        .bind(session_id.as_u64() as i64)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE sessions SET updated_at = NULL, closed_at = NOW(), exec_time_ms = $2 WHERE id = $1",
+    )
+    .bind(session_id.as_u64() as i64)
+    .bind(exec_time.as_millis() as i64)
+    .execute(&mut *tx)
+    .await?;
     for &task_id in cancelled_tasks {
         sqlx::query("UPDATE tasks SET state = 'cancelled', finished_at = NOW() WHERE id = $1")
             .bind(task_id.as_u64() as i64)
@@ -319,20 +371,34 @@ pub async fn insert_task(pool: &PgPool, config: &TaskConfig) -> crate::Result<Ta
     .fetch_one(pool)
     .await?;
 
+    use sqlx::Row;
     let id: i64 = row.get("id");
     TaskId::try_from(id as u64)
         .map_err(|_| crate::error::RunnerError::GenericError("invalid task id from db".into()))
 }
 
+pub async fn update_session_exec_time(pool: &PgPool, session_id: SessionId, exec_time_ms: i64) {
+    if let Err(e) = sqlx::query("UPDATE sessions SET exec_time_ms = $2 WHERE id = $1")
+        .bind(session_id.as_i64())
+        .bind(exec_time_ms)
+        .execute(pool)
+        .await
+    {
+        tracing::error!(%session_id, error = %e, "failed to update session exec_time_ms in db");
+    }
+}
+
 pub async fn insert_session(pool: &PgPool, config: &SessionConfig) -> crate::Result<SessionId> {
     let row = sqlx::query(
-        "INSERT INTO sessions (machine_id, time_limit_secs) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO sessions (machine_id, project_id, time_limit_ms) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(config.machine_id.as_u32() as i32)
-    .bind(config.time_limit.as_secs() as i32)
+    .bind(config.project_id.as_i32())
+    .bind(config.time_limit.as_millis() as i64)
     .fetch_one(pool)
     .await?;
 
+    use sqlx::Row;
     let id: i64 = row.get("id");
     SessionId::try_from(id as u64)
         .map_err(|_| crate::error::RunnerError::GenericError("invalid session id from db".into()))
@@ -349,77 +415,48 @@ pub async fn update_task_backend_id(pool: &PgPool, task_id: TaskId, backend_id: 
     }
 }
 
-pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<crate::config::MachineConfiguration>> {
-    let rows = sqlx::query(
-        "SELECT id, name, queue_size, config::text AS config_text, notify_url, notify_token \
-         FROM machines ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, MachineConfiguration)>> {
+    let rows = sqlx::query("SELECT id, config::text AS config FROM machines ORDER BY id")
+        .fetch_all(pool)
+        .await?;
     let mut machines = Vec::with_capacity(rows.len());
     for row in rows {
         let id: i32 = row.get("id");
-        let name: String = row.get("name");
-        let queue_size: i32 = row.get("queue_size");
-        let config_text: String = row.get("config_text");
-        let notify_url: Option<String> = row.get("notify_url");
-        let notify_token: Option<String> = row.get("notify_token");
-        let backend: crate::backend::BackendConfig = serde_json::from_str(&config_text)
-            .map_err(|e| {
-                crate::error::RunnerError::GenericError(format!(
-                    "failed to parse config for machine '{name}': {e}"
-                ))
-            })?;
-        let notify = notify_url.map(|url| crate::callback::NotifyConfig {
-            url,
-            token: notify_token,
-        });
-        machines.push(crate::config::MachineConfiguration {
-            id: id as u32,
-            name,
-            queue_size: queue_size as usize,
-            notify,
-            backend,
-        });
+        let machine_id = MachineId::try_from(id as u32)
+            .map_err(|_| RunnerError::GenericError("Cannot parse machine ID".into()))?;
+        let config_str: &str = row.get("config");
+        let config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
+            RunnerError::GenericError("Cannot parse machine configuration from DB".into())
+        })?;
+        machines.push((machine_id, config));
     }
     Ok(machines)
 }
 
 /// Load all tasks that are still in a non-terminal state (stored as `waiting`).
 pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>> {
-    let rows = sqlx::query(
+    sqlx::query_as::<_, RestoredTask>(
         "SELECT id, machine_id, session_id, project_id, backend_id, payload FROM tasks WHERE state = 'waiting'",
     )
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| RestoredTask {
-            id: row.get("id"),
-            machine_id: row.get("machine_id"),
-            session_id: row.get("session_id"),
-            project_id: row.get("project_id"),
-            backend_id: row.get("backend_id"),
-            payload: row.get("payload"),
-        })
-        .collect())
+    .await
 }
 
-/// Load all sessions that have not been closed yet (waiting or open).
-pub async fn load_active_sessions(pool: &PgPool) -> sqlx::Result<Vec<RestoredSession>> {
-    let rows = sqlx::query(
-        "SELECT id, machine_id, time_limit_secs, (opened_at IS NOT NULL) AS opened \
-         FROM sessions WHERE closed_at IS NULL",
+/// Load all sessions that have not been closed yet (waiting or open), plus any
+/// already-closed session still referenced by a non-terminal task: closing a
+/// session and cancelling its in-flight tasks isn't atomic (the task-side update
+/// only lands once the backend confirms cancellation), so a crash can leave
+/// `closed_at` set while one of its tasks is still `waiting` with a `backend_id`.
+pub async fn load_active_sessions(
+    pool: &PgPool,
+    active_tasks: &[RestoredTask],
+) -> sqlx::Result<Vec<RestoredSession>> {
+    let task_session_ids: Vec<i64> = active_tasks.iter().filter_map(|t| t.session_id).collect();
+    sqlx::query_as::<_, RestoredSession>(
+        "SELECT id, machine_id, project_id, time_limit_ms, (opened_at IS NOT NULL) AS opened, (closed_at IS NOT NULL) AS closed \
+         FROM sessions WHERE closed_at IS NULL OR id = ANY($1)",
     )
+    .bind(&task_session_ids)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| RestoredSession {
-            id: row.get("id"),
-            machine_id: row.get("machine_id"),
-            time_limit_secs: row.get("time_limit_secs"),
-            opened: row.get("opened"),
-        })
-        .collect())
+    .await
 }

@@ -23,10 +23,20 @@ pub(crate) trait Backend: Send + Sync {
     /// Re-attach to a task that was already submitted before a restart, using the
     /// backend job id persisted in the database. The backend resumes monitoring it
     /// and reports its current state via [`FromBackendMessage`].
-    fn resume_task(self: Arc<Self>, task_id: TaskId, backend_id: String, payload: Bytes);
+    fn resume_task(
+        self: Arc<Self>,
+        task_id: TaskId,
+        backend_id: String,
+        payload: Bytes,
+        cancel: bool,
+    );
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str);
     fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>>;
-    fn get_calibration(self: Arc<Self>, calibration_id: &str, endpoint: &str) -> oneshot::Receiver<crate::Result<String>>;
+    fn get_calibration(
+        self: Arc<Self>,
+        calibration_id: &str,
+        endpoint: &str,
+    ) -> oneshot::Receiver<crate::Result<String>>;
 }
 
 pub(crate) enum FromBackendMessage {

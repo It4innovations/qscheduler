@@ -50,9 +50,7 @@ def db(db_url) -> str:
     admin_conn = admin_connect()
     try:
         with admin_conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(temp_name))
-            )
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(temp_name)))
     finally:
         admin_conn.close()
 
@@ -68,9 +66,7 @@ def db(db_url) -> str:
     try:
         with admin_conn.cursor() as cur:
             terminate_connections(cur)
-            cur.execute(
-                sql.SQL("DROP DATABASE {}").format(sql.Identifier(temp_name))
-            )
+            cur.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(temp_name)))
     finally:
         admin_conn.close()
 
@@ -123,14 +119,18 @@ class TestBackend:
 
 @fixture(scope="function")
 def qscheduler_iqm(tmp_path, qscheduler_port, iqm_backend, db):
-    qs = QScheduler(str(tmp_path), qscheduler_port, backend=iqm_backend, database_url=db)
+    qs = QScheduler(
+        str(tmp_path), qscheduler_port, backend=iqm_backend, database_url=db
+    )
     yield qs
     qs.cleanup()
 
 
 @fixture(scope="function")
 def qscheduler_test(tmp_path, qscheduler_port, db):
-    qs = QScheduler(str(tmp_path), qscheduler_port, backend=TestBackend(), database_url=db)
+    qs = QScheduler(
+        str(tmp_path), qscheduler_port, backend=TestBackend(), database_url=db
+    )
     yield qs
     qs.cleanup()
 

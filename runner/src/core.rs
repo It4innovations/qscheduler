@@ -1,18 +1,19 @@
 use crate::backend::create_backend;
 use crate::config::RunnerConfiguration;
-use crate::{db, Project};
+use crate::db::close_dead_session;
+use crate::error::RunnerError;
 use crate::launcher::start_launcher;
 use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
+use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskMap, TaskParent, TaskState};
+use crate::{Project, db};
 use bytes::Bytes;
 use sqlx::postgres::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
-use crate::error::RunnerError;
-use crate::project::{ProjectId, ProjectMap};
 
 #[allow(dead_code)]
 pub(crate) struct CoreSplit<'a> {
@@ -45,17 +46,18 @@ pub type CoreRef = Arc<Mutex<Core>>;
 
 impl Core {
     pub async fn new(config: RunnerConfiguration, pool: PgPool) -> crate::Result<CoreRef> {
-
         let mut machine_map: MachineMap = Default::default();
         let mut backends = Vec::with_capacity(config.machines.len());
-        for m in config.machines {
-            let machine_id = MachineId::from(m.id);
+        for (machine_id, m) in config.machines {
             let (backend, backend_receiver) = create_backend(&m.backend);
             machine_map.insert(Machine::new(
                 machine_id,
                 MachineConfig {
                     name: m.name,
                     queue_size: m.queue_size,
+                    session_check_interval: Duration::from_millis(
+                        m.session_check_interval_ms as u64,
+                    ),
                     notify: m.notify,
                     backend: m.backend,
                 },
@@ -95,13 +97,6 @@ impl Core {
     /// Must run before [`Core::start_launchers`] so queues are populated first.
     async fn restore(core_ref: &CoreRef) -> crate::Result<HashMap<MachineId, Vec<ResumeTask>>> {
         let pool = core_ref.lock().unwrap().pool().clone();
-        let sessions = match db::load_active_sessions(&pool).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to load sessions for restoration");
-                return Err(RunnerError::GenericError("Restoration failed".into()));
-            }
-        };
         let tasks = match db::load_active_tasks(&pool).await {
             Ok(t) => t,
             Err(e) => {
@@ -109,16 +104,42 @@ impl Core {
                 return Err(RunnerError::GenericError("Restoration failed".into()));
             }
         };
+        let sessions = match db::load_active_sessions(&pool, &tasks).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load sessions for restoration");
+                return Err(RunnerError::GenericError("Restoration failed".into()));
+            }
+        };
+        // Load only the projects actually needed: tasks parented directly by a
+        // project (not via a session) touch project_map during exec-time accounting,
+        // and every session carries a project_id that's read once it opens/closes
+        // (a re-queued session re-opens after restart and hits the same accounting).
+        let project_ids: HashSet<ProjectId> = tasks
+            .iter()
+            .filter_map(|t| t.project_id)
+            .filter_map(|id| ProjectId::try_from(id).ok())
+            .chain(
+                sessions
+                    .iter()
+                    .filter_map(|s| ProjectId::try_from(s.project_id).ok()),
+            )
+            .collect();
+        let projects = match db::load_projects_by_ids(&pool, project_ids.iter()).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load projects for restoration");
+                return Err(RunnerError::GenericError("Restoration failed".into()));
+            }
+        };
 
-        let open_session_ids: HashSet<SessionId> =
-            sessions.iter().filter(|s| s.opened).filter_map(|s| SessionId::try_from(s.id as u64).ok()).collect();
-
-        // Tasks belonging to an open session are cancelled together with the session.
-        let mut cancel_by_session: HashMap<SessionId, Vec<TaskId>> = HashMap::new();
         // Cancelled tasks whose session is no longer active (data anomaly): cancel directly.
         let mut orphan_cancels: Vec<TaskId> = Vec::new();
         let mut woken: HashSet<MachineId> = HashSet::new();
         let mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>> = HashMap::new();
+        // Sessions found dead here (still open, or closed but a submitted task lagged
+        // behind, see load_active_sessions): any of their resumed tasks must be cancelled.
+        let mut dead_session_ids: HashSet<SessionId> = HashSet::new();
         let task_len = tasks.len();
         {
             let mut core = core_ref.lock().unwrap();
@@ -126,23 +147,34 @@ impl Core {
                 machine_map,
                 task_map,
                 session_map,
+                project_map,
                 ..
             } = core.split_mut();
+
+            for project in projects {
+                project_map.add_project(project);
+            }
 
             for s in &sessions {
                 let Ok(session_id) = SessionId::try_from(s.id as u64) else {
                     continue;
                 };
                 let machine_id = MachineId::from(s.machine_id as u32);
+                let project_id =
+                    ProjectId::try_from(s.project_id as u32).expect("Invalid project id");
                 let config = SessionConfig {
                     machine_id,
-                    time_limit: Duration::from_secs(s.time_limit_secs as u64),
+                    project_id,
+                    time_limit: Duration::from_millis(s.time_limit_ms as u64),
                 };
                 let mut session = Session::new(session_id, config);
                 if s.opened {
-                    // A session that was open cannot be safely resumed: close it.
                     session.state = SessionState::Closed;
                     session_map.insert(session);
+                    if !s.closed {
+                        // It is ok to hold the core. There should be at most one session.
+                        close_dead_session(&pool, session_id).await;
+                    }
                 } else {
                     // Never opened (and therefore has no tasks yet): re-queue it.
                     if let Ok(machine) = machine_map.find_machine_mut(machine_id) {
@@ -167,29 +199,25 @@ impl Core {
                     payload: payload.clone(),
                 };
 
-                if let Some(sid) = session_id {
-                    // Belongs to a session that was open: cancel it.
-                    let mut task = Task::new(task_id, config);
-                    task.set_state(TaskState::Cancelled);
-                    task_map.insert(task);
-                    if open_session_ids.contains(&sid) {
-                        cancel_by_session.entry(sid).or_default().push(task_id);
-                    } else {
-                        orphan_cancels.push(task_id);
-                    }
-                } else if let Some(backend_id) = t.backend_id {
+                if let Some(backend_id) = t.backend_id {
                     // Already submitted to the backend: re-attach for monitoring.
                     let mut task = Task::new(task_id, config);
                     task.set_state(TaskState::Running);
                     task.set_backend_id(backend_id.clone());
                     task_map.insert(task);
                     if machine_map.find_machine(machine_id).is_ok() {
-                        resume_tasks.entry(machine_id).or_default().push(ResumeTask {
-                            task_id,
-                            backend_id,
-                            payload,
-                        });
+                        resume_tasks
+                            .entry(machine_id)
+                            .or_default()
+                            .push(ResumeTask {
+                                task_id,
+                                backend_id,
+                                payload,
+                                cancel: session_id.is_some(),
+                            });
                     }
+                } else if session_id.is_some() {
+                    orphan_cancels.push(task_id);
                 } else {
                     // Still waiting in the queue: re-queue it.
                     let task = Task::new(task_id, config);
@@ -209,15 +237,8 @@ impl Core {
             }
         }
 
-        // Persist the session closures (and their cancelled tasks) and any orphans.
-        for s in sessions.iter().filter(|s| s.opened) {
-            if let Ok(session_id) = SessionId::try_from(s.id as u64) {
-                let cancelled = cancel_by_session.remove(&session_id).unwrap_or_default();
-                db::close_session_with_tasks(&pool, session_id, &cancelled).await;
-            }
-        }
-        for task_id in orphan_cancels {
-            db::update_task_cancelled(&pool, task_id, Duration::ZERO).await;
+        if !orphan_cancels.is_empty() {
+            db::update_tasks_cancelled(&pool, &orphan_cancels).await;
         }
 
         if task_len > 0 || !sessions.is_empty() {
@@ -264,6 +285,17 @@ impl Core {
         }
     }
 
+    pub(crate) fn validate_session_config(&self, config: &SessionConfig) -> crate::Result<()> {
+        let project = self
+            .project_map
+            .find_project(config.project_id)
+            .ok_or_else(|| RunnerError::ProjectNotFound(config.project_id.to_string()))?;
+        if !project.has_time_for(config.time_limit) {
+            return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_task_config(&self, config: &TaskConfig) -> crate::Result<()> {
         let machine = self.machine_map.find_machine(config.machine_id)?;
         if let Some(s_id) = config.parent.session_id() {
@@ -272,17 +304,21 @@ impl Core {
                 _ => return Err(RunnerError::NonRunningSession(s_id)),
             }
         }
-        if let Some(project_id) = config.parent.project_id() {
-            if let Some(project) = self.project_map.find_project(project_id) {
-                if project.consumed > project.limit {
-                    return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
-                }
-            }
+        if let Some(project_id) = config.parent.project_id()
+            && let Some(project) = self.project_map.find_project(project_id)
+            && project.is_over_limit()
+        {
+            Err(RunnerError::ProjectLimitExceeded(project.name.clone()))
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
-    pub(crate) fn add_task(&mut self, task_id: TaskId, config: TaskConfig) -> crate::Result<TaskId> {
+    pub(crate) fn add_task(
+        &mut self,
+        task_id: TaskId,
+        config: TaskConfig,
+    ) -> crate::Result<TaskId> {
         let CoreSplitMut {
             machine_map,
             task_map,
@@ -297,7 +333,11 @@ impl Core {
         Ok(task_id)
     }
 
-    pub(crate) fn add_session(&mut self, session_id: SessionId, config: SessionConfig) -> crate::Result<SessionId> {
+    pub(crate) fn add_session(
+        &mut self,
+        session_id: SessionId,
+        config: SessionConfig,
+    ) -> crate::Result<SessionId> {
         let CoreSplitMut {
             machine_map,
             session_map,
@@ -321,12 +361,20 @@ impl Core {
         self.session_map.find_session(session_id).map(|s| s.state)
     }
 
-    pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    pub fn get_arch(
+        &self,
+        machine_id: MachineId,
+    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_arch())
     }
 
-    pub fn get_calibration(&self, machine_id: MachineId, calibration_id: &str, endpoint: &str) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    pub fn get_calibration(
+        &self,
+        machine_id: MachineId,
+        calibration_id: &str,
+        endpoint: &str,
+    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_calibration(calibration_id, endpoint))
     }

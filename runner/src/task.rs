@@ -1,12 +1,12 @@
+use crate::Project;
 use crate::machine::MachineId;
+use crate::project::ProjectId;
 use crate::session::SessionId;
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
-use crate::Project;
-use crate::project::ProjectId;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -35,6 +35,11 @@ impl TaskId {
     pub fn as_u64(&self) -> u64 {
         self.0.get()
     }
+
+    #[inline]
+    pub fn as_i64(&self) -> i64 {
+        self.0.get() as i64
+    }
 }
 
 impl TryFrom<u64> for TaskId {
@@ -56,15 +61,11 @@ pub enum TaskState {
 impl TaskState {
     pub fn is_final(&self) -> bool {
         match self {
-            TaskState::Waiting |
-            TaskState::Running => false,
-            TaskState::Finished |
-            TaskState::Failed { .. } |
-            TaskState::Cancelled => true,
+            TaskState::Waiting | TaskState::Running => false,
+            TaskState::Finished | TaskState::Failed { .. } | TaskState::Cancelled => true,
         }
     }
 }
-
 
 pub enum TaskParent {
     Session(SessionId),
@@ -87,7 +88,7 @@ impl TaskParent {
     pub fn session_id(&self) -> Option<SessionId> {
         match self {
             TaskParent::Session(s) => Some(*s),
-            TaskParent::Project(_) => None
+            TaskParent::Project(_) => None,
         }
     }
 
@@ -111,9 +112,7 @@ impl Debug for TaskConfig {
         let mut f = f.debug_struct("TaskConfig");
         f.field("machine_id", &self.machine_id);
         match self.parent {
-            TaskParent::Project(project_id) => {
-                f.field("parent", &project_id)
-            }
+            TaskParent::Project(project_id) => f.field("parent", &project_id),
             TaskParent::Session(session_id) => f.field("session", &session_id),
         };
         f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
