@@ -1,5 +1,5 @@
 use crate::core::{Core, CoreRef};
-use crate::db;
+use crate::{db, MachineId};
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
@@ -98,6 +98,10 @@ pub async fn get_project_by_name(core_ref: &CoreRef, name: &str) -> crate::Resul
         core.split_mut().project_map.add_project(p.clone());
     }
     Ok(project)
+}
+
+pub fn get_machine_id_by_name(core: &Core, name: &str) -> crate::Result<MachineId> {
+    core.split().machine_map.find_machine_by_name(name)
 }
 
 pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<ProjectId> {

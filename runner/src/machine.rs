@@ -153,31 +153,39 @@ impl MachineId {
 }
 
 #[derive(Default)]
-pub(crate) struct MachineMap(HashMap<MachineId, Machine>);
+pub(crate) struct MachineMap {
+    machines: HashMap<MachineId, Machine>,
+    machines_by_name: HashMap<String, MachineId>,
+}
 
 impl MachineMap {
     pub fn find_machine(&self, machine_id: MachineId) -> crate::Result<&Machine> {
-        self.0
+        self.machines
             .get(&machine_id)
-            .ok_or(RunnerError::InvalidMachine(machine_id))
+            .ok_or_else(|| RunnerError::InvalidMachineId(machine_id))
     }
     pub fn find_machine_mut(&mut self, machine_id: MachineId) -> crate::Result<&mut Machine> {
-        self.0
+        self.machines
             .get_mut(&machine_id)
-            .ok_or(RunnerError::InvalidMachine(machine_id))
+            .ok_or_else(|| RunnerError::InvalidMachineId(machine_id))
     }
     pub fn get_machine(&self, machine_id: MachineId) -> &Machine {
-        self.0.get(&machine_id).unwrap()
+        self.machines.get(&machine_id).unwrap()
     }
     pub fn get_machine_mut(&mut self, machine_id: MachineId) -> &mut Machine {
-        self.0.get_mut(&machine_id).unwrap()
+        self.machines.get_mut(&machine_id).unwrap()
     }
     pub fn insert(&mut self, machine: Machine) {
         let machine_id = machine.machine_id;
-        self.0.insert(machine_id, machine);
+        self.machines_by_name.insert(machine.config.name.clone(), machine_id);
+        self.machines.insert(machine_id, machine);
+    }
+
+    pub fn find_machine_by_name(&self, name: &str) -> crate::Result<MachineId> {
+        self.machines_by_name.get(name).copied().ok_or_else(|| RunnerError::InvalidMachineName(name.to_string()))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Machine> {
-        self.0.values()
+        self.machines.values()
     }
 }

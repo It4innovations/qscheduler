@@ -7,6 +7,7 @@ import json
 
 OK_RESULT = {"type": "Ok"}
 TEST_PROJECT = "test-project"
+TEST_MACHINE_NAME = "TestMachine"
 
 
 class TestTask:
@@ -35,9 +36,6 @@ class TestTask:
             msg["submit_time"] = self._submit_time
         data = json.dumps(msg)
         return data.encode()
-
-
-MACHINE_NAME = "TestMachine"
 
 
 class QScheduler:
@@ -75,7 +73,7 @@ class QScheduler:
             self._binary,
             "machine",
             "add",
-            MACHINE_NAME,
+            TEST_MACHINE_NAME,
             f"--queue-size={self.queue_size}",
         ]
         if self.notify_url:
@@ -200,7 +198,7 @@ class QScheduler:
         self,
         task: TestTask,
         session_id: int | None = None,
-        machine_id: int = 1,
+        machine: str = TEST_MACHINE_NAME,
         project: str | None = None,
         expect_error: int | None = None,
     ):
@@ -210,7 +208,7 @@ class QScheduler:
             # Attach to default project
             project = TEST_PROJECT
         payload = task.create_payload()
-        msg = {"session_id": session_id, "machine_id": machine_id, "project": project}
+        msg = {"session_id": session_id, "machine": machine, "project": project}
         if session_id is not None:
             msg["session_id"] = session_id
 
@@ -231,12 +229,12 @@ class QScheduler:
         return r.json()
 
     def new_session(
-        self, time_limit: int, machine_id: int = 1, project: str = TEST_PROJECT
+        self, time_limit: int, machine: str = TEST_MACHINE_NAME, project: str = TEST_PROJECT
     ):
         msg = {
-            "machine_id": machine_id,
-            "time_limit_secs": time_limit,
-            "project": TEST_PROJECT,
+            "machine": machine,
+            "time_limit_ms": time_limit * 1_000,
+            "project": project,
         }
         r = requests.post(self.url("sessions"), params=msg, timeout=5)
         r.raise_for_status()
