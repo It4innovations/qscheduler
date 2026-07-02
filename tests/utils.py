@@ -61,6 +61,9 @@ class QScheduler:
 
     @property
     def _binary(self):
+        override = os.environ.get("QSCHEDULER_BIN")
+        if override:
+            return override
         return os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "target",
