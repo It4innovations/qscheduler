@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-and-build:
+    name: Check & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: typos
+        uses: crate-ci/typos@v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install Python test deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r tests/requirements.txt
+
+      - name: ruff format --check
+        run: .venv/bin/ruff format --check tests
+
+      - name: ruff check
+        run: .venv/bin/ruff check tests
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release
+        run: cargo build --release -p qscheduler
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qscheduler-binary
+          path: target/release/qscheduler
+          if-no-files-found: error
+
+  test:
+    name: Test
+    needs: check-and-build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: xpass11
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd=pg_isready
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_URL: postgres://postgres:xpass11@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: qscheduler-binary
+          path: ./artifact
+
+      - name: Make binary executable
+        run: chmod +x ./artifact/qscheduler
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install Python test deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r tests/requirements.txt
+
+      - name: Run pytest
+        env:
+          QSCHEDULER_BIN: ${{ github.workspace }}/artifact/qscheduler
+        run: .venv/bin/pytest -v
+
+      - name: Upload pytest artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-artifacts
+          path: /tmp/pytest-of-*/**
+          if-no-files-found: ignore
