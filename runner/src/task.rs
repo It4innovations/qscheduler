@@ -1,4 +1,3 @@
-use crate::Project;
 use crate::machine::MachineId;
 use crate::project::ProjectId;
 use crate::session::SessionId;

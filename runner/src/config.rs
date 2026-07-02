@@ -2,7 +2,6 @@ use crate::MachineId;
 use crate::backend::BackendConfig;
 use crate::callback::NotifyConfig;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MachineConfiguration {

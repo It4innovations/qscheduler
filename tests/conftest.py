@@ -1,9 +1,5 @@
 from pathlib import Path
-
 from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 from pytest_httpserver import HTTPServer
 import os
 import socket
@@ -17,6 +13,8 @@ from psycopg2 import sql
 from pytest import fixture
 from utils import QScheduler
 from utils_iqm import IqmFakeBackend
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 @fixture

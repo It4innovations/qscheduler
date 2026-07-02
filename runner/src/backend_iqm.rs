@@ -313,7 +313,7 @@ async fn iqm_main(
     mut monitor_receiver: UnboundedReceiver<MonitorCommand>,
 ) {
     let mut monitored_tasks: Vec<MonitoredTask> = Vec::new();
-    let mut interval = tokio::time::interval(backend.config.check_interval.into());
+    let mut interval = tokio::time::interval(backend.config.check_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate first tick
     let mut to_delete: Vec<usize> = Vec::new();
@@ -402,7 +402,7 @@ async fn process_result(
                 Ok(data) => {
                     let status = data.status.as_str();
                     match status {
-                        "waiting" => return None,
+                        "waiting" => None,
                         status => {
                             let exec_time = data.get_exec_time().unwrap_or_default();
                             let new_state = match status {

@@ -4,7 +4,7 @@ use crate::error::RunnerError;
 use crate::task::TaskState;
 use bytes::Bytes;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -12,7 +12,6 @@ use tokio::sync::oneshot::Receiver;
 use tokio::sync::{mpsc, oneshot};
 
 struct TestTask {
-    submitted: Instant,
     started: Option<Instant>,
     state: TaskState,
     exec_time: Option<Duration>,
@@ -86,7 +85,6 @@ impl Backend for TestBackend {
             tasks.insert(
                 task_id,
                 TestTask {
-                    submitted: Instant::now(),
                     started: None,
                     state: TaskState::Waiting,
                     exec_time: None,

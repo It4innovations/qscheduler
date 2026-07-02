@@ -1,4 +1,4 @@
-use crate::machine::{Machine, MachineId};
+use crate::machine::MachineId;
 use crate::session::SessionId;
 use thiserror::Error;
 
@@ -7,7 +7,7 @@ pub enum RunnerError {
     #[error("Invalid machine name {0:?}")]
     InvalidMachineName(String),
     #[error("Invalid machine id {0:?}")]
-    InvalidMachineId(MachineId),    
+    InvalidMachineId(MachineId),
     #[error("Invalid session {0:?}")]
     InvalidSession(SessionId),
     #[error("Session {0:?} is not running")]

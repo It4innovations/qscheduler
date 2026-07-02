@@ -1,8 +1,8 @@
 use crate::core::{Core, CoreRef};
-use crate::{db, MachineId};
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
+use crate::{MachineId, db};
 use std::time::Duration;
 
 pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
