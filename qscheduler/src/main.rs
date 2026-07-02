@@ -1,7 +1,6 @@
 use clap::Parser;
 use runner::config::MachineConfiguration;
 use runner::error::RunnerError;
-use runner::machine::MachineConfig;
 use runner::{BackendConfig, IqmBackendConfig, NotifyConfig};
 use service::config::ServiceConfiguration;
 use std::path::PathBuf;

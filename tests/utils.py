@@ -229,7 +229,10 @@ class QScheduler:
         return r.json()
 
     def new_session(
-        self, time_limit: int, machine: str = TEST_MACHINE_NAME, project: str = TEST_PROJECT
+        self,
+        time_limit: int,
+        machine: str = TEST_MACHINE_NAME,
+        project: str = TEST_PROJECT,
     ):
         msg = {
             "machine": machine,

@@ -177,12 +177,16 @@ impl MachineMap {
     }
     pub fn insert(&mut self, machine: Machine) {
         let machine_id = machine.machine_id;
-        self.machines_by_name.insert(machine.config.name.clone(), machine_id);
+        self.machines_by_name
+            .insert(machine.config.name.clone(), machine_id);
         self.machines.insert(machine_id, machine);
     }
 
     pub fn find_machine_by_name(&self, name: &str) -> crate::Result<MachineId> {
-        self.machines_by_name.get(name).copied().ok_or_else(|| RunnerError::InvalidMachineName(name.to_string()))
+        self.machines_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| RunnerError::InvalidMachineName(name.to_string()))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Machine> {

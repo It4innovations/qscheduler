@@ -1,7 +1,6 @@
 use crate::MachineId;
 use crate::config::MachineConfiguration;
 use crate::error::RunnerError;
-use crate::machine::MachineConfig;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId};
 use crate::task::{TaskConfig, TaskId};
@@ -259,7 +258,7 @@ pub async fn update_task_failed(pool: &PgPool, task_id: TaskId, exec_time: Durat
 }
 
 pub async fn update_tasks_cancelled(pool: &PgPool, task_ids: &[TaskId]) {
-    let task_ids: Vec<i64> = task_ids.into_iter().map(|id| id.as_i64()).collect();
+    let task_ids: Vec<i64> = task_ids.iter().map(|id| id.as_i64()).collect();
     if let Err(e) =
         sqlx::query("UPDATE tasks SET state = 'cancelled', finished_at = NOW() WHERE id = ANY($1)")
             .bind(task_ids.as_slice())
@@ -422,8 +421,7 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
     let mut machines = Vec::with_capacity(rows.len());
     for row in rows {
         let id: i32 = row.get("id");
-        let machine_id = MachineId::try_from(id as u32)
-            .map_err(|_| RunnerError::GenericError("Cannot parse machine ID".into()))?;
+        let machine_id = MachineId::from(id as u32);
         let config_str: &str = row.get("config");
         let config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
             RunnerError::GenericError("Cannot parse machine configuration from DB".into())

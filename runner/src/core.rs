@@ -1,5 +1,6 @@
 use crate::backend::create_backend;
 use crate::config::RunnerConfiguration;
+use crate::db;
 use crate::db::close_dead_session;
 use crate::error::RunnerError;
 use crate::launcher::start_launcher;
@@ -7,7 +8,6 @@ use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskMap, TaskParent, TaskState};
-use crate::{Project, db};
 use bytes::Bytes;
 use sqlx::postgres::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -137,9 +137,7 @@ impl Core {
         let mut orphan_cancels: Vec<TaskId> = Vec::new();
         let mut woken: HashSet<MachineId> = HashSet::new();
         let mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>> = HashMap::new();
-        // Sessions found dead here (still open, or closed but a submitted task lagged
-        // behind, see load_active_sessions): any of their resumed tasks must be cancelled.
-        let mut dead_session_ids: HashSet<SessionId> = HashSet::new();
+        let mut dead_session_ids: Vec<SessionId> = Vec::new();
         let task_len = tasks.len();
         {
             let mut core = core_ref.lock().unwrap();
@@ -172,8 +170,7 @@ impl Core {
                     session.state = SessionState::Closed;
                     session_map.insert(session);
                     if !s.closed {
-                        // It is ok to hold the core. There should be at most one session.
-                        close_dead_session(&pool, session_id).await;
+                        dead_session_ids.push(session_id);
                     }
                 } else {
                     // Never opened (and therefore has no tasks yet): re-queue it.
@@ -235,6 +232,10 @@ impl Core {
                     machine.wake_launcher();
                 }
             }
+        }
+
+        for session_id in dead_session_ids {
+            close_dead_session(&pool, session_id).await;
         }
 
         if !orphan_cancels.is_empty() {
