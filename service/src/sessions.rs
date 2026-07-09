@@ -17,8 +17,11 @@ use crate::{AppState, internal_error};
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub(crate) struct CreateSessionParams {
+    /// Name of the target machine.
     machine: String,
+    /// Name of the project the session's time is charged to.
     project: String,
+    /// Session lifetime in milliseconds.
     time_limit_ms: u64,
 }
 
@@ -44,6 +47,7 @@ impl From<SessionState> for SessionStateResponse {
     }
 }
 
+/// Get the current state of a session.
 #[utoipa::path(
     get,
     path = "/sessions/{id}",
@@ -65,13 +69,17 @@ pub(crate) async fn get_session(
     Ok(Json(SessionStateResponse::from(session_state)))
 }
 
+/// Create a session — a time-bounded, exclusive reservation of one machine for one project.
+/// Tasks in the session are cancelled when the session closes.
 #[utoipa::path(
     post,
     path = "/sessions",
     params(CreateSessionParams),
     responses(
         (status = 201, description = "Session created", body = u64),
-        (status = 400, description = "Missing or invalid fields")
+        (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
+        (status = 404, description = "Unknown `machine`."),
+        (status = 422, description = "Unknown `project`, or `time_limit_ms` exceeds the machine's `--max-session-time`.")
     )
 )]
 pub(crate) async fn create_session_handler(
@@ -102,6 +110,10 @@ pub(crate) async fn create_session_handler(
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
 
+/// Request cancellation of a session. Cancellation is asynchronous: a queued (`"waiting"`)
+/// session is removed from the queue, while an `"open"` session is closed and its tasks are
+/// cancelled (both those already submitted to the backend and those still queued); in both
+/// cases the session eventually reaches the `"closed"` state.
 #[utoipa::path(
     delete,
     path = "/sessions/{id}",

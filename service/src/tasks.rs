@@ -16,19 +16,30 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub(crate) struct CreateTaskParams {
+    /// Session to associate the task with. The session must be in the `"open"` state or the
+    /// task is rejected. Exactly one of `project` / `session_id` must be given.
     session_id: Option<u64>,
+    /// Name of the project to charge the task's time to. Exactly one of `project` / `session_id`
+    /// must be given.
     project: Option<String>,
+    /// Name of the target machine.
     machine: String,
 }
 
+/// Submit a task for execution.
 #[utoipa::path(
     post,
     path = "/tasks",
     params(CreateTaskParams),
-    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    request_body(
+        content = Vec<u8>,
+        content_type = "application/octet-stream",
+        description = "Raw task payload forwarded to the backend."
+    ),
     responses(
         (status = 201, description = "Task created", body = u32),
-        (status = 400, description = "Missing or invalid fields")
+        (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
+        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`, or the session is invalid or not open.")
     )
 )]
 pub(crate) async fn create_task(
@@ -114,6 +125,7 @@ impl From<&TaskState> for TaskStateResponse {
     }
 }
 
+/// Get the current state of a task.
 #[utoipa::path(
     get,
     path = "/tasks/{id}",
@@ -133,6 +145,9 @@ pub(crate) async fn get_task(
     Ok(Json(TaskStateResponse::from(task_state)))
 }
 
+/// Request cancellation of a task. Cancellation is asynchronous: a queued task is removed from
+/// the queue, while a running task is cancelled on the backend; in both cases the task
+/// eventually reaches the `"cancelled"` state (poll `GET /tasks/{id}` to observe it).
 #[utoipa::path(
     delete,
     path = "/tasks/{id}",
@@ -140,7 +155,7 @@ pub(crate) async fn get_task(
     responses(
         (status = 202, description = "Cancellation requested"),
         (status = 404, description = "Task not found"),
-        (status = 409, description = "Task already finished")
+        (status = 409, description = "Task already in a terminal state (finished, failed, or cancelled)")
     )
 )]
 pub(crate) async fn cancel_task_handler(

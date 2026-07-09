@@ -12,9 +12,10 @@ pub(crate) fn find_machine(core: &Core, machine: &str) -> Result<MachineId, (Sta
     get_machine_id_by_name(core, machine).map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))
 }
 
+/// Fetch the backend's architecture description.
 #[utoipa::path(
     get,
-    path = "/machine/{machine_id}/arch",
+    path = "/machine/{machine}/arch",
     params(("machine" = String, Path, description = "Machine ID")),
     responses(
         (status = 200, description = "Architecture JSON", body = String),
@@ -37,9 +38,10 @@ pub(crate) async fn get_machine_arch(
         .map_err(internal_error)
 }
 
+/// Fetch a calibration data set from the backend.
 #[utoipa::path(
     get,
-    path = "/machine/{machine_id}/calibration/{calibration}/{endpoint}",
+    path = "/machine/{machine}/calibration/{calibration}/{endpoint}",
     params(
         ("machine" = String, Path, description = "Machine ID"),
         ("calibration" = String, Path, description = "Calibration name"),
