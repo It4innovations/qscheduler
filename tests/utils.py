@@ -216,7 +216,12 @@ class QScheduler:
             # Attach to default project
             project = TEST_PROJECT
         payload = task.create_payload()
-        msg = {"session_id": session_id, "machine": machine, "project": project, "user": user}
+        msg = {
+            "session_id": session_id,
+            "machine": machine,
+            "project": project,
+            "user": user,
+        }
         if session_id is not None:
             msg["session_id"] = session_id
 
@@ -373,3 +378,7 @@ class QScheduler:
         r = requests.get(self.url("version"), timeout=5)
         r.raise_for_status()
         return r.text
+
+    def health(self):
+        r = requests.get(self.url("health"), timeout=5)
+        return r

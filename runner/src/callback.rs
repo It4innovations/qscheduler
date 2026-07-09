@@ -26,7 +26,7 @@ pub(crate) enum NotifySessionState {
 }
 
 #[derive(Serialize)]
-#[serde(untagged)]
+#[serde(tag = "event", rename_all = "lowercase")]
 pub(crate) enum NotifyEvent {
     Task {
         task_id: TaskId,

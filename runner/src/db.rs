@@ -18,6 +18,10 @@ pub async fn create_pool() -> sqlx::Result<PgPool> {
     Ok(pool)
 }
 
+pub async fn ping(pool: &PgPool) -> bool {
+    sqlx::query("SELECT 1").execute(pool).await.is_ok()
+}
+
 pub fn is_already_exists_error(err: &sqlx::Error) -> bool {
     if let sqlx::Error::Database(db_err) = err {
         db_err.code().as_deref() == Some("23505")

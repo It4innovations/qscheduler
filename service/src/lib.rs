@@ -10,6 +10,8 @@ use crate::config::ServiceConfiguration;
 use axum::{Json, extract::State, http::StatusCode, routing::get};
 use runner::config::RunnerConfiguration;
 use runner::core::{Core, CoreRef};
+use runner::reactor::check_db_health;
+use serde::Serialize;
 use tokio::net::TcpListener;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
@@ -30,6 +32,33 @@ struct AppState {
 )]
 async fn version_handler(State(state): State<Arc<AppState>>) -> String {
     format!("qscheduler v{}", state.version)
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct HealthStatus {
+    status: &'static str,
+}
+
+/// Health check. Reports whether the service is up and able to reach the database.
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthStatus),
+        (status = 503, description = "Service is unhealthy (database unreachable)", body = HealthStatus)
+    )
+)]
+async fn health_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthStatus>) {
+    if check_db_health(&state.core_ref).await {
+        (StatusCode::OK, Json(HealthStatus { status: "ok" }))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthStatus {
+                status: "unhealthy",
+            }),
+        )
+    }
 }
 
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
@@ -60,6 +89,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(version_handler))
+        .routes(routes!(health_handler))
         .routes(routes!(tasks::create_task))
         .routes(routes!(tasks::get_task))
         .routes(routes!(tasks::cancel_task_handler))
