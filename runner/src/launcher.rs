@@ -1,5 +1,5 @@
 use crate::backend::{Backend, FromBackendMessage};
-use crate::callback::{NotifyEvent, NotifyTaskState, notify_worker};
+use crate::callback::{NotifyEvent, NotifySessionState, NotifyTaskState, notify_worker};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
 use crate::machine::{MachineConfig, MachineMap, QueueItem, ResumeTask};
@@ -94,6 +94,7 @@ fn pick_task(
     machine_id: MachineId,
     running_session: &mut Option<RunningSession>,
     no_assignments: bool,
+    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
     db_updates: &mut Vec<DbUpdate>,
 ) -> Option<(TaskId, Bytes)> {
     let CoreSplitMut {
@@ -140,6 +141,12 @@ fn pick_task(
                         opened_at: now,
                         exec_time: Duration::ZERO,
                     });
+                    if let Some(sender) = notify_sender {
+                        let _ = sender.send(NotifyEvent::Session {
+                            session_id,
+                            state: NotifySessionState::Opened,
+                        });
+                    }
                     db_updates.push(DbUpdate::SessionOpened(session_id));
                     continue;
                 }
@@ -184,7 +191,7 @@ fn close_running_session(
         let task = task_map.get_task_mut(task_id);
         task.set_state(TaskState::Cancelled);
         if let Some(sender) = notify_sender {
-            let _ = sender.send(NotifyEvent {
+            let _ = sender.send(NotifyEvent::Task {
                 task_id,
                 state: NotifyTaskState::Cancelled,
             });
@@ -192,6 +199,12 @@ fn close_running_session(
         cancelled_tasks.push(task_id);
     }
     machine.close_session();
+    if let Some(sender) = notify_sender {
+        let _ = sender.send(NotifyEvent::Session {
+            session_id: s.session_id,
+            state: NotifySessionState::Closed,
+        });
+    }
     db_updates.push(DbUpdate::SessionClosed {
         session_id: s.session_id,
         exec_time,
@@ -345,7 +358,7 @@ async fn launcher_main(
                             TaskState::Finished => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 if let Some(sender) = &notify_sender {
-                                    let _ = sender.send(NotifyEvent {
+                                    let _ = sender.send(NotifyEvent::Task {
                                         task_id,
                                         state: NotifyTaskState::Finished,
                                     });
@@ -355,7 +368,7 @@ async fn launcher_main(
                             TaskState::Failed { error } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 if let Some(sender) = &notify_sender {
-                                    let _ = sender.send(NotifyEvent {
+                                    let _ = sender.send(NotifyEvent::Task {
                                         task_id,
                                         state: NotifyTaskState::Failed,
                                     });
@@ -372,7 +385,7 @@ async fn launcher_main(
                                     update_state = false;
                                 } else {
                                     if let Some(sender) = &notify_sender {
-                                        let _ = sender.send(NotifyEvent {
+                                        let _ = sender.send(NotifyEvent::Task {
                                             task_id,
                                             state: NotifyTaskState::Cancelled,
                                         });
@@ -426,6 +439,12 @@ async fn launcher_main(
                     if machine.remove_queued_session(session_id) {
                         debug!(%session_id, "Cancelling queued session on request");
                         session_map.get_session_mut(session_id).state = SessionState::Closed;
+                        if let Some(sender) = &notify_sender {
+                            let _ = sender.send(NotifyEvent::Session {
+                                session_id,
+                                state: NotifySessionState::Closed,
+                            });
+                        }
                         db_updates.push(DbUpdate::SessionClosed {
                             session_id,
                             exec_time: Duration::ZERO,
@@ -454,7 +473,7 @@ async fn launcher_main(
                         let task = task_map.get_task_mut(task_id);
                         task.set_state(TaskState::Cancelled);
                         if let Some(sender) = &notify_sender {
-                            let _ = sender.send(NotifyEvent {
+                            let _ = sender.send(NotifyEvent::Task {
                                 task_id,
                                 state: NotifyTaskState::Cancelled,
                             });
@@ -473,6 +492,7 @@ async fn launcher_main(
                     machine_id,
                     &mut running_session,
                     submitted_tasks.is_empty(),
+                    &notify_sender,
                     &mut db_updates,
                 )
             {
@@ -495,7 +515,7 @@ async fn launcher_main(
                             error: error.clone(),
                         });
                     if let Some(sender) = &notify_sender {
-                        let _ = sender.send(NotifyEvent {
+                        let _ = sender.send(NotifyEvent::Task {
                             task_id,
                             state: NotifyTaskState::Failed,
                         });

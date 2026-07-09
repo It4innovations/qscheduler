@@ -46,7 +46,7 @@ qscheduler machine add <NAME> [OPTIONS] <BACKEND> [BACKEND OPTIONS]
 |---|---|
 | `<NAME>` | Unique machine name, referenced when submitting tasks and creating sessions. |
 | `--queue-size <N>` | Maximum number of tasks that can be queued on this machine (default: `4`). |
-| `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state. See [Notifications](#notifications). |
+| `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state, or a session on this machine opens or closes. See [Notifications](#notifications). |
 | `--notify-token <TOKEN>` | Arbitrary token included in notification payloads. |
 | `--session-check-interval <DURATION>` | How often session time-consumption is persisted to the database, e.g. `5s` (default: `5s`). |
 | `--max-session-time <DURATION>` | Maximum duration a session on this machine may request, e.g. `2h`. Sessions requesting longer are rejected at submit time (default: `2h`). |
@@ -133,10 +133,15 @@ Once running, the OpenAPI spec is served at `GET /api-docs/openapi.json`.
 ### Notifications
 
 When `--notify-url` is configured on a machine, the service sends an HTTP `POST` request to
-that URL after every task on the machine reaches a terminal state (`finished`, `failed`, or
-`cancelled`). Delivery is retried with exponential backoff up to 16 times.
+that URL:
 
-The request body is JSON:
+- after every task on the machine reaches a terminal state (`finished`, `failed`, or
+  `cancelled`);
+- whenever a session on the machine opens or closes.
+
+Delivery is retried with exponential backoff up to 16 times.
+
+Task events have this request body:
 
 ```json
 {
@@ -146,8 +151,22 @@ The request body is JSON:
 }
 ```
 
-`state` is one of `"finished"`, `"failed"`, or `"cancelled"`. The `token` field is omitted when
-`--notify-token` was not configured.
+`state` is one of `"finished"`, `"failed"`, or `"cancelled"`.
+
+Session events have this request body:
+
+```json
+{
+  "session_id": 7,
+  "state": "opened",
+  "token": "my-secret-token"
+}
+```
+
+`state` is one of `"opened"` or `"closed"`. A session that is cancelled before ever opening
+only fires `"closed"`.
+
+The `token` field is omitted when `--notify-token` was not configured.
 
 ## API
 

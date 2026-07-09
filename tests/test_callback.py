@@ -85,7 +85,49 @@ def test_callback_fires_on_task_cancel(notify_qs, callback_server):
     notify_qs.wait_for_finished(t1)
     notify_qs.wait_for_cancelled(t2)
     time.sleep(0.3)
-    wait_for_callbacks(callback_server, count=2)
-    states = {cb["task_id"]: cb["state"] for cb in callback_server.callbacks}
+    wait_for_callbacks(callback_server, count=3)
+    states = {
+        cb["task_id"]: cb["state"] for cb in callback_server.callbacks if "task_id" in cb
+    }
     assert states[t1] == "finished"
     assert states[t2] == "cancelled"
+
+
+def test_callback_fires_on_session_open_and_close(notify_qs, callback_server):
+    notify_qs.start()
+    session_id = notify_qs.new_session(time_limit=1)
+    notify_qs.wait_for_session_open(session_id)
+    notify_qs.wait_for_session_closed(session_id)
+
+    wait_for_callbacks(callback_server, count=2)
+    session_cbs = [cb for cb in callback_server.callbacks if "session_id" in cb]
+    assert len(session_cbs) == 2
+    for cb in session_cbs:
+        assert cb["session_id"] == session_id
+        assert cb["token"] == NOTIFY_TOKEN
+    states = [cb["state"] for cb in session_cbs]
+    assert states == ["opened", "closed"]
+
+
+def test_callback_fires_on_queued_session_cancel(notify_qs, callback_server):
+    notify_qs.queue_size = 1
+    notify_qs.start()
+    session1 = notify_qs.new_session(time_limit=2)
+    notify_qs.wait_for_session_open(session1)
+    session2 = notify_qs.new_session(time_limit=2)
+
+    notify_qs.cancel_session(session2)
+    notify_qs.wait_for_session_state(session2, "closed")
+    notify_qs.cancel_session(session1)
+    notify_qs.wait_for_session_state(session1, "closed")
+
+    wait_for_callbacks(callback_server, count=3)
+    session_cbs = {
+        (cb["session_id"], cb["state"])
+        for cb in callback_server.callbacks
+        if "session_id" in cb
+    }
+    assert (session1, "opened") in session_cbs
+    assert (session1, "closed") in session_cbs
+    assert (session2, "opened") not in session_cbs
+    assert (session2, "closed") in session_cbs
