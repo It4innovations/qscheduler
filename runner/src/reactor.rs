@@ -1,6 +1,7 @@
-use crate::core::{Core, CoreRef};
+use crate::core::{Core, CoreRef, CoreSplitMut};
+use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
-use crate::session::{SessionConfig, SessionId};
+use crate::session::{SessionConfig, SessionId, SessionState};
 use crate::task::{TaskConfig, TaskId};
 use crate::{MachineId, db};
 use std::time::Duration;
@@ -20,6 +21,46 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
         db::delete_task(&pool, task_id).await;
     }
     result
+}
+
+pub async fn cancel_task(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<()> {
+    let mut core = core_ref.lock().unwrap();
+    let CoreSplitMut {
+        task_map,
+        machine_map,
+        ..
+    } = core.split_mut();
+    let task = task_map
+        .find_task(task_id)
+        .ok_or(RunnerError::InvalidTask(task_id))?;
+    if task.state().is_final() {
+        return Err(RunnerError::TaskAlreadyFinished(task_id));
+    }
+    let machine_id = task.config().machine_id;
+    let machine = machine_map.get_machine_mut(machine_id);
+    machine.request_task_cancel(task_id);
+    machine.wake_launcher();
+    Ok(())
+}
+
+pub async fn cancel_session(core_ref: &CoreRef, session_id: SessionId) -> crate::Result<()> {
+    let mut core = core_ref.lock().unwrap();
+    let CoreSplitMut {
+        session_map,
+        machine_map,
+        ..
+    } = core.split_mut();
+    let session = session_map
+        .find_session(session_id)
+        .ok_or(RunnerError::InvalidSession(session_id))?;
+    if matches!(session.state, SessionState::Closed) {
+        return Err(RunnerError::SessionAlreadyClosed(session_id));
+    }
+    let machine_id = session.config.machine_id;
+    let machine = machine_map.get_machine_mut(machine_id);
+    machine.request_session_cancel(session_id);
+    machine.wake_launcher();
+    Ok(())
 }
 
 pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate::Result<SessionId> {

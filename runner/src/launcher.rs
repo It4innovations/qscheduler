@@ -1,11 +1,11 @@
-use crate::backend::{Backend, FromBackendMessage, create_backend};
+use crate::backend::{Backend, FromBackendMessage};
 use crate::callback::{NotifyEvent, NotifyTaskState, notify_worker};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
-use crate::machine::{MachineConfig, QueueItem, ResumeTask};
+use crate::machine::{MachineConfig, MachineMap, QueueItem, ResumeTask};
 use crate::project::ProjectId;
-use crate::session::SessionState;
-use crate::task::TaskState;
+use crate::session::{SessionMap, SessionState};
+use crate::task::{TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -148,6 +148,57 @@ fn pick_task(
     }
 }
 
+/// Cancels every submitted task of `s`, cancels its remaining queued tasks, and frees the
+/// machine. Shared by the deadline/over-limit close path and the on-demand session cancel path.
+#[allow(clippy::too_many_arguments)]
+fn close_running_session(
+    s: &RunningSession,
+    exec_time: Duration,
+    task_map: &mut TaskMap,
+    session_map: &mut SessionMap,
+    machine_map: &mut MachineMap,
+    machine_id: MachineId,
+    backend: &Arc<dyn Backend>,
+    submitted_tasks: &mut HashMap<TaskId, bool>,
+    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
+    db_updates: &mut Vec<DbUpdate>,
+) {
+    for (task_id, cancelling) in submitted_tasks.iter_mut() {
+        if !*cancelling {
+            *cancelling = true;
+            let task = task_map.get_task_mut(*task_id);
+            if let Some(backend_id) = task.backend_id() {
+                debug!(%task_id, "Cancelling submitted task");
+                Arc::clone(backend).cancel_task(*task_id, backend_id);
+            } else {
+                debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
+            }
+        }
+    }
+    let session = session_map.get_session_mut(s.session_id);
+    session.state = SessionState::Closed;
+    let machine = machine_map.get_machine_mut(machine_id);
+    let mut cancelled_tasks = Vec::new();
+    while let Some(task_id) = machine.pop_session_task() {
+        debug!(%task_id, "Cancelling unsubmitted task");
+        let task = task_map.get_task_mut(task_id);
+        task.set_state(TaskState::Cancelled);
+        if let Some(sender) = notify_sender {
+            let _ = sender.send(NotifyEvent {
+                task_id,
+                state: NotifyTaskState::Cancelled,
+            });
+        }
+        cancelled_tasks.push(task_id);
+    }
+    machine.close_session();
+    db_updates.push(DbUpdate::SessionClosed {
+        session_id: s.session_id,
+        exec_time,
+        cancelled_tasks,
+    });
+}
+
 enum LauncherEvent {
     Notified,
     SessionEnd,
@@ -247,40 +298,18 @@ async fn launcher_main(
                             });
                         } else {
                             debug!(session_id=%s.session_id, "Session overtime/end of session");
-                            for (task_id, cancelling) in submitted_tasks.iter_mut() {
-                                if !*cancelling {
-                                    *cancelling = true;
-                                    let task = task_map.get_task_mut(*task_id);
-                                    if let Some(backend_id) = task.backend_id() {
-                                        debug!(%task_id, "Cancelling submitted task");
-                                        Arc::clone(&backend).cancel_task(*task_id, backend_id);
-                                    } else {
-                                        debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
-                                    }
-                                }
-                            }
-                            let session = session_map.get_session_mut(s.session_id);
-                            session.state = SessionState::Closed;
-                            let machine = machine_map.get_machine_mut(machine_id);
-                            let mut cancelled_tasks = Vec::new();
-                            while let Some(task_id) = machine.pop_session_task() {
-                                debug!(%task_id, "Cancelling unsubmitted task");
-                                let task = task_map.get_task_mut(task_id);
-                                task.set_state(TaskState::Cancelled);
-                                if let Some(sender) = &notify_sender {
-                                    let _ = sender.send(NotifyEvent {
-                                        task_id,
-                                        state: NotifyTaskState::Cancelled,
-                                    });
-                                }
-                                cancelled_tasks.push(task_id);
-                            }
-                            machine.close_session();
-                            db_updates.push(DbUpdate::SessionClosed {
-                                session_id: s.session_id,
+                            close_running_session(
+                                s,
                                 exec_time,
-                                cancelled_tasks,
-                            });
+                                task_map,
+                                session_map,
+                                machine_map,
+                                machine_id,
+                                &backend,
+                                &mut submitted_tasks,
+                                &notify_sender,
+                                &mut db_updates,
+                            );
                             running_session = None;
                         }
                     }
@@ -366,6 +395,78 @@ async fn launcher_main(
                     }
                 },
             }
+
+            let machine = machine_map.get_machine_mut(machine_id);
+            let session_cancels = machine.take_session_cancel_requests();
+            let task_cancels = machine.take_task_cancel_requests();
+
+            for session_id in session_cancels {
+                if running_session.as_ref().map(|s| s.session_id) == Some(session_id) {
+                    let s = running_session.take().unwrap();
+                    let exec_time = Instant::now() - s.opened_at;
+                    let delta = exec_time - s.exec_time;
+                    project_map
+                        .get_project_mut(s.project_id)
+                        .update_consumed(delta);
+                    debug!(%session_id, "Cancelling running session on request");
+                    close_running_session(
+                        &s,
+                        exec_time,
+                        task_map,
+                        session_map,
+                        machine_map,
+                        machine_id,
+                        &backend,
+                        &mut submitted_tasks,
+                        &notify_sender,
+                        &mut db_updates,
+                    );
+                } else {
+                    let machine = machine_map.get_machine_mut(machine_id);
+                    if machine.remove_queued_session(session_id) {
+                        debug!(%session_id, "Cancelling queued session on request");
+                        session_map.get_session_mut(session_id).state = SessionState::Closed;
+                        db_updates.push(DbUpdate::SessionClosed {
+                            session_id,
+                            exec_time: Duration::ZERO,
+                            cancelled_tasks: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            for task_id in task_cancels {
+                if let Some(cancelling) = submitted_tasks.get_mut(&task_id) {
+                    if !*cancelling {
+                        *cancelling = true;
+                        let task = task_map.get_task_mut(task_id);
+                        if let Some(backend_id) = task.backend_id() {
+                            debug!(%task_id, "Cancelling submitted task on request");
+                            Arc::clone(&backend).cancel_task(task_id, backend_id);
+                        } else {
+                            debug!(%task_id, "Cancelling not fully submitted task on request; will be cancelled later");
+                        }
+                    }
+                } else {
+                    let machine = machine_map.get_machine_mut(machine_id);
+                    if machine.remove_queued_task(task_id) {
+                        debug!(%task_id, "Cancelling queued task on request");
+                        let task = task_map.get_task_mut(task_id);
+                        task.set_state(TaskState::Cancelled);
+                        if let Some(sender) = &notify_sender {
+                            let _ = sender.send(NotifyEvent {
+                                task_id,
+                                state: NotifyTaskState::Cancelled,
+                            });
+                        }
+                        db_updates.push(DbUpdate::TaskCancelled {
+                            task_id,
+                            exec_time: Duration::ZERO,
+                        });
+                    }
+                }
+            }
+
             while submitted_tasks.len() < queue_size
                 && let Some((task_id, payload)) = pick_task(
                     &mut core,

@@ -63,3 +63,40 @@ def test_session_no_overlap(qscheduler):
     qscheduler.wait_for_session_open(s2)
     assert qscheduler.get_session_state(s1) == "closed"
     qscheduler.wait_for_session_closed(s2)
+
+
+def test_session_cancel_open(qscheduler):
+    qscheduler.start()
+    s = qscheduler.new_session(time_limit=60)
+    qscheduler.wait_for_session_open(s)
+    time.sleep(0.2)
+    ts = [qscheduler.submit(TT().compute_time(1), session_id=s) for _ in range(10)]
+    qscheduler.cancel_session(s)
+    qscheduler.wait_for_session_closed(s)
+    for t in ts:
+        qscheduler.wait_for_finished_or_canceled(t)
+
+
+def test_session_cancel_waiting(qscheduler):
+    qscheduler.queue_size = 2
+    qscheduler.start()
+    s1 = qscheduler.new_session(time_limit=60)
+    s2 = qscheduler.new_session(time_limit=60)
+    qscheduler.wait_for_session_open(s1)
+    assert qscheduler.get_session_state(s2) == "waiting"
+    qscheduler.cancel_session(s2)
+    qscheduler.wait_for_session_closed(s2)
+    assert qscheduler.get_session_state(s1) == "open"
+
+
+def test_session_cancel_already_closed(qscheduler):
+    qscheduler.start()
+    s = qscheduler.new_session(time_limit=1)
+    qscheduler.wait_for_session_open(s)
+    qscheduler.wait_for_session_closed(s)
+    qscheduler.cancel_session(s, expect_error=409)
+
+
+def test_cancel_nonexistent_session(qscheduler):
+    qscheduler.start()
+    qscheduler.cancel_session(999_999, expect_error=404)
