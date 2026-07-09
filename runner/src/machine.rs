@@ -55,6 +55,8 @@ pub(crate) struct Machine {
     config: MachineConfig,
     notifier: Arc<Notify>,
     backend: Arc<dyn Backend>,
+    task_cancel_requests: Vec<TaskId>,
+    session_cancel_requests: Vec<SessionId>,
 }
 
 impl Machine {
@@ -66,6 +68,8 @@ impl Machine {
             config,
             notifier: Arc::new(Notify::new()),
             backend,
+            task_cancel_requests: Vec::new(),
+            session_cancel_requests: Vec::new(),
         }
     }
 
@@ -138,6 +142,56 @@ impl Machine {
 
     pub fn notifier(&self) -> &Arc<Notify> {
         &self.notifier
+    }
+
+    pub(crate) fn request_task_cancel(&mut self, task_id: TaskId) {
+        self.task_cancel_requests.push(task_id);
+    }
+
+    pub(crate) fn request_session_cancel(&mut self, session_id: SessionId) {
+        self.session_cancel_requests.push(session_id);
+    }
+
+    pub(crate) fn take_task_cancel_requests(&mut self) -> Vec<TaskId> {
+        std::mem::take(&mut self.task_cancel_requests)
+    }
+
+    pub(crate) fn take_session_cancel_requests(&mut self) -> Vec<SessionId> {
+        std::mem::take(&mut self.session_cancel_requests)
+    }
+
+    /// Removes a task that is still queued (never handed to the backend) from either the
+    /// machine's main queue or its running session's task queue. Returns whether it was found.
+    pub(crate) fn remove_queued_task(&mut self, task_id: TaskId) -> bool {
+        if let Some(pos) = self
+            .queue
+            .iter()
+            .position(|item| matches!(item, QueueItem::Task(t) if *t == task_id))
+        {
+            self.queue.remove(pos);
+            return true;
+        }
+        if let Some(rs) = &mut self.running_session
+            && let Some(pos) = rs.queue.iter().position(|t| *t == task_id)
+        {
+            rs.queue.remove(pos);
+            return true;
+        }
+        false
+    }
+
+    /// Removes a session that is still `Waiting` (queued, never opened) from the machine's
+    /// main queue. Returns whether it was found.
+    pub(crate) fn remove_queued_session(&mut self, session_id: SessionId) -> bool {
+        if let Some(pos) = self
+            .queue
+            .iter()
+            .position(|item| matches!(item, QueueItem::Session(s) if *s == session_id))
+        {
+            self.queue.remove(pos);
+            return true;
+        }
+        false
     }
 }
 

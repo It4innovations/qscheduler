@@ -255,6 +255,26 @@ class QScheduler:
         r.raise_for_status()
         return r.json()
 
+    def cancel_task(self, task_id: int, expect_error: int | None = None):
+        r = requests.delete(self.url(f"tasks/{task_id}"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r
+
+    def cancel_session(self, session_id: int, expect_error: int | None = None):
+        r = requests.delete(self.url(f"sessions/{session_id}"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r
+
     def get_session_state(self, session_id: int) -> dict:
         r = requests.get(self.url(f"sessions/{session_id}"), timeout=5)
         r.raise_for_status()

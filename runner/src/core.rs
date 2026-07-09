@@ -1,4 +1,4 @@
-use crate::backend::{create_backend, FromBackendMessage};
+use crate::backend::{FromBackendMessage, create_backend};
 use crate::config::RunnerConfiguration;
 use crate::db;
 use crate::db::close_dead_session;
@@ -258,13 +258,24 @@ impl Core {
         &self.pool
     }
 
-    pub(crate) fn start_launchers(&self, mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>, mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>) {
+    pub(crate) fn start_launchers(
+        &self,
+        mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>,
+        mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>,
+    ) {
         let core_ref = self.core_ref.as_ref().unwrap();
         for m in self.machine_map.iter() {
             let machine_id = m.id();
             let backend_receiver = backend_receivers.remove(&machine_id).unwrap();
             let resume_tasks = resume_tasks.remove(&machine_id).unwrap_or_default();
-            start_launcher(core_ref, machine_id, m.config(), m.backend().clone(), backend_receiver, resume_tasks);
+            start_launcher(
+                core_ref,
+                machine_id,
+                m.config(),
+                m.backend().clone(),
+                backend_receiver,
+                resume_tasks,
+            );
         }
     }
 

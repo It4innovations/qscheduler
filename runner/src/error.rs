@@ -1,5 +1,6 @@
 use crate::machine::MachineId;
 use crate::session::SessionId;
+use crate::task::TaskId;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -11,8 +12,14 @@ pub enum RunnerError {
     InvalidMachineId(MachineId),
     #[error("Invalid session {0:?}")]
     InvalidSession(SessionId),
+    #[error("Invalid task {0:?}")]
+    InvalidTask(TaskId),
     #[error("Session {0:?} is not running")]
     NonRunningSession(SessionId),
+    #[error("Task {0:?} already finished")]
+    TaskAlreadyFinished(TaskId),
+    #[error("Session {0:?} already closed")]
+    SessionAlreadyClosed(SessionId),
     #[error("Task fails with: {0}")]
     TaskFail(String),
     #[error("Machine '{0}' already exists")]

@@ -8,7 +8,7 @@ use axum::{
 use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
-use runner::reactor::{get_machine_id_by_name, get_project_id_by_name, submit_task};
+use runner::reactor::{cancel_task, get_machine_id_by_name, get_project_id_by_name, submit_task};
 use runner::task::{TaskConfig, TaskId, TaskParent, TaskState};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -131,4 +131,31 @@ pub(crate) async fn get_task(
     let core = state.core_ref.lock().unwrap();
     let task_state = core.task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(TaskStateResponse::from(task_state)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/tasks/{id}",
+    params(("id" = u64, Path, description = "Task ID")),
+    responses(
+        (status = 202, description = "Cancellation requested"),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Task already finished")
+    )
+)]
+pub(crate) async fn cancel_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let task_id =
+        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+    cancel_task(&state.core_ref, task_id)
+        .await
+        .map_err(|e| match &e {
+            RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            RunnerError::TaskAlreadyFinished(_) => (StatusCode::CONFLICT, e.to_string()),
+            _ => internal_error(&e),
+        })?;
+    tracing::info!(%task_id, "task cancellation requested");
+    Ok(StatusCode::ACCEPTED)
 }

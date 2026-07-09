@@ -5,7 +5,7 @@ use axum::{
 };
 use runner::SessionId;
 use runner::error::RunnerError;
-use runner::reactor::{create_session, get_project_id_by_name};
+use runner::reactor::{cancel_session, create_session, get_project_id_by_name};
 use runner::{SessionConfig, SessionState};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -100,4 +100,34 @@ pub(crate) async fn create_session_handler(
         })?;
     tracing::info!(session_id = session_id.as_u64(), "session created");
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/sessions/{id}",
+    params(("id" = u64, Path, description = "Session ID")),
+    responses(
+        (status = 202, description = "Cancellation requested"),
+        (status = 404, description = "Session not found"),
+        (status = 409, description = "Session already closed")
+    )
+)]
+pub(crate) async fn cancel_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let session_id = SessionId::try_from(id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "invalid session id".to_string()))?;
+    cancel_session(&state.core_ref, session_id)
+        .await
+        .map_err(|e| match &e {
+            RunnerError::InvalidSession(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            RunnerError::SessionAlreadyClosed(_) => (StatusCode::CONFLICT, e.to_string()),
+            _ => internal_error(&e),
+        })?;
+    tracing::info!(
+        session_id = session_id.as_u64(),
+        "session cancellation requested"
+    );
+    Ok(StatusCode::ACCEPTED)
 }
