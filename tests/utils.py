@@ -8,6 +8,7 @@ import json
 OK_RESULT = {"type": "Ok"}
 TEST_PROJECT = "test-project"
 TEST_MACHINE_NAME = "TestMachine"
+TEST_USER = "test-user"
 
 
 class TestTask:
@@ -206,6 +207,7 @@ class QScheduler:
         session_id: int | None = None,
         machine: str = TEST_MACHINE_NAME,
         project: str | None = None,
+        user: str = TEST_USER,
         expect_error: int | None = None,
     ):
         if session_id is not None and project is not None:
@@ -214,7 +216,7 @@ class QScheduler:
             # Attach to default project
             project = TEST_PROJECT
         payload = task.create_payload()
-        msg = {"session_id": session_id, "machine": machine, "project": project}
+        msg = {"session_id": session_id, "machine": machine, "project": project, "user": user}
         if session_id is not None:
             msg["session_id"] = session_id
 

@@ -24,6 +24,8 @@ pub(crate) struct CreateTaskParams {
     project: Option<String>,
     /// Name of the target machine.
     machine: String,
+    /// Free-form identifier of the user submitting the task, stored alongside the task.
+    user: String,
 }
 
 /// Submit a task for execution.
@@ -90,6 +92,7 @@ async fn create_task_config(
     Ok(TaskConfig {
         machine_id,
         parent: TaskParent::new(session_id, project_id),
+        user: params.user,
         payload: body,
     })
 }

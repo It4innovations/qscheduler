@@ -103,6 +103,7 @@ impl TaskParent {
 pub struct TaskConfig {
     pub machine_id: MachineId,
     pub parent: TaskParent,
+    pub user: String,
     pub payload: Bytes,
 }
 
@@ -114,6 +115,7 @@ impl Debug for TaskConfig {
             TaskParent::Project(project_id) => f.field("parent", &project_id),
             TaskParent::Session(session_id) => f.field("session", &session_id),
         };
+        f.field("user", &self.user);
         f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
         f.finish()
     }

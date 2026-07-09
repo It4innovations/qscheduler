@@ -120,6 +120,7 @@ pub struct RestoredTask {
     pub session_id: Option<i64>,
     pub project_id: Option<i32>,
     pub backend_id: Option<String>,
+    pub user: String,
     pub payload: Option<Vec<u8>>,
 }
 
@@ -361,11 +362,12 @@ pub async fn delete_session(pool: &PgPool, session_id: SessionId) {
 
 pub async fn insert_task(pool: &PgPool, config: &TaskConfig) -> crate::Result<TaskId> {
     let row = sqlx::query(
-        "INSERT INTO tasks (machine_id, session_id, project_id, payload) VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(config.machine_id.as_u32() as i32)
     .bind(config.parent.session_id().map(|s| s.as_i64()))
     .bind(config.parent.project_id().map(|p| p.as_i32()))
+    .bind(&config.user)
     .bind(config.payload.as_ref())
     .fetch_one(pool)
     .await?;
@@ -434,7 +436,7 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
 /// Load all tasks that are still in a non-terminal state (stored as `waiting`).
 pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>> {
     sqlx::query_as::<_, RestoredTask>(
-        "SELECT id, machine_id, session_id, project_id, backend_id, payload FROM tasks WHERE state = 'waiting'",
+        "SELECT id, machine_id, session_id, project_id, backend_id, \"user\", payload FROM tasks WHERE state = 'waiting'",
     )
     .fetch_all(pool)
     .await

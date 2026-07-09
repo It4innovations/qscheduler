@@ -197,6 +197,7 @@ Submit a task for execution.
 | `machine` | string | yes | Name of the target machine. |
 | `project` | string | exactly one of `project` / `session_id` | Name of the project to charge the task's time to. |
 | `session_id` | integer | exactly one of `project` / `session_id` | Session to associate the task with. The session must be in the `"open"` state or the task is rejected. |
+| `user` | string | yes | Free-form identifier of the user submitting the task, stored alongside the task. |
 
 **Request body** — `application/octet-stream` — raw task payload forwarded to the backend.
 
