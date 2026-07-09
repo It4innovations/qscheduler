@@ -19,8 +19,11 @@ fn default_active() -> bool {
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct CreateProjectRequest {
+    /// Unique project name.
     name: String,
+    /// Time budget, in milliseconds.
     limit_ms: i64,
+    /// Whether the project can accept new tasks/sessions.
     #[serde(default = "default_active")]
     #[schema(default = true)]
     active: bool,
@@ -28,9 +31,13 @@ pub(crate) struct CreateProjectRequest {
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct ProjectResponse {
+    /// Unique project name.
     name: String,
+    /// Time consumed so far, in milliseconds.
     consumed_ms: i64,
+    /// Time budget, in milliseconds.
     limit_ms: i64,
+    /// Whether the project can accept new tasks/sessions.
     active: bool,
 }
 
@@ -45,6 +52,7 @@ impl ProjectResponse {
     }
 }
 
+/// Get a single project by name.
 #[utoipa::path(
     get,
     path = "/projects/{name}",
@@ -65,13 +73,15 @@ pub(crate) async fn get_project_handler(
     Ok(Json(ProjectResponse::from_project(project)))
 }
 
+/// Register a project — a named, time-accounted budget that tasks and sessions are charged
+/// against.
 #[utoipa::path(
     post,
     path = "/projects",
     request_body = CreateProjectRequest,
     responses(
-        (status = 201, description = "Project created", body = ProjectResponse),
-        (status = 409, description = "Project already exists")
+        (status = 201, description = "Project created; empty body"),
+        (status = 409, description = "A project with this name already exists")
     )
 )]
 pub(crate) async fn create_project_handler(
@@ -88,6 +98,7 @@ pub(crate) async fn create_project_handler(
     Ok(StatusCode::CREATED)
 }
 
+/// List all projects.
 #[utoipa::path(
     get,
     path = "/projects",

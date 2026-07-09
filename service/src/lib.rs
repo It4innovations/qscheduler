@@ -20,11 +20,12 @@ struct AppState {
     core_ref: CoreRef,
 }
 
+/// Returns the service version string.
 #[utoipa::path(
     get,
     path = "/version",
     responses(
-        (status = 200, description = "Service version", body = String)
+        (status = 200, description = "Service version string, e.g. `qscheduler v1.0.0`.", body = String)
     )
 )]
 async fn version_handler(State(state): State<Arc<AppState>>) -> String {

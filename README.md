@@ -212,6 +212,20 @@ Get the current state of a task.
 
 ---
 
+### `DELETE /tasks/{id}`
+
+Request cancellation of a task. Cancellation is asynchronous: a queued task is removed from the
+queue, while a running task is cancelled on the backend; in both cases the task eventually
+reaches the `"cancelled"` state (poll `GET /tasks/{id}` to observe it).
+
+**Response `202`** — cancellation requested.
+
+**Response `404`** — task not found.
+
+**Response `409`** — task already in a terminal state (`finished`, `failed`, or `cancelled`).
+
+---
+
 ### `POST /sessions`
 
 Create a session — a time-bounded, exclusive reservation of one machine for one project. Tasks
@@ -242,6 +256,21 @@ Get the current state of a session.
 **Response `200`** — one of `"waiting"`, `"open"`, or `"closed"`.
 
 **Response `404`** — session not found.
+
+---
+
+### `DELETE /sessions/{id}`
+
+Request cancellation of a session. Cancellation is asynchronous: a queued (`"waiting"`) session
+is removed from the queue, while an `"open"` session is closed and its tasks are cancelled (both
+those already submitted to the backend and those still queued); in both cases the session
+eventually reaches the `"closed"` state.
+
+**Response `202`** — cancellation requested.
+
+**Response `404`** — session not found.
+
+**Response `409`** — session already closed.
 
 ---
 
