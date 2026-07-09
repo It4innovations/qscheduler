@@ -46,6 +46,13 @@ def test_session_submit_and_cancel(qscheduler):
         qscheduler.assert_task_canceled(t)
 
 
+def test_session_max_duration_rejected(qscheduler):
+    qscheduler.max_session_time = 2
+    qscheduler.start()
+    qscheduler.new_session(time_limit=2)
+    qscheduler.new_session(time_limit=3, expect_error=422)
+
+
 def test_session_no_overlap(qscheduler):
     qscheduler.queue_size = 2
     qscheduler.start()

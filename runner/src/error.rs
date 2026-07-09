@@ -1,5 +1,6 @@
 use crate::machine::MachineId;
 use crate::session::SessionId;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -22,6 +23,16 @@ pub enum RunnerError {
     ProjectNotFound(String),
     #[error("Project '{0}' has exceeded its time limit")]
     ProjectLimitExceeded(String),
+    #[error("Project '{0}' is not active")]
+    ProjectNotActive(String),
+    #[error(
+        "Session duration {requested:?} exceeds machine '{machine}' maximum session duration of {limit:?}"
+    )]
+    SessionDurationExceedsLimit {
+        machine: String,
+        limit: Duration,
+        requested: Duration,
+    },
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 

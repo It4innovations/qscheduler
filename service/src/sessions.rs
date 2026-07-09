@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use runner::SessionId;
+use runner::error::RunnerError;
 use runner::reactor::{create_session, get_project_id_by_name};
 use runner::{SessionConfig, SessionState};
 use serde::Deserialize;
@@ -88,7 +89,15 @@ pub(crate) async fn create_session_handler(
     };
     let session_id = create_session(&state.core_ref, config)
         .await
-        .map_err(internal_error)?;
+        .map_err(|e| match &e {
+            RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
+                (StatusCode::PAYMENT_REQUIRED, e.to_string())
+            }
+            RunnerError::SessionDurationExceedsLimit { .. } => {
+                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+            }
+            _ => internal_error(&e),
+        })?;
     tracing::info!(session_id = session_id.as_u64(), "session created");
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
 }
