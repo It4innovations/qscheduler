@@ -195,6 +195,7 @@ impl Core {
                 let config = TaskConfig {
                     machine_id,
                     parent: TaskParent::new(session_id, project_id),
+                    user: t.user,
                     payload: payload.clone(),
                 };
 
@@ -353,7 +354,6 @@ impl Core {
         let CoreSplitMut {
             machine_map,
             task_map,
-            core_ref: _,
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
@@ -372,8 +372,6 @@ impl Core {
         let CoreSplitMut {
             machine_map,
             session_map,
-            core_ref: _,
-            task_map: _,
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;

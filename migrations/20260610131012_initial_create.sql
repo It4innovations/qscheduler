@@ -37,6 +37,7 @@ CREATE TABLE tasks (
     state task_state NOT NULL DEFAULT 'waiting',
     error TEXT,
     finished_at TIMESTAMPTZ,
+    "user" VARCHAR(250) NOT NULL,
     payload BYTEA,
     result BYTEA,
     exec_time_ms BIGINT,

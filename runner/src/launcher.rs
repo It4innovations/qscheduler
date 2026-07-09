@@ -101,7 +101,6 @@ fn pick_task(
         machine_map,
         task_map,
         session_map,
-        project_map: _,
         ..
     } = core.split_mut();
     let machine = machine_map.get_machine_mut(machine_id);
