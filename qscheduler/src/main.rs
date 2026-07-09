@@ -21,7 +21,7 @@ struct Cli {
 enum CliCommand {
     Serve(ServeOpts),
     /// Manage machines
-    Machine(MachineArgs),
+    Machine(Box<MachineArgs>),
 }
 
 #[derive(Parser)]
@@ -63,6 +63,11 @@ struct MachineConfigArgs {
     #[arg(long, value_parser = parse_human_time, default_value = "5s")]
     session_check_interval: Duration,
 
+    /// Maximum duration a session on this machine may request. Sessions requesting
+    /// longer are rejected at submit time.
+    #[arg(long, value_parser = parse_human_time, default_value = "2h")]
+    max_session_time: Duration,
+
     #[clap(subcommand)]
     backend: MachineBackendArgs,
 }
@@ -77,6 +82,7 @@ impl MachineConfigArgs {
             name: self.name,
             queue_size: self.queue_size,
             session_check_interval_ms: self.session_check_interval.as_millis() as u32,
+            max_session_time_ms: self.max_session_time.as_millis() as u64,
             notify,
             backend: self.backend.into_config(),
         }

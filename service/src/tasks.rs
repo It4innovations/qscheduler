@@ -46,7 +46,9 @@ pub(crate) async fn create_task(
             RunnerError::InvalidSession(_) | RunnerError::NonRunningSession(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
             }
-            RunnerError::ProjectLimitExceeded(_) => (StatusCode::PAYMENT_REQUIRED, e.to_string()),
+            RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
+                (StatusCode::PAYMENT_REQUIRED, e.to_string())
+            }
             _ => internal_error(&e),
         })?;
     tracing::info!(%task_id, "task submitted");

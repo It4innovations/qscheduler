@@ -1,4 +1,4 @@
-use crate::backend::create_backend;
+use crate::backend::{create_backend, FromBackendMessage};
 use crate::config::RunnerConfiguration;
 use crate::db;
 use crate::db::close_dead_session;
@@ -13,6 +13,7 @@ use sqlx::postgres::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
 #[allow(dead_code)]
@@ -47,7 +48,7 @@ pub type CoreRef = Arc<Mutex<Core>>;
 impl Core {
     pub async fn new(config: RunnerConfiguration, pool: PgPool) -> crate::Result<CoreRef> {
         let mut machine_map: MachineMap = Default::default();
-        let mut backends = Vec::with_capacity(config.machines.len());
+        let mut backend_receivers = HashMap::with_capacity(config.machines.len());
         for (machine_id, m) in config.machines {
             let (backend, backend_receiver) = create_backend(&m.backend);
             machine_map.insert(Machine::new(
@@ -58,12 +59,13 @@ impl Core {
                     session_check_interval: Duration::from_millis(
                         m.session_check_interval_ms as u64,
                     ),
+                    max_session_time: Duration::from_millis(m.max_session_time_ms),
                     notify: m.notify,
                     backend: m.backend,
                 },
-                backend.clone(),
+                backend,
             ));
-            backends.push((backend, backend_receiver));
+            backend_receivers.insert(machine_id, backend_receiver);
         }
         let core_ref = Arc::new(Mutex::new(Core {
             machine_map,
@@ -79,7 +81,7 @@ impl Core {
 
         {
             let core = core_ref.lock().unwrap();
-            core.start_launchers(resume_tasks);
+            core.start_launchers(backend_receivers, resume_tasks);
         }
 
         Ok(core_ref)
@@ -256,11 +258,13 @@ impl Core {
         &self.pool
     }
 
-    pub(crate) fn start_launchers(&self, mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>) {
+    pub(crate) fn start_launchers(&self, mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>, mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>) {
         let core_ref = self.core_ref.as_ref().unwrap();
         for m in self.machine_map.iter() {
-            let resume_tasks = resume_tasks.remove(&m.id()).unwrap_or_default();
-            start_launcher(core_ref, m.id(), m.config(), resume_tasks);
+            let machine_id = m.id();
+            let backend_receiver = backend_receivers.remove(&machine_id).unwrap();
+            let resume_tasks = resume_tasks.remove(&machine_id).unwrap_or_default();
+            start_launcher(core_ref, machine_id, m.config(), m.backend().clone(), backend_receiver, resume_tasks);
         }
     }
 
@@ -287,10 +291,22 @@ impl Core {
     }
 
     pub(crate) fn validate_session_config(&self, config: &SessionConfig) -> crate::Result<()> {
+        let machine = self.machine_map.find_machine(config.machine_id)?;
+        let limit = machine.config().max_session_time;
+        if config.time_limit > limit {
+            return Err(RunnerError::SessionDurationExceedsLimit {
+                machine: machine.config().name.clone(),
+                limit,
+                requested: config.time_limit,
+            });
+        }
         let project = self
             .project_map
             .find_project(config.project_id)
             .ok_or_else(|| RunnerError::ProjectNotFound(config.project_id.to_string()))?;
+        if !project.active {
+            return Err(RunnerError::ProjectNotActive(project.name.clone()));
+        }
         if !project.has_time_for(config.time_limit) {
             return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
         }
@@ -307,12 +323,15 @@ impl Core {
         }
         if let Some(project_id) = config.parent.project_id()
             && let Some(project) = self.project_map.find_project(project_id)
-            && project.is_over_limit()
         {
-            Err(RunnerError::ProjectLimitExceeded(project.name.clone()))
-        } else {
-            Ok(())
+            if !project.active {
+                return Err(RunnerError::ProjectNotActive(project.name.clone()));
+            }
+            if project.is_over_limit() {
+                return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
+            }
         }
+        Ok(())
     }
 
     pub(crate) fn add_task(

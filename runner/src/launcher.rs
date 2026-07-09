@@ -21,10 +21,11 @@ pub fn start_launcher(
     core_ref: &CoreRef,
     machine_id: MachineId,
     machine_config: &MachineConfig,
+    backend: Arc<dyn Backend>,
+    backend_receiver: UnboundedReceiver<FromBackendMessage>,
     restore_tasks: Vec<ResumeTask>,
 ) {
     let core_ref = core_ref.clone();
-    let (backend, backend_receiver) = create_backend(&machine_config.backend);
     let notify_sender = machine_config.notify.as_ref().map(|nc| {
         let notify_config = nc.clone();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<NotifyEvent>();

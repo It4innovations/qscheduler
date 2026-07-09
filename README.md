@@ -49,6 +49,7 @@ qscheduler machine add <NAME> [OPTIONS] <BACKEND> [BACKEND OPTIONS]
 | `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state. See [Notifications](#notifications). |
 | `--notify-token <TOKEN>` | Arbitrary token included in notification payloads. |
 | `--session-check-interval <DURATION>` | How often session time-consumption is persisted to the database, e.g. `5s` (default: `5s`). |
+| `--max-session-time <DURATION>` | Maximum duration a session on this machine may request, e.g. `2h`. Sessions requesting longer are rejected at submit time (default: `2h`). |
 
 `<BACKEND>` is one of:
 
@@ -182,7 +183,7 @@ Submit a task for execution.
 
 **Response `201`** — task ID as a JSON integer.
 
-**Response `402`** — the project has exceeded its time limit.
+**Response `402`** — the project has exceeded its time limit, or the project is not active.
 
 **Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`, or the session is invalid or not open.
 
@@ -226,9 +227,11 @@ in the session are cancelled when the session closes.
 
 **Response `201`** — session ID as a JSON integer.
 
+**Response `402`** — the project has exceeded its time limit, or the project is not active.
+
 **Response `404`** — unknown `machine`.
 
-**Response `422`** — unknown `project`.
+**Response `422`** — unknown `project`, or `time_limit_ms` exceeds the machine's `--max-session-time`.
 
 ---
 

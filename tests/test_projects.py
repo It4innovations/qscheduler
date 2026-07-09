@@ -95,6 +95,20 @@ def test_submit_rejected_when_quota_exceeded(qscheduler):
     qscheduler.submit(TT(), project="myproject", expect_error=402)
 
 
+def test_task_submit_rejected_when_project_inactive(qscheduler):
+    qscheduler.start(add_test_project=False)
+    qscheduler.add_project("myproject", limit_ms=10_000, active=False)
+
+    qscheduler.submit(TT(), project="myproject", expect_error=402)
+
+
+def test_session_create_rejected_when_project_inactive(qscheduler):
+    qscheduler.start(add_test_project=False)
+    qscheduler.add_project("myproject", limit_ms=10_000, active=False)
+
+    qscheduler.new_session(time_limit=1, project="myproject", expect_error=402)
+
+
 def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
     qscheduler_test.queue_size = 1
     qscheduler_test.start(add_test_project=False)

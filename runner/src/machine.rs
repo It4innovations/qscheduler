@@ -29,6 +29,7 @@ pub struct MachineConfig {
     pub name: String,
     pub queue_size: usize,
     pub session_check_interval: Duration,
+    pub max_session_time: Duration,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }

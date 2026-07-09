@@ -53,6 +53,7 @@ class QScheduler:
         self.notify_url = None
         self.notify_token = None
         self.queue_size = 2
+        self.max_session_time = None
         self._process = None
         self._log_file = None
 
@@ -83,6 +84,8 @@ class QScheduler:
             args.append(f"--notify-url={self.notify_url}")
         if self.notify_token:
             args.append(f"--notify-token={self.notify_token}")
+        if self.max_session_time is not None:
+            args.append(f"--max-session-time={self.max_session_time}s")
         args += self.backend.machine_args()
         subprocess.run(
             args,
@@ -236,6 +239,7 @@ class QScheduler:
         time_limit: int,
         machine: str = TEST_MACHINE_NAME,
         project: str = TEST_PROJECT,
+        expect_error: int | None = None,
     ):
         msg = {
             "machine": machine,
@@ -243,6 +247,11 @@ class QScheduler:
             "project": project,
         }
         r = requests.post(self.url("sessions"), params=msg, timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
         r.raise_for_status()
         return r.json()
 
