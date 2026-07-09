@@ -1,12 +1,12 @@
 use crate::machine::MachineId;
 use crate::project::ProjectId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SessionId(NonZeroU64);
 
 impl Default for SessionId {

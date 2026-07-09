@@ -1,4 +1,4 @@
-use crate::TaskId;
+use crate::{SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
@@ -18,10 +18,24 @@ pub(crate) enum NotifyTaskState {
     Cancelled,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NotifySessionState {
+    Opened,
+    Closed,
+}
+
 #[derive(Serialize)]
-pub(crate) struct NotifyEvent {
-    pub task_id: TaskId,
-    pub state: NotifyTaskState,
+#[serde(untagged)]
+pub(crate) enum NotifyEvent {
+    Task {
+        task_id: TaskId,
+        state: NotifyTaskState,
+    },
+    Session {
+        session_id: SessionId,
+        state: NotifySessionState,
+    },
 }
 
 #[derive(Serialize)]
@@ -52,7 +66,14 @@ pub(crate) async fn notify_worker(
                 _ => {
                     fail_count += 1;
                     if fail_count >= MAX_NOTIFY_FAILS {
-                        debug!(task = %evt.event.task_id, "Discarding notification after max failures");
+                        match &evt.event {
+                            NotifyEvent::Task { task_id, .. } => {
+                                debug!(%task_id, "Discarding notification after max failures")
+                            }
+                            NotifyEvent::Session { session_id, .. } => {
+                                debug!(%session_id, "Discarding notification after max failures")
+                            }
+                        }
                         break;
                     }
                     sleep_until(Instant::now() + delay).await;
