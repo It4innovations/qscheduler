@@ -6,6 +6,11 @@ use crate::task::{TaskConfig, TaskId};
 use crate::{MachineId, db};
 use std::time::Duration;
 
+pub async fn check_db_health(core_ref: &CoreRef) -> bool {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    db::ping(&pool).await
+}
+
 pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
     tracing::debug!("Submitting task");
     let pool = {

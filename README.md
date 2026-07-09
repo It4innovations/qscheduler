@@ -2,6 +2,19 @@
 
 A task scheduling service that dispatches work to remote quantum computing backends.
 
+## Features
+
+- **Task scheduling** — accepts tasks and queues them per machine, dispatching to a pluggable
+  backend (a real quantum backend or an in-process test backend).
+- **Project accounting** — tasks can be charged against a project, a named, time-limited budget
+  that tracks accumulated execution time and rejects new tasks once its limit is exceeded or it
+  is deactivated.
+- **Sessions** — an exclusive, time-limited reservation of a machine for a single project, so a
+  sequence of tasks can run back-to-back without interleaving with other projects' work.
+- **Notifications** — optional HTTP callbacks on task completion and session open/close.
+- **REST API** — a JSON HTTP API for submitting and monitoring tasks, sessions, and projects,
+  with an OpenAPI spec served at runtime.
+
 ## Quick Start
 
 ### Build
@@ -19,8 +32,7 @@ docker build -t qscheduler .
 ### Database
 
 QScheduler is stateless except for PostgreSQL, which is the source of truth for machines,
-projects, sessions, and tasks. Every invocation of the `qscheduler` binary (both `serve` and
-`machine`) requires the `DATABASE_URL` environment variable:
+projects, sessions, and tasks. Every invocation of the `qscheduler` binary requires the `DATABASE_URL` environment variable:
 
 ```
 DATABASE_URL=postgres://user:password@host/dbname
@@ -35,7 +47,7 @@ no manual migration step is needed.
 
 ### Register a machine
 
-Machines are no longer configured via a TOML file — they are registered directly in the
+Quantum machines are registered directly in the
 database using the `qscheduler machine` subcommand, then loaded by the service at startup.
 
 ```bash
@@ -63,10 +75,7 @@ qscheduler machine add SimulatorMachine test
 **`iqm`** — IQM quantum computing backend.
 
 ```bash
-qscheduler machine add QuantumDevice \
-  --queue-size 2 \
-  iqm --url https://example.iqm.fi --token your-bearer-token \
-      --machine-name star24 --check-interval 1s
+qscheduler machine add QuantumDevice iqm --url https://iqm.machine.com --token your-token --machine-name star24
 ```
 
 | IQM option | Description |
@@ -77,14 +86,7 @@ qscheduler machine add QuantumDevice \
 | `--check-interval <DURATION>` | Polling interval for job status, as a humantime string, e.g. `1s`/`500ms` (the CLI's own `--help` text says "in milliseconds", but a bare integer is rejected — a unit suffix is required). |
 
 `qscheduler machine update <NAME> ...` is intended to change an existing machine's configuration
-using the same arguments as `add`, but it currently fails with a database error (`column
-"queue_size" does not exist`) — the `machines` table only has `id`/`name`/`type`/`config`
-columns, while `update_machine` queries `queue_size`/`notify_url`/`notify_token` as if they were
-separate columns. Until this is fixed, machine configuration can only be set at creation time
-with `machine add`; to change it, drop and re-add the machine (which changes its ID —
-existing sessions/tasks referencing it are unaffected since those tables reference machines by
-ID, not name).
-
+using the same arguments as `add`.
 Machines are only loaded once at service startup, so **the service must be restarted** after
 `machine add` for the change to take effect.
 
@@ -145,6 +147,7 @@ Task events have this request body:
 
 ```json
 {
+  "event": "task",
   "task_id": 42,
   "state": "finished",
   "token": "my-secret-token"
@@ -157,6 +160,7 @@ Session events have this request body:
 
 ```json
 {
+  "event": "session",
   "session_id": 7,
   "state": "opened",
   "token": "my-secret-token"
@@ -183,6 +187,24 @@ Tasks belong to either a **project** (a time-accounted budget shared across task
 Returns the service version string.
 
 **Response `200`** — plain text, e.g. `qscheduler v1.0.0`.
+
+---
+
+### `GET /health`
+
+Health check. Reports whether the service is up and able to reach the database.
+
+**Response `200`** — the database is reachable:
+
+```json
+{ "status": "ok" }
+```
+
+**Response `503`** — the database is unreachable:
+
+```json
+{ "status": "unhealthy" }
+```
 
 ---
 

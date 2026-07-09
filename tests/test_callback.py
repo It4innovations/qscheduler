@@ -87,7 +87,9 @@ def test_callback_fires_on_task_cancel(notify_qs, callback_server):
     time.sleep(0.3)
     wait_for_callbacks(callback_server, count=3)
     states = {
-        cb["task_id"]: cb["state"] for cb in callback_server.callbacks if "task_id" in cb
+        cb["task_id"]: cb["state"]
+        for cb in callback_server.callbacks
+        if "task_id" in cb
     }
     assert states[t1] == "finished"
     assert states[t2] == "cancelled"
