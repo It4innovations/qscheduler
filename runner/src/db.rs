@@ -208,6 +208,25 @@ pub(crate) async fn find_project_by_name(
     .map_err(crate::error::RunnerError::Sqlx)
 }
 
+pub(crate) async fn update_project(
+    pool: &PgPool,
+    name: &str,
+    active: Option<bool>,
+    limit_ms: Option<i64>,
+) -> crate::Result<Option<Project>> {
+    sqlx::query_as::<_, ProjectRow>(
+        "UPDATE projects SET active = COALESCE($2, active), limit_ms = COALESCE($3, limit_ms) \
+         WHERE name = $1 RETURNING id, name, consumed_ms, limit_ms, active",
+    )
+    .bind(name)
+    .bind(active)
+    .bind(limit_ms)
+    .fetch_optional(pool)
+    .await
+    .map(|opt| opt.map(Project::from))
+    .map_err(crate::error::RunnerError::Sqlx)
+}
+
 pub async fn list_projects(pool: &PgPool) -> crate::Result<Vec<Project>> {
     sqlx::query_as::<_, ProjectRow>(
         "SELECT id, name, consumed_ms, limit_ms, active FROM projects ORDER BY id",

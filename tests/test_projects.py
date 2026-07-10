@@ -33,6 +33,53 @@ def test_create_and_list_projects(qscheduler_test):
     }
 
 
+def test_update_project_active_and_limit(qscheduler_test):
+    qscheduler_test.start(add_test_project=False)
+    qscheduler_test.add_project("alpha", limit_ms=10_000)
+
+    qscheduler_test.update_project("alpha", active=False)
+    project = qscheduler_test.get_project("alpha")
+    assert project["active"] is False
+    assert project["limit_ms"] == 10_000
+
+    qscheduler_test.update_project("alpha", limit_ms=5_000)
+    project = qscheduler_test.get_project("alpha")
+    assert project["active"] is False
+    assert project["limit_ms"] == 5_000
+
+    qscheduler_test.update_project("alpha", active=True, limit_ms=20_000)
+    project = qscheduler_test.get_project("alpha")
+    assert project["active"] is True
+    assert project["limit_ms"] == 20_000
+
+
+def test_update_project_persisted_after_restart(qscheduler_test):
+    qscheduler_test.start(add_test_project=False)
+    qscheduler_test.add_project("alpha", limit_ms=10_000)
+
+    qscheduler_test.update_project("alpha", active=False, limit_ms=5_000)
+    qscheduler_test.restart()
+
+    project = qscheduler_test.get_project("alpha")
+    assert project["active"] is False
+    assert project["limit_ms"] == 5_000
+
+
+def test_update_project_not_found(qscheduler_test):
+    qscheduler_test.start(add_test_project=False)
+    qscheduler_test.update_project("nonexistent", active=False, expect_status_code=404)
+
+
+def test_update_project_reactivation_allows_submit(qscheduler):
+    qscheduler.start(add_test_project=False)
+    qscheduler.add_project("myproject", limit_ms=10_000, active=False)
+    qscheduler.submit(TT(), project="myproject", expect_error=402)
+
+    qscheduler.update_project("myproject", active=True)
+    task_id = qscheduler.submit(TT(), project="myproject")
+    qscheduler.wait_for_finished(task_id)
+
+
 def test_duplicate_name_fail(qscheduler_test):
     qscheduler_test.start(add_test_project=False)
     qscheduler_test.add_project("alpha", limit_ms=10_000)

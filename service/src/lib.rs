@@ -101,6 +101,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         .routes(routes!(projects::create_project_handler))
         .routes(routes!(projects::list_projects_handler))
         .routes(routes!(projects::get_project_handler))
+        .routes(routes!(projects::update_project_handler))
         .with_state(state)
         .split_for_parts();
 

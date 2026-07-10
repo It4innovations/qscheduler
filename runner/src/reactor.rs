@@ -116,6 +116,43 @@ pub async fn create_project(
     Ok(id)
 }
 
+pub async fn update_project(
+    core_ref: &CoreRef,
+    name: &str,
+    active: Option<bool>,
+    limit: Option<Duration>,
+) -> crate::Result<Project> {
+    tracing::debug!(name, ?active, ?limit, "Updating project");
+    let pool = core_ref.lock().unwrap().pool().clone();
+    let limit_ms = limit.map(|d| d.as_millis() as i64);
+    db::update_project(&pool, name, active, limit_ms)
+        .await?
+        .ok_or_else(|| RunnerError::ProjectNotFound(name.to_string()))?;
+
+    // Apply to the cached entry rather than the DB snapshot, so a `consumed` value
+    // updated concurrently by in-memory accounting isn't clobbered.
+    let cached = {
+        let mut core = core_ref.lock().unwrap();
+        let id = core.split().project_map.find_project_id_by_name(name);
+        id.map(|id| {
+            let project = core.split_mut().project_map.get_project_mut(id);
+            if let Some(active) = active {
+                project.active = active;
+            }
+            if let Some(limit) = limit {
+                project.limit = limit;
+            }
+            project.clone()
+        })
+    };
+    match cached {
+        Some(project) => Ok(project),
+        None => get_project_by_name(core_ref, name)
+            .await?
+            .ok_or_else(|| RunnerError::ProjectNotFound(name.to_string())),
+    }
+}
+
 pub async fn list_projects(core_ref: &CoreRef) -> crate::Result<Vec<Project>> {
     tracing::debug!("Listing projects");
     let pool = core_ref.lock().unwrap().pool().clone();

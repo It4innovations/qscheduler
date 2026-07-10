@@ -361,6 +361,32 @@ Get a single project by name.
 
 ---
 
+### `PATCH /projects/{name}`
+
+Update a project's `active` flag and/or time `limit_ms`. Fields omitted from the request body
+are left unchanged. Does not affect `consumed_ms`.
+
+**Request body**
+
+```json
+{"active": false, "limit_ms": 7200000}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `active` | boolean | no | Whether the project can accept new tasks/sessions. Omit to leave unchanged. |
+| `limit_ms` | integer | no | Time budget, in milliseconds. Omit to leave unchanged. |
+
+**Response `200`** — the updated project.
+
+```json
+{"name": "my-project", "consumed_ms": 120000, "limit_ms": 7200000, "active": false}
+```
+
+**Response `404`** — project not found.
+
+---
+
 ### `GET /machine/{machine}/arch`
 
 Fetch the backend's architecture description.

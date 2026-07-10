@@ -191,6 +191,27 @@ class QScheduler:
                 f"Expected HTTP {expect_status_code}, got {r.status_code}: {r.text}"
             )
 
+    def update_project(
+        self,
+        name: str,
+        active: bool | None = None,
+        limit_ms: int | None = None,
+        expect_status_code=None,
+    ):
+        body = {}
+        if active is not None:
+            body["active"] = active
+        if limit_ms is not None:
+            body["limit_ms"] = limit_ms
+        r = requests.patch(self.url(f"projects/{name}"), json=body, timeout=5)
+        if expect_status_code is None:
+            r.raise_for_status()
+        else:
+            assert r.status_code == expect_status_code, (
+                f"Expected HTTP {expect_status_code}, got {r.status_code}: {r.text}"
+            )
+        return r
+
     def list_projects(self) -> list[dict]:
         r = requests.get(self.url("projects"), timeout=5)
         r.raise_for_status()
