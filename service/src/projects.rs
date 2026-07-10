@@ -6,7 +6,7 @@ use axum::{
 use runner::Project;
 use runner::error::RunnerError;
 use runner::reactor::{
-    create_project, get_project_by_name, list_projects as list_projects_reactor,
+    create_project, get_project_by_name, list_projects as list_projects_reactor, update_project,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -96,6 +96,41 @@ pub(crate) async fn create_project_handler(
             _ => internal_error(&e),
         })?;
     Ok(StatusCode::CREATED)
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateProjectRequest {
+    /// Whether the project can accept new tasks/sessions. Omit to leave unchanged.
+    active: Option<bool>,
+    /// Time budget, in milliseconds. Omit to leave unchanged.
+    limit_ms: Option<i64>,
+}
+
+/// Update a project's `active` flag and/or time `limit_ms`. Fields omitted from the request
+/// body are left unchanged. Does not affect `consumed_ms`.
+#[utoipa::path(
+    patch,
+    path = "/projects/{name}",
+    params(("name" = String, Path, description = "Project name")),
+    request_body = UpdateProjectRequest,
+    responses(
+        (status = 200, description = "Project updated", body = ProjectResponse),
+        (status = 404, description = "Project not found")
+    )
+)]
+pub(crate) async fn update_project_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateProjectRequest>,
+) -> Result<Json<ProjectResponse>, (StatusCode, String)> {
+    let limit = body.limit_ms.map(|ms| Duration::from_millis(ms as u64));
+    let project = update_project(&state.core_ref, &name, body.active, limit)
+        .await
+        .map_err(|e| match &e {
+            RunnerError::ProjectNotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            _ => internal_error(&e),
+        })?;
+    Ok(Json(ProjectResponse::from_project(project)))
 }
 
 /// List all projects.
