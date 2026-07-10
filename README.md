@@ -114,6 +114,56 @@ docker run -it --network host -e DATABASE_URL=postgres://user:password@host/dbna
 
 Once running, the OpenAPI spec is served at `GET /api-docs/openapi.json`.
 
+## Local Testing
+
+To try out the full flow locally with no external dependencies, use the in-process `test`
+backend (see [Backends](#backends)) instead of a real quantum backend. `compose.yml` publishes
+PostgreSQL on the host's `5432` port, so the service container can just reach it at `localhost`
+by running with `--network host` — no custom Docker network needed.
+
+1. Start PostgreSQL:
+
+   ```bash
+   docker compose up -d
+   ```
+
+2. Build the image:
+
+   ```bash
+   docker build -t qscheduler .
+   ```
+
+3. Register a machine using the `test` backend:
+
+   ```bash
+   docker run --rm --network host \
+     -e DATABASE_URL=postgres://postgres:xpass11@localhost/postgres \
+     qscheduler machine add TestMachine test
+   ```
+
+4. Start the service (machines are only loaded at startup, so this must run after step 3):
+
+   ```bash
+   docker run -d --name qscheduler --network host \
+     -e DATABASE_URL=postgres://postgres:xpass11@localhost/postgres \
+     qscheduler serve --port 4300
+   ```
+
+5. Exercise it — register a project, then submit a task against `TestMachine`:
+
+   ```bash
+   curl -X POST http://localhost:4300/projects \
+     -H 'Content-Type: application/json' \
+     -d '{"name": "test-project", "limit_ms": 3600000}'
+
+   curl -X POST 'http://localhost:4300/tasks?machine=TestMachine&project=test-project&user=me' \
+     -H 'Content-Type: application/octet-stream' \
+     --data-raw '{"result": {"type": "Ok"}}'
+   ```
+
+   Poll `GET /tasks/{id}` with the returned task ID to see it move from `"waiting"` to
+   `"finished"`.
+
 ## Backends
 
 **`test`** — the task payload is a JSON object:

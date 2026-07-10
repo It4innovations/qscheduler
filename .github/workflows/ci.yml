@@ -126,3 +126,74 @@ jobs:
           name: pytest-artifacts
           path: /tmp/pytest-of-*/**
           if-no-files-found: ignore
+
+  docker-smoke-test:
+    name: Docker Image Smoke Test
+    needs: check-and-build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: xpass11
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd=pg_isready
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t qscheduler .
+
+      - name: Register a test-backend machine
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_URL=postgres://postgres:xpass11@localhost/postgres \
+            qscheduler machine add TestMachine test
+
+      - name: Start the service
+        run: |
+          docker run -d --name qscheduler --network host \
+            -e DATABASE_URL=postgres://postgres:xpass11@localhost/postgres \
+            qscheduler serve --port 4300
+
+      - name: Wait for health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4300/health; then exit 0; fi
+            sleep 1
+          done
+          echo "Service did not become healthy in time"
+          exit 1
+
+      - name: Register a project and submit a task
+        run: |
+          set -e
+          curl -sf -X POST http://localhost:4300/projects \
+            -H 'Content-Type: application/json' \
+            -d '{"name": "smoke-project", "limit_ms": 3600000}'
+
+          task_id=$(curl -sf -X POST 'http://localhost:4300/tasks?machine=TestMachine&project=smoke-project&user=ci' \
+            -H 'Content-Type: application/octet-stream' \
+            --data-raw '{"result": {"type": "Ok"}}')
+
+          for i in $(seq 1 30); do
+            state=$(curl -sf http://localhost:4300/tasks/$task_id | jq -r .state)
+            echo "task $task_id state: $state"
+            if [ "$state" = "finished" ]; then exit 0; fi
+            if [ "$state" = "failed" ] || [ "$state" = "cancelled" ]; then
+              echo "task ended in unexpected state: $state"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "task did not finish in time"
+          exit 1
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker logs qscheduler || true
