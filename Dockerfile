@@ -8,10 +8,13 @@ COPY Cargo.toml Cargo.lock ./
 COPY qscheduler/ qscheduler/
 COPY runner/ runner/
 COPY service/ service/
+COPY migrations/ migrations/
 
 RUN cargo build --release -p qscheduler
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/qscheduler /usr/local/bin/qscheduler
 
