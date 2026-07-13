@@ -46,7 +46,6 @@ impl Backend for TestBackend {
             return;
         }
         let exec_time = if let Some(started) = task.started {
-            
             Instant::now() - started
         } else {
             Duration::ZERO

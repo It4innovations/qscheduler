@@ -334,7 +334,8 @@ pub async fn close_session_with_tasks(
     timestamp: DateTime<Utc>,
     cancelled_tasks: &[TaskId],
 ) {
-    if let Err(e) = try_close_session_with_tasks(pool, session_id, exec_time, timestamp, cancelled_tasks).await
+    if let Err(e) =
+        try_close_session_with_tasks(pool, session_id, exec_time, timestamp, cancelled_tasks).await
     {
         tracing::error!(%session_id, error = %e, "failed to close session in db, changes rolled back");
     }
@@ -449,8 +450,9 @@ pub async fn insert_session(
     use sqlx::Row;
     let id: i64 = row.get("id");
     let created_at: DateTime<Utc> = row.get("created_at");
-    let session_id = SessionId::try_from(id as u64)
-        .map_err(|_| crate::error::RunnerError::GenericError("invalid session id from db".into()))?;
+    let session_id = SessionId::try_from(id as u64).map_err(|_| {
+        crate::error::RunnerError::GenericError("invalid session id from db".into())
+    })?;
     Ok((session_id, created_at))
 }
 

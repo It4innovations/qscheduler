@@ -80,7 +80,7 @@ enum DbUpdate {
     },
     SessionOpened {
         session_id: SessionId,
-        timestamp: DateTime<Utc>
+        timestamp: DateTime<Utc>,
     },
     SessionClosed {
         session_id: SessionId,
@@ -142,7 +142,9 @@ fn pick_task(
 
                     let project_id = session.config.project_id;
                     let now = Instant::now();
-                    session.state = SessionState::Open { opened_at: Utc::now() };
+                    session.state = SessionState::Open {
+                        opened_at: Utc::now(),
+                    };
                     machine.start_session(session_id);
                     *running_session = Some(RunningSession {
                         session_id,
@@ -159,7 +161,10 @@ fn pick_task(
                         );
                         let _ = sender.send(NotifyEvent::Session { session: info });
                     }
-                    db_updates.push(DbUpdate::SessionOpened { session_id, timestamp: Utc::now() });
+                    db_updates.push(DbUpdate::SessionOpened {
+                        session_id,
+                        timestamp: Utc::now(),
+                    });
                     continue;
                 }
             }
@@ -628,17 +633,24 @@ async fn launcher_main(
                 DbUpdate::TaskCancelled { task_id, completed } => {
                     db::update_task_cancelled(&pool, task_id, completed).await;
                 }
-                DbUpdate::SessionOpened { session_id, timestamp } => {
-                    db::update_session_opened(&pool, session_id, timestamp).await
-                }
+                DbUpdate::SessionOpened {
+                    session_id,
+                    timestamp,
+                } => db::update_session_opened(&pool, session_id, timestamp).await,
                 DbUpdate::SessionClosed {
                     session_id,
                     exec_time,
                     timestamp,
                     cancelled_tasks,
                 } => {
-                    db::close_session_with_tasks(&pool, session_id, exec_time, timestamp, &cancelled_tasks)
-                        .await
+                    db::close_session_with_tasks(
+                        &pool,
+                        session_id,
+                        exec_time,
+                        timestamp,
+                        &cancelled_tasks,
+                    )
+                    .await
                 }
                 DbUpdate::SessionExecTime {
                     session_id,

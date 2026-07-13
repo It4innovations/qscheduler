@@ -1,11 +1,11 @@
 use crate::machine::MachineId;
 use crate::project::ProjectId;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::num::NonZeroU64;
 use std::time::Duration;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SessionId(NonZeroU64);
@@ -64,8 +64,13 @@ impl From<NonZeroU64> for SessionId {
 #[derive(Clone, Copy)]
 pub enum SessionState {
     Waiting,
-    Open { opened_at: DateTime<Utc> },
-    Closed { opened_at: Option<DateTime<Utc>>, closed_at: DateTime<Utc> },
+    Open {
+        opened_at: DateTime<Utc>,
+    },
+    Closed {
+        opened_at: Option<DateTime<Utc>>,
+        closed_at: DateTime<Utc>,
+    },
 }
 
 impl SessionState {
@@ -75,7 +80,10 @@ impl SessionState {
             SessionState::Open { opened_at } => Some(*opened_at),
             SessionState::Closed { .. } => unreachable!(),
         };
-        *self = SessionState::Closed { opened_at, closed_at };
+        *self = SessionState::Closed {
+            opened_at,
+            closed_at,
+        };
     }
 }
 
