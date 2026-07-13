@@ -1,9 +1,10 @@
 use crate::backend_iqm::IqmBackendConfig;
 use bytes::Bytes;
 use serde::Deserialize;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -16,6 +17,11 @@ use crate::TaskId;
 use crate::backend_iqm::start_iqm_backend;
 use crate::backend_test::start_test_backend;
 use crate::task::TaskState;
+
+/// A boxed future standing in for an `async fn` return on a dyn-compatible trait.
+pub(crate) type BackendFuture<T> = Pin<Box<dyn Future<Output = crate::Result<T>> + Send>>;
+/// A boxed stream of raw result/artifact bytes as they arrive from the backend.
+pub(crate) type ByteStream = Pin<Box<dyn futures_util::Stream<Item = crate::Result<Bytes>> + Send>>;
 
 pub(crate) trait Backend: Send + Sync {
     fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes);
@@ -30,21 +36,18 @@ pub(crate) trait Backend: Send + Sync {
         cancel: bool,
     );
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str);
-    fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>>;
+    fn get_arch(self: Arc<Self>) -> BackendFuture<String>;
     fn get_calibration(
         self: Arc<Self>,
         calibration_id: &str,
         endpoint: &str,
-    ) -> oneshot::Receiver<crate::Result<String>>;
-    fn get_task_result(
-        self: Arc<Self>,
-        backend_id: &str,
-    ) -> oneshot::Receiver<crate::Result<String>>;
+    ) -> BackendFuture<String>;
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<ByteStream>;
     fn get_task_artifact(
         self: Arc<Self>,
         backend_id: &str,
         name: &str,
-    ) -> oneshot::Receiver<crate::Result<String>>;
+    ) -> BackendFuture<ByteStream>;
 }
 
 pub(crate) enum FromBackendMessage {

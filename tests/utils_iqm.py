@@ -1,3 +1,4 @@
+import re
 import uuid
 import json
 import time
@@ -121,7 +122,7 @@ class Task:
         ):
             return {"status": "processing"}
 
-        r = self.config["result"]
+        r = self.config["outcome"]
         if r["type"] == "Ok":
             exec_s = self.compute_time if self.compute_time is not None else 0.5
             exec_ms = int(exec_s * 1000)
@@ -142,7 +143,7 @@ class Task:
                     ("iqm-server", "completed", 0.001),
                 ],
             )
-            return {
+            doc = {
                 "id": self.task_id,
                 "type": "circuit",
                 "qc": {"id": _QC_ID},
@@ -162,7 +163,10 @@ class Task:
                 "messages": [],
             }
         else:
-            return {"status": "failed", "errors": [{"message": r["message"]}]}
+            doc = {"status": "failed", "errors": [{"message": r["message"]}]}
+        if "result" in self.config:
+            doc["result"] = self.config["result"]
+        return doc
 
 
 class IqmFakeBackend:
@@ -215,14 +219,34 @@ class IqmFakeBackend:
             )
         )
 
+        artifacts = config.get("artifacts", {})
+        # "measurements" has a default payload so tests that don't set custom
+        # artifacts still get a fetchable one.
+        for name in {"measurements", *artifacts}:
+
+            def handle_artifact(request, name=name):
+                if not self._check_auth(request):
+                    return self._auth_error()
+                if name in artifacts:
+                    return Response(artifacts[name], content_type="text/plain")
+                return make_result({"artifact": "measurements", "values": [0, 1, 0, 1]})
+
+            self.httpserver.expect_request(
+                f"/api/v1/jobs/{task_id}/artifacts/{name}",
+                method="GET",
+            ).respond_with_handler(handle_artifact)
+
+        # Fallback for any artifact name not registered above, so requesting an
+        # unknown artifact gets a real 404 rather than the httpserver default of 500
+        # for "no handler found".
         self.httpserver.expect_request(
-            f"/api/v1/jobs/{task_id}/artifacts/measurements",
+            re.compile(rf"^/api/v1/jobs/{re.escape(task_id)}/artifacts/.+$"),
             method="GET",
         ).respond_with_handler(
             lambda request: (
                 self._auth_error()
                 if not self._check_auth(request)
-                else make_result({"artifact": "measurements", "values": [0, 1, 0, 1]})
+                else Response("Unknown artifact", status=404)
             )
         )
 

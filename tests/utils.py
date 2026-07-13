@@ -5,7 +5,7 @@ import subprocess
 import time
 import json
 
-OK_RESULT = {"type": "Ok"}
+OK_OUTCOME = {"type": "Ok"}
 TEST_PROJECT = "test-project"
 TEST_MACHINE_NAME = "TestMachine"
 TEST_USER = "test-user"
@@ -15,7 +15,9 @@ class TestTask:
     def __init__(self):
         self._submit_time = 0
         self._compute_time = 0
-        self._result = OK_RESULT
+        self._outcome = OK_OUTCOME
+        self._result = None
+        self._artifacts = {}
 
     def submit_time(self, time: float):
         self._submit_time = time
@@ -26,11 +28,23 @@ class TestTask:
         return self
 
     def error(self, message):
-        self._result = {"type": "Fail", "message": message}
+        self._outcome = {"type": "Fail", "message": message}
+        return self
+
+    def result(self, value: str):
+        self._result = value
+        return self
+
+    def artifact(self, name: str, value: str):
+        self._artifacts[name] = value
         return self
 
     def create_payload(self) -> dict:
-        msg = {"result": self._result}
+        msg = {"outcome": self._outcome}
+        if self._result is not None:
+            msg["result"] = self._result
+        if self._artifacts:
+            msg["artifacts"] = self._artifacts
         if self._compute_time > 0:
             msg["compute_time"] = self._compute_time
         if self._submit_time > 0:
@@ -403,7 +417,10 @@ class QScheduler:
     def get_task_state(self, task_id: int) -> str:
         return self.get_task(task_id)["state"]
 
-    def get_task_result(self, task_id: int, expect_error: int | None = None):
+    def get_task_result(self, task_id: int, expect_error: int | None = None) -> str:
+        """Returns the raw text body of GET /tasks/{id}/result — the backend's result
+        is forwarded verbatim and is not necessarily JSON (e.g. the test backend's
+        result is a plain string)."""
         r = requests.get(self.url(f"tasks/{task_id}/result"), timeout=5)
         if expect_error is not None:
             assert r.status_code == expect_error, (
@@ -411,11 +428,13 @@ class QScheduler:
             )
             return r
         r.raise_for_status()
-        return r.json()
+        return r.text
 
     def get_task_artifact(
         self, task_id: int, name: str, expect_error: int | None = None
-    ):
+    ) -> str:
+        """Returns the raw text body of GET /tasks/{id}/artifacts/{name} (see
+        get_task_result for why this isn't parsed as JSON)."""
         r = requests.get(self.url(f"tasks/{task_id}/artifacts/{name}"), timeout=5)
         if expect_error is not None:
             assert r.status_code == expect_error, (
@@ -423,7 +442,7 @@ class QScheduler:
             )
             return r
         r.raise_for_status()
-        return r.json()
+        return r.text
 
     def version(self) -> str:
         r = requests.get(self.url("version"), timeout=5)

@@ -20,6 +20,8 @@ pub enum RunnerError {
     TaskAlreadyFinished(TaskId),
     #[error("Task {0:?} has not been submitted to a backend yet")]
     TaskNotSubmitted(TaskId),
+    #[error("Unknown artifact {0:?}")]
+    UnknownArtifact(String),
     #[error("Session {0:?} already closed")]
     SessionAlreadyClosed(SessionId),
     #[error("Task fails with: {0}")]

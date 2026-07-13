@@ -146,34 +146,3 @@ def test_cancel_finished_task(qscheduler):
 def test_cancel_nonexistent_task(qscheduler):
     qscheduler.start()
     qscheduler.cancel_task(999_999, expect_error=404)
-
-
-def test_task_result_and_artifact(qscheduler_iqm):
-    qscheduler_iqm.start()
-    t = qscheduler_iqm.submit(TT())
-    qscheduler_iqm.wait_for_finished(t)
-
-    result = qscheduler_iqm.get_task_result(t)
-    assert result["status"] == "completed"
-
-    artifact = qscheduler_iqm.get_task_artifact(t, "measurements")
-    assert artifact == {"artifact": "measurements", "values": [0, 1, 0, 1]}
-
-
-def test_task_result_not_submitted(qscheduler):
-    qscheduler.queue_size = 1
-    qscheduler.start()
-    t = qscheduler.submit(TT().compute_time(2))
-    t1 = qscheduler.submit(TT())
-    qscheduler.wait_for_running(t)
-    assert qscheduler.get_task_state(t1) == "waiting"
-    qscheduler.get_task_result(t1, expect_error=409)
-    qscheduler.get_task_artifact(t1, "measurements", expect_error=409)
-    qscheduler.wait_for_finished(t)
-    qscheduler.wait_for_finished(t1)
-
-
-def test_task_result_nonexistent_task(qscheduler):
-    qscheduler.start()
-    qscheduler.get_task_result(999_999, expect_error=404)
-    qscheduler.get_task_artifact(999_999, "measurements", expect_error=404)

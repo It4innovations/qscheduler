@@ -158,7 +158,7 @@ by running with `--network host` — no custom Docker network needed.
 
    curl -X POST 'http://localhost:4300/tasks?machine=TestMachine&project=test-project&user=me' \
      -H 'Content-Type: application/octet-stream' \
-     --data-raw '{"result": {"type": "Ok"}}'
+     --data-raw '{"outcome": {"type": "Ok"}}'
    ```
 
    Poll `GET /tasks/{id}` with the returned task ID to see it move from `"waiting"` to
@@ -169,13 +169,15 @@ by running with `--network host` — no custom Docker network needed.
 **`test`** — the task payload is a JSON object:
 
 ```json
-{"result": {"type": "Ok"}}
-{"result": {"type": "Fail", "message": "error text"}, "submit_time": 0.5, "compute_time": 1.5}
+{"outcome": {"type": "Ok"}, "result": "42", "artifacts": {"log": "some log"}}
+{"outcome": {"type": "Fail", "message": "error text"}, "submit_time": 0.5, "compute_time": 1.5}
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `result` | object | yes | Either `{"type": "Ok"}` or `{"type": "Fail", "message": "..."}`. |
+| `outcome` | object | yes | Either `{"type": "Ok"}` or `{"type": "Fail", "message": "..."}`. |
+| `result` | string | no | Value returned by `GET /tasks/{id}/result` once the task completes (default: `""`). |
+| `artifacts` | object | no | Map of artifact name to value, served by `GET /tasks/{id}/artifacts/{name}` once the task completes (default: `{}`). |
 | `submit_time` | float | no | Seconds to wait before acknowledging submission (default: 0). |
 | `compute_time` | float | no | Seconds to wait before reporting the final result (default: 0). |
 
@@ -351,6 +353,35 @@ reaches the `"cancelled"` state (poll `GET /tasks/{id}` to observe it).
 **Response `404`** — task not found.
 
 **Response `409`** — task already in a terminal state (`finished`, `failed`, or `cancelled`).
+
+---
+
+### `GET /tasks/{id}/result`
+
+Fetch a task's raw result from the backend that ran it.
+
+**Response `200`** — plain text, backend-specific (e.g. the full job-status JSON document for
+the `iqm` backend, or the raw `result` string for the `test` backend).
+
+**Response `404`** — task not found.
+
+**Response `409`** — task has not been submitted to a backend yet.
+
+**Response `500`** — backend request failed.
+
+---
+
+### `GET /tasks/{id}/artifacts/{name}`
+
+Fetch a named artifact produced for a task from the backend that ran it.
+
+**Response `200`** — plain text, backend-specific.
+
+**Response `404`** — task not found, or the named artifact doesn't exist on the backend.
+
+**Response `409`** — task has not been submitted to a backend yet.
+
+**Response `500`** — backend request failed.
 
 ---
 

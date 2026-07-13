@@ -1,9 +1,10 @@
 use crate::{AppState, internal_error};
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header::CONTENT_TYPE},
+    response::Response,
 };
 use runner::SessionId;
 use runner::core::CoreRef;
@@ -168,10 +169,10 @@ pub(crate) async fn cancel_task_handler(
 pub(crate) async fn get_task_result(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let task_id =
         TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
-    let receiver = {
+    let future = {
         let core = state.core_ref.lock().unwrap();
         core.get_task_result(task_id).map_err(|e| match &e {
             RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
@@ -179,10 +180,11 @@ pub(crate) async fn get_task_result(
             _ => internal_error(&e),
         })?
     };
-    receiver
-        .await
-        .map_err(|_| internal_error("backend channel closed"))?
-        .map_err(internal_error)
+    let stream = future.await.map_err(internal_error)?;
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap())
 }
 
 /// Fetch a named artifact produced for a task from the backend that ran it, forwarded
@@ -204,10 +206,10 @@ pub(crate) async fn get_task_result(
 pub(crate) async fn get_task_artifact(
     State(state): State<Arc<AppState>>,
     Path((id, name)): Path<(u64, String)>,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let task_id =
         TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
-    let receiver = {
+    let future = {
         let core = state.core_ref.lock().unwrap();
         core.get_task_artifact(task_id, &name)
             .map_err(|e| match &e {
@@ -216,8 +218,12 @@ pub(crate) async fn get_task_artifact(
                 _ => internal_error(&e),
             })?
     };
-    receiver
-        .await
-        .map_err(|_| internal_error("backend channel closed"))?
-        .map_err(internal_error)
+    let stream = future.await.map_err(|e| match &e {
+        RunnerError::UnknownArtifact(_) => (StatusCode::NOT_FOUND, e.to_string()),
+        _ => internal_error(&e),
+    })?;
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap())
 }
