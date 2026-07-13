@@ -11,5 +11,6 @@ tracing    = { workspace = true }
 reqwest    = { workspace = true, features = ["multipart", "json"] }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-sqlx = { workspace = true, features = ["macros", "uuid", "migrate"] }
+sqlx = { workspace = true, features = ["macros", "uuid", "migrate", "chrono"] }
 chrono = { workspace = true }
+utoipa = { workspace = true }

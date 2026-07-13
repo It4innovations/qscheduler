@@ -193,32 +193,51 @@ that URL:
 
 Delivery is retried with exponential backoff up to 16 times.
 
-Task events have this request body:
+Task events have this request body, with `task` in the same shape returned by
+[`GET /tasks/{id}`](#get-tasksid):
 
 ```json
 {
   "event": "task",
-  "task_id": 42,
-  "state": "finished",
+  "task": {
+    "id": 42,
+    "project": "my-project",
+    "user": "me",
+    "backend_id": "abc123",
+    "machine": "QuantumDevice",
+    "state": "finished",
+    "created_at": "2026-07-13T10:00:00Z",
+    "finished_at": "2026-07-13T10:00:05Z",
+    "exectime_ms": 1234
+  },
   "token": "my-secret-token"
 }
 ```
 
-`state` is one of `"finished"`, `"failed"`, or `"cancelled"`.
+The task fires once it reaches a terminal `state`: `"finished"`, `"failed"`, or `"cancelled"`.
 
-Session events have this request body:
+Session events have this request body, with `session` in the same shape returned by
+[`GET /sessions/{id}`](#get-sessionsid):
 
 ```json
 {
   "event": "session",
-  "session_id": 7,
-  "state": "opened",
+  "session": {
+    "id": 7,
+    "state": "open",
+    "machine": "QuantumDevice",
+    "project": "my-project",
+    "time_limit_ms": 3600000,
+    "created_at": "2026-07-13T10:00:00Z",
+    "opened_at": "2026-07-13T10:00:01Z"
+  },
   "token": "my-secret-token"
 }
 ```
 
-`state` is one of `"opened"` or `"closed"`. A session that is cancelled before ever opening
-only fires `"closed"`.
+The session fires once when it opens (`session.state` is `"open"`) and once when it closes
+(`session.state` is `"closed"`). A session that is cancelled before ever opening only fires the
+`"closed"` event.
 
 The `token` field is omitted when `--notify-token` was not configured.
 
@@ -283,21 +302,38 @@ Submit a task for execution.
 
 ### `GET /tasks/{id}`
 
-Get the current state of a task.
+Get a task's current info. Works for tasks no longer held in memory too (e.g. after a service
+restart) — the service falls back to the database for terminal tasks.
 
-**Response `200`** — JSON object with a `state` field:
+**Response `200`**
 
-| `state` | Additional fields | Description |
-|---------|-------------------|-------------|
-| `"waiting"` | — | Queued, not yet started. |
-| `"running"` | — | Currently executing. |
-| `"finished"` | — | Completed successfully. |
-| `"failed"` | `"error"` (string) | Execution failed. |
-| `"cancelled"` | — | Cancelled before or during execution. |
+| Field | Type | Present | Description |
+|-------|------|---------|-------------|
+| `id` | integer | always | Task ID. |
+| `session` | integer | if the task belongs to a session | Session the task ran in. Mutually exclusive with `project`. |
+| `project` | string | if the task belongs to a project directly | Name of the project the task's time is charged to. Mutually exclusive with `session`. |
+| `user` | string | always | Free-form identifier of the submitting user. |
+| `backend_id` | string | once submitted to the backend | Backend-assigned job ID. |
+| `machine` | string | always | Name of the target machine. |
+| `state` | string | always | One of `"waiting"`, `"running"`, `"finished"`, `"failed"`, `"cancelled"`. |
+| `created_at` | timestamp | always | When the task was submitted. |
+| `finished_at` | timestamp | once in a terminal state | When the task reached its final state. |
+| `exectime_ms` | integer | if any execution time was consumed | Milliseconds of execution time. |
+| `error` | string | only when `state` is `"failed"` | Failure reason. |
 
 ```json
-{"state": "finished"}
-{"state": "failed", "error": "out of memory"}
+{
+  "id": 42,
+  "project": "my-project",
+  "user": "me",
+  "backend_id": "abc123",
+  "machine": "QuantumDevice",
+  "state": "failed",
+  "created_at": "2026-07-13T10:00:00Z",
+  "finished_at": "2026-07-13T10:00:05Z",
+  "exectime_ms": 1234,
+  "error": "out of memory"
+}
 ```
 
 **Response `404`** — task not found.
@@ -343,9 +379,36 @@ in the session are cancelled when the session closes.
 
 ### `GET /sessions/{id}`
 
-Get the current state of a session.
+Get a session's current info. Works for closed sessions no longer held in memory too (e.g.
+after a service restart) — the service falls back to the database.
 
-**Response `200`** — one of `"waiting"`, `"open"`, or `"closed"`.
+**Response `200`**
+
+| Field | Type | Present | Description |
+|-------|------|---------|-------------|
+| `id` | integer | always | Session ID. |
+| `state` | string | always | One of `"waiting"`, `"open"`, or `"closed"`. |
+| `machine` | string | always | Name of the reserved machine. |
+| `project` | string | always | Name of the project the session's time is charged to. |
+| `time_limit_ms` | integer | always | Session lifetime in milliseconds. |
+| `created_at` | timestamp | always | When the session was created. |
+| `opened_at` | timestamp | once opened | When the session became active. |
+| `closed_at` | timestamp | once closed | When the session ended. |
+| `exectime_ms` | integer | if any execution time was consumed | Milliseconds the session was open and accruing time (may appear before `closed_at`, as it's checkpointed periodically while open). |
+
+```json
+{
+  "id": 7,
+  "state": "closed",
+  "machine": "QuantumDevice",
+  "project": "my-project",
+  "time_limit_ms": 3600000,
+  "created_at": "2026-07-13T10:00:00Z",
+  "opened_at": "2026-07-13T10:00:01Z",
+  "closed_at": "2026-07-13T11:00:01Z",
+  "exectime_ms": 3600000
+}
+```
 
 **Response `404`** — session not found.
 

@@ -1,13 +1,14 @@
 use crate::backend::{Backend, FromBackendMessage};
-use crate::callback::{NotifyEvent, NotifySessionState, NotifyTaskState, notify_worker};
+use crate::callback::{NotifyEvent, notify_worker};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
 use crate::machine::{MachineConfig, MachineMap, QueueItem, ResumeTask};
-use crate::project::ProjectId;
-use crate::session::{SessionMap, SessionState};
-use crate::task::{TaskMap, TaskState};
+use crate::project::{ProjectId, ProjectMap};
+use crate::session::{SessionInfo, SessionMap, SessionState};
+use crate::task::{CompletedState, TaskInfo, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::future::pending;
 use std::sync::Arc;
@@ -66,27 +67,36 @@ enum DbUpdate {
     },
     TaskFinished {
         task_id: TaskId,
-        exec_time: Duration,
+        completed: CompletedState,
     },
     TaskFailed {
         task_id: TaskId,
-        exec_time: Duration,
+        completed: CompletedState,
         error: String,
     },
     TaskCancelled {
         task_id: TaskId,
-        exec_time: Duration,
+        completed: CompletedState,
     },
-    SessionOpened(SessionId),
+    SessionOpened {
+        session_id: SessionId,
+        timestamp: DateTime<Utc>
+    },
     SessionClosed {
         session_id: SessionId,
         exec_time: Duration,
+        timestamp: DateTime<Utc>,
         cancelled_tasks: Vec<TaskId>,
     },
     SessionExecTime {
         session_id: SessionId,
         exec_time_ms: i64,
     },
+}
+
+/// Resolves a project's name for embedding in a `TaskInfo`/`SessionInfo` notify payload.
+fn project_name(project_map: &ProjectMap, project_id: ProjectId) -> Option<String> {
+    project_map.find_project(project_id).map(|p| p.name.clone())
 }
 
 fn pick_task(
@@ -101,6 +111,7 @@ fn pick_task(
         machine_map,
         task_map,
         session_map,
+        project_map,
         ..
     } = core.split_mut();
     let machine = machine_map.get_machine_mut(machine_id);
@@ -131,7 +142,7 @@ fn pick_task(
 
                     let project_id = session.config.project_id;
                     let now = Instant::now();
-                    session.state = SessionState::Open;
+                    session.state = SessionState::Open { opened_at: Utc::now() };
                     machine.start_session(session_id);
                     *running_session = Some(RunningSession {
                         session_id,
@@ -141,12 +152,14 @@ fn pick_task(
                         exec_time: Duration::ZERO,
                     });
                     if let Some(sender) = notify_sender {
-                        let _ = sender.send(NotifyEvent::Session {
-                            session_id,
-                            state: NotifySessionState::Opened,
-                        });
+                        let info = SessionInfo::build(
+                            session,
+                            machine.config().name.clone(),
+                            project_name(project_map, project_id).unwrap_or_default(),
+                        );
+                        let _ = sender.send(NotifyEvent::Session { session: info });
                     }
-                    db_updates.push(DbUpdate::SessionOpened(session_id));
+                    db_updates.push(DbUpdate::SessionOpened { session_id, timestamp: Utc::now() });
                     continue;
                 }
             }
@@ -163,6 +176,7 @@ fn close_running_session(
     task_map: &mut TaskMap,
     session_map: &mut SessionMap,
     machine_map: &mut MachineMap,
+    project_map: &ProjectMap,
     machine_id: MachineId,
     backend: &Arc<dyn Backend>,
     submitted_tasks: &mut HashMap<TaskId, bool>,
@@ -182,31 +196,42 @@ fn close_running_session(
         }
     }
     let session = session_map.get_session_mut(s.session_id);
-    session.state = SessionState::Closed;
+    let now = Utc::now();
+    session.state.close(now);
+    session.consumed = exec_time;
     let machine = machine_map.get_machine_mut(machine_id);
     let mut cancelled_tasks = Vec::new();
+    let now = Utc::now();
     while let Some(task_id) = machine.pop_session_task() {
         debug!(%task_id, "Cancelling unsubmitted task");
         let task = task_map.get_task_mut(task_id);
-        task.set_state(TaskState::Cancelled);
+        task.set_state(TaskState::Cancelled {
+            completed: CompletedState {
+                consumed: Duration::ZERO,
+                timestamp: now,
+            },
+        });
         if let Some(sender) = notify_sender {
-            let _ = sender.send(NotifyEvent::Task {
-                task_id,
-                state: NotifyTaskState::Cancelled,
-            });
+            let proj = task
+                .config()
+                .parent
+                .project_id()
+                .and_then(|pid| project_name(project_map, pid));
+            let info = TaskInfo::build(task, task.state(), machine.config().name.clone(), proj);
+            let _ = sender.send(NotifyEvent::Task { task: info });
         }
         cancelled_tasks.push(task_id);
     }
     machine.close_session();
     if let Some(sender) = notify_sender {
-        let _ = sender.send(NotifyEvent::Session {
-            session_id: s.session_id,
-            state: NotifySessionState::Closed,
-        });
+        let proj = project_name(project_map, session.config.project_id).unwrap_or_default();
+        let info = SessionInfo::build(session, machine.config().name.clone(), proj);
+        let _ = sender.send(NotifyEvent::Session { session: info });
     }
     db_updates.push(DbUpdate::SessionClosed {
         session_id: s.session_id,
         exec_time,
+        timestamp: now,
         cancelled_tasks,
     });
 }
@@ -304,6 +329,7 @@ async fn launcher_main(
                             && !project.is_over_limit()
                         {
                             debug!(session_id = %s.session_id, delta_ms=delta.as_millis(), "Session check passed");
+                            session_map.get_session_mut(s.session_id).consumed = exec_time;
                             db_updates.push(DbUpdate::SessionExecTime {
                                 session_id: s.session_id,
                                 exec_time_ms: exec_time.as_millis() as i64,
@@ -316,6 +342,7 @@ async fn launcher_main(
                                 task_map,
                                 session_map,
                                 machine_map,
+                                project_map,
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
@@ -345,54 +372,81 @@ async fn launcher_main(
                             Arc::clone(&backend).cancel_task(task_id, &backend_task_id);
                         }
                     }
-                    FromBackendMessage::TaskStateChange {
-                        task_id,
-                        state,
-                        exec_time,
-                    } => {
+                    FromBackendMessage::TaskStateChange { task_id, state } => {
                         let mut update_state = true;
-                        match &state {
+                        let exec_time = match &state {
                             TaskState::Waiting => unreachable!(),
-                            TaskState::Running => {}
-                            TaskState::Finished => {
+                            TaskState::Running => Duration::ZERO,
+                            TaskState::Finished { completed } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 if let Some(sender) = &notify_sender {
-                                    let _ = sender.send(NotifyEvent::Task {
-                                        task_id,
-                                        state: NotifyTaskState::Finished,
-                                    });
+                                    let task = task_map.find_task(task_id).unwrap();
+                                    let machine_name =
+                                        machine_map.get_machine(machine_id).config().name.clone();
+                                    let proj = task
+                                        .config()
+                                        .parent
+                                        .project_id()
+                                        .and_then(|pid| project_name(project_map, pid));
+                                    let info = TaskInfo::build(task, &state, machine_name, proj);
+                                    let _ = sender.send(NotifyEvent::Task { task: info });
                                 }
-                                db_updates.push(DbUpdate::TaskFinished { task_id, exec_time });
+                                db_updates.push(DbUpdate::TaskFinished {
+                                    task_id,
+                                    completed: *completed,
+                                });
+                                completed.consumed
                             }
-                            TaskState::Failed { error } => {
+                            TaskState::Failed { completed, error } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 if let Some(sender) = &notify_sender {
-                                    let _ = sender.send(NotifyEvent::Task {
-                                        task_id,
-                                        state: NotifyTaskState::Failed,
-                                    });
+                                    let task = task_map.find_task(task_id).unwrap();
+                                    let machine_name =
+                                        machine_map.get_machine(machine_id).config().name.clone();
+                                    let proj = task
+                                        .config()
+                                        .parent
+                                        .project_id()
+                                        .and_then(|pid| project_name(project_map, pid));
+                                    let info = TaskInfo::build(task, &state, machine_name, proj);
+                                    let _ = sender.send(NotifyEvent::Task { task: info });
                                 }
                                 db_updates.push(DbUpdate::TaskFailed {
                                     task_id,
-                                    exec_time,
+                                    completed: *completed,
                                     error: error.clone(),
                                 });
+                                completed.consumed
                             }
-                            TaskState::Cancelled => {
+                            TaskState::Cancelled { completed } => {
                                 if submitted_tasks.remove(&task_id).is_none() {
                                     debug!(%task_id, "Ignoring cancel of already-finished task");
                                     update_state = false;
                                 } else {
                                     if let Some(sender) = &notify_sender {
-                                        let _ = sender.send(NotifyEvent::Task {
-                                            task_id,
-                                            state: NotifyTaskState::Cancelled,
-                                        });
+                                        let task = task_map.find_task(task_id).unwrap();
+                                        let machine_name = machine_map
+                                            .get_machine(machine_id)
+                                            .config()
+                                            .name
+                                            .clone();
+                                        let proj = task
+                                            .config()
+                                            .parent
+                                            .project_id()
+                                            .and_then(|pid| project_name(project_map, pid));
+                                        let info =
+                                            TaskInfo::build(task, &state, machine_name, proj);
+                                        let _ = sender.send(NotifyEvent::Task { task: info });
                                     }
-                                    db_updates.push(DbUpdate::TaskCancelled { task_id, exec_time });
+                                    db_updates.push(DbUpdate::TaskCancelled {
+                                        task_id,
+                                        completed: *completed,
+                                    });
                                 }
+                                completed.consumed
                             }
-                        }
+                        };
                         if update_state {
                             let task = task_map.get_task_mut(task_id);
                             task.set_state(state);
@@ -427,6 +481,7 @@ async fn launcher_main(
                         task_map,
                         session_map,
                         machine_map,
+                        project_map,
                         machine_id,
                         &backend,
                         &mut submitted_tasks,
@@ -437,16 +492,20 @@ async fn launcher_main(
                     let machine = machine_map.get_machine_mut(machine_id);
                     if machine.remove_queued_session(session_id) {
                         debug!(%session_id, "Cancelling queued session on request");
-                        session_map.get_session_mut(session_id).state = SessionState::Closed;
+                        let session = session_map.get_session_mut(session_id);
+                        let now = Utc::now();
+                        session.state.close(now);
                         if let Some(sender) = &notify_sender {
-                            let _ = sender.send(NotifyEvent::Session {
-                                session_id,
-                                state: NotifySessionState::Closed,
-                            });
+                            let proj = project_name(project_map, session.config.project_id)
+                                .unwrap_or_default();
+                            let info =
+                                SessionInfo::build(session, machine.config().name.clone(), proj);
+                            let _ = sender.send(NotifyEvent::Session { session: info });
                         }
                         db_updates.push(DbUpdate::SessionClosed {
                             session_id,
                             exec_time: Duration::ZERO,
+                            timestamp: now,
                             cancelled_tasks: Vec::new(),
                         });
                     }
@@ -470,16 +529,24 @@ async fn launcher_main(
                     if machine.remove_queued_task(task_id) {
                         debug!(%task_id, "Cancelling queued task on request");
                         let task = task_map.get_task_mut(task_id);
-                        task.set_state(TaskState::Cancelled);
+                        task.set_state(TaskState::simple_cancelled());
                         if let Some(sender) = &notify_sender {
-                            let _ = sender.send(NotifyEvent::Task {
-                                task_id,
-                                state: NotifyTaskState::Cancelled,
-                            });
+                            let proj = task
+                                .config()
+                                .parent
+                                .project_id()
+                                .and_then(|pid| project_name(project_map, pid));
+                            let info = TaskInfo::build(
+                                task,
+                                task.state(),
+                                machine.config().name.clone(),
+                                proj,
+                            );
+                            let _ = sender.send(NotifyEvent::Task { task: info });
                         }
                         db_updates.push(DbUpdate::TaskCancelled {
                             task_id,
-                            exec_time: Duration::ZERO,
+                            completed: CompletedState::new_zero_now(),
                         });
                     }
                 }
@@ -507,21 +574,32 @@ async fn launcher_main(
                 };
                 if project_limit_exceeded {
                     let error = "Project time limit exceeded".to_string();
+                    let state = TaskState::simple_error(error.clone());
+                    let completed = *state.completed().unwrap();
+                    if let Some(sender) = &notify_sender {
+                        let split = core.split();
+                        let task = split.task_map.find_task(task_id).unwrap();
+                        let machine_name = split
+                            .machine_map
+                            .get_machine(machine_id)
+                            .config()
+                            .name
+                            .clone();
+                        let proj = task
+                            .config()
+                            .parent
+                            .project_id()
+                            .and_then(|pid| project_name(split.project_map, pid));
+                        let info = TaskInfo::build(task, &state, machine_name, proj);
+                        let _ = sender.send(NotifyEvent::Task { task: info });
+                    }
                     core.split_mut()
                         .task_map
                         .get_task_mut(task_id)
-                        .set_state(TaskState::Failed {
-                            error: error.clone(),
-                        });
-                    if let Some(sender) = &notify_sender {
-                        let _ = sender.send(NotifyEvent::Task {
-                            task_id,
-                            state: NotifyTaskState::Failed,
-                        });
-                    }
+                        .set_state(state);
                     db_updates.push(DbUpdate::TaskFailed {
                         task_id,
-                        exec_time: Duration::ZERO,
+                        completed,
                         error,
                     });
                 } else {
@@ -537,28 +615,29 @@ async fn launcher_main(
                     task_id,
                     backend_id,
                 } => db::update_task_backend_id(&pool, task_id, &backend_id).await,
-                DbUpdate::TaskFinished { task_id, exec_time } => {
-                    db::update_task_finished(&pool, task_id, exec_time).await;
+                DbUpdate::TaskFinished { task_id, completed } => {
+                    db::update_task_finished(&pool, task_id, completed).await;
                 }
                 DbUpdate::TaskFailed {
                     task_id,
-                    exec_time,
+                    completed,
                     error,
                 } => {
-                    db::update_task_failed(&pool, task_id, exec_time, &error).await;
+                    db::update_task_failed(&pool, task_id, completed, &error).await;
                 }
-                DbUpdate::TaskCancelled { task_id, exec_time } => {
-                    db::update_task_cancelled(&pool, task_id, exec_time).await;
+                DbUpdate::TaskCancelled { task_id, completed } => {
+                    db::update_task_cancelled(&pool, task_id, completed).await;
                 }
-                DbUpdate::SessionOpened(session_id) => {
-                    db::update_session_opened(&pool, session_id).await
+                DbUpdate::SessionOpened { session_id, timestamp } => {
+                    db::update_session_opened(&pool, session_id, timestamp).await
                 }
                 DbUpdate::SessionClosed {
                     session_id,
                     exec_time,
+                    timestamp,
                     cancelled_tasks,
                 } => {
-                    db::close_session_with_tasks(&pool, session_id, exec_time, &cancelled_tasks)
+                    db::close_session_with_tasks(&pool, session_id, exec_time, timestamp, &cancelled_tasks)
                         .await
                 }
                 DbUpdate::SessionExecTime {
