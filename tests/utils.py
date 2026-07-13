@@ -403,6 +403,28 @@ class QScheduler:
     def get_task_state(self, task_id: int) -> str:
         return self.get_task(task_id)["state"]
 
+    def get_task_result(self, task_id: int, expect_error: int | None = None):
+        r = requests.get(self.url(f"tasks/{task_id}/result"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
+    def get_task_artifact(
+        self, task_id: int, name: str, expect_error: int | None = None
+    ):
+        r = requests.get(self.url(f"tasks/{task_id}/artifacts/{name}"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
     def version(self) -> str:
         r = requests.get(self.url("version"), timeout=5)
         r.raise_for_status()

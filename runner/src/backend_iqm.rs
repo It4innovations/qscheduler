@@ -51,24 +51,20 @@ struct TimelineEntry {
     timestamp: DateTime<Utc>,
 }
 
-#[derive(Deserialize, Default)]
-struct JobData {
-    #[serde(default)]
-    timeline: Vec<TimelineEntry>,
-}
-
 #[derive(Deserialize)]
 struct JobStatusResponse {
     status: String,
     #[serde(default)]
     errors: Vec<JobError>,
+    // Sibling of `status`, not nested under a "data" object — the IQM job API returns
+    // {"status": ..., "timeline": [...], ...} flat.
     #[serde(default)]
-    data: JobData,
+    timeline: Vec<TimelineEntry>,
 }
 
 impl JobStatusResponse {
     fn get_exec_time(&self) -> Option<(DateTime<Utc>, Duration)> {
-        let timeline = &self.data.timeline;
+        let timeline = &self.timeline;
         let start_idx = timeline
             .iter()
             .position(|e| e.status == "execution_started")?;
@@ -189,6 +185,25 @@ impl Backend for IqmBackend {
     ) -> Receiver<crate::Result<String>> {
         let (sx, rx) = oneshot::channel();
         let request = self.setup_calibration_request(Method::GET, calibration_id, end_point);
+        fetch_to_oneshot(request, sx);
+        rx
+    }
+
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let request = self.setup_job_request(Method::GET, backend_id, false);
+        fetch_to_oneshot(request, sx);
+        rx
+    }
+
+    fn get_task_artifact(
+        self: Arc<Self>,
+        backend_id: &str,
+        name: &str,
+    ) -> Receiver<crate::Result<String>> {
+        let (sx, rx) = oneshot::channel();
+        let end_point = format!("{backend_id}/artifacts/{name}");
+        let request = self.setup_job_request(Method::GET, &end_point, false);
         fetch_to_oneshot(request, sx);
         rx
     }

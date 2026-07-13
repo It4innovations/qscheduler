@@ -151,3 +151,73 @@ pub(crate) async fn cancel_task_handler(
     tracing::info!(%task_id, "task cancellation requested");
     Ok(StatusCode::ACCEPTED)
 }
+
+/// Fetch a task's raw result from the backend that ran it, forwarded verbatim (no caching,
+/// no parsing).
+#[utoipa::path(
+    get,
+    path = "/tasks/{id}/result",
+    params(("id" = u64, Path, description = "Task ID")),
+    responses(
+        (status = 200, description = "Raw result JSON as returned by the backend", body = String),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Task has not been submitted to a backend yet"),
+        (status = 500, description = "Backend request failed")
+    )
+)]
+pub(crate) async fn get_task_result(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> Result<String, (StatusCode, String)> {
+    let task_id =
+        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+    let receiver = {
+        let core = state.core_ref.lock().unwrap();
+        core.get_task_result(task_id).map_err(|e| match &e {
+            RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            RunnerError::TaskNotSubmitted(_) => (StatusCode::CONFLICT, e.to_string()),
+            _ => internal_error(&e),
+        })?
+    };
+    receiver
+        .await
+        .map_err(|_| internal_error("backend channel closed"))?
+        .map_err(internal_error)
+}
+
+/// Fetch a named artifact produced for a task from the backend that ran it, forwarded
+/// verbatim (no caching, no parsing).
+#[utoipa::path(
+    get,
+    path = "/tasks/{id}/artifacts/{name}",
+    params(
+        ("id" = u64, Path, description = "Task ID"),
+        ("name" = String, Path, description = "Artifact name")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact JSON as returned by the backend", body = String),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Task has not been submitted to a backend yet"),
+        (status = 500, description = "Backend request failed")
+    )
+)]
+pub(crate) async fn get_task_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(u64, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let task_id =
+        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+    let receiver = {
+        let core = state.core_ref.lock().unwrap();
+        core.get_task_artifact(task_id, &name)
+            .map_err(|e| match &e {
+                RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
+                RunnerError::TaskNotSubmitted(_) => (StatusCode::CONFLICT, e.to_string()),
+                _ => internal_error(&e),
+            })?
+    };
+    receiver
+        .await
+        .map_err(|_| internal_error("backend channel closed"))?
+        .map_err(internal_error)
+}

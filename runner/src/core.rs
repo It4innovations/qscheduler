@@ -446,4 +446,35 @@ impl Core {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_calibration(calibration_id, endpoint))
     }
+
+    pub fn get_task_result(
+        &self,
+        task_id: TaskId,
+    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+        let task = self
+            .task_map
+            .find_task(task_id)
+            .ok_or(RunnerError::InvalidTask(task_id))?;
+        let backend_id = task
+            .backend_id()
+            .ok_or(RunnerError::TaskNotSubmitted(task_id))?;
+        let machine = self.machine_map.get_machine(task.config().machine_id);
+        Ok(Arc::clone(machine.backend()).get_task_result(backend_id))
+    }
+
+    pub fn get_task_artifact(
+        &self,
+        task_id: TaskId,
+        name: &str,
+    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+        let task = self
+            .task_map
+            .find_task(task_id)
+            .ok_or(RunnerError::InvalidTask(task_id))?;
+        let backend_id = task
+            .backend_id()
+            .ok_or(RunnerError::TaskNotSubmitted(task_id))?;
+        let machine = self.machine_map.get_machine(task.config().machine_id);
+        Ok(Arc::clone(machine.backend()).get_task_artifact(backend_id, name))
+    }
 }

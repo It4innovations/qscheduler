@@ -101,17 +101,13 @@ class Task:
                     },
                 ]
             return {
-                "job_id": self.task_id,
+                "id": self.task_id,
+                "type": "circuit",
+                "qc": {"id": _QC_ID},
                 "status": "cancelled",
-                "data": {
-                    "id": self.task_id,
-                    "type": "circuit",
-                    "qc": {"id": _QC_ID},
-                    "status": "cancelled",
-                    "timeline": timeline,
-                    "artifacts": [],
-                    "messages": [],
-                },
+                "timeline": timeline,
+                "artifacts": [],
+                "messages": [],
             }
 
         now = datetime.now()
@@ -147,27 +143,23 @@ class Task:
                 ],
             )
             return {
-                "job_id": self.task_id,
+                "id": self.task_id,
+                "type": "circuit",
+                "qc": {"id": _QC_ID},
                 "status": "completed",
-                "data": {
-                    "id": self.task_id,
-                    "type": "circuit",
-                    "qc": {"id": _QC_ID},
-                    "status": "completed",
-                    "compilation": {
-                        "execution_runtime_estimate_ms": exec_ms * 3,
-                        "calibration_set_id": _CALIBRATION_SET_ID,
-                    },
-                    "execution": {"progress": {}},
-                    "runtime_ms": exec_ms,
-                    "timeline": timeline,
-                    "artifacts": [
-                        "runtime_estimates",
-                        "measurements",
-                        "measurement_counts",
-                    ],
-                    "messages": [],
+                "compilation": {
+                    "execution_runtime_estimate_ms": exec_ms * 3,
+                    "calibration_set_id": _CALIBRATION_SET_ID,
                 },
+                "execution": {"progress": {}},
+                "runtime_ms": exec_ms,
+                "timeline": timeline,
+                "artifacts": [
+                    {"type": "runtime_estimates"},
+                    {"type": "measurements"},
+                    {"type": "measurement_counts"},
+                ],
+                "messages": [],
             }
         else:
             return {"status": "failed", "errors": [{"message": r["message"]}]}
@@ -220,6 +212,17 @@ class IqmFakeBackend:
                 self._auth_error()
                 if not self._check_auth(request)
                 else make_result(task.cancel() or {})
+            )
+        )
+
+        self.httpserver.expect_request(
+            f"/api/v1/jobs/{task_id}/artifacts/measurements",
+            method="GET",
+        ).respond_with_handler(
+            lambda request: (
+                self._auth_error()
+                if not self._check_auth(request)
+                else make_result({"artifact": "measurements", "values": [0, 1, 0, 1]})
             )
         )
 
