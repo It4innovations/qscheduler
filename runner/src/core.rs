@@ -1,4 +1,4 @@
-use crate::backend::{FromBackendMessage, create_backend};
+use crate::backend::{BackendFuture, ByteStream, FromBackendMessage, create_backend};
 use crate::config::RunnerConfiguration;
 use crate::db;
 use crate::db::close_dead_session;
@@ -15,7 +15,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
 
 #[allow(dead_code)]
 pub(crate) struct CoreSplit<'a> {
@@ -429,10 +428,7 @@ impl Core {
         Some(SessionInfo::build(session, machine, project))
     }
 
-    pub fn get_arch(
-        &self,
-        machine_id: MachineId,
-    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<BackendFuture<String>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_arch())
     }
@@ -442,15 +438,12 @@ impl Core {
         machine_id: MachineId,
         calibration_id: &str,
         endpoint: &str,
-    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    ) -> crate::Result<BackendFuture<String>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_calibration(calibration_id, endpoint))
     }
 
-    pub fn get_task_result(
-        &self,
-        task_id: TaskId,
-    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    pub fn get_task_result(&self, task_id: TaskId) -> crate::Result<BackendFuture<ByteStream>> {
         let task = self
             .task_map
             .find_task(task_id)
@@ -466,7 +459,7 @@ impl Core {
         &self,
         task_id: TaskId,
         name: &str,
-    ) -> crate::Result<oneshot::Receiver<crate::Result<String>>> {
+    ) -> crate::Result<BackendFuture<ByteStream>> {
         let task = self
             .task_map
             .find_task(task_id)

@@ -27,15 +27,12 @@ pub(crate) async fn get_machine_arch(
     State(state): State<Arc<AppState>>,
     Path(machine): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
-    let receiver = {
+    let future = {
         let core = state.core_ref.lock().unwrap();
         let machine_id = find_machine(&core, &machine)?;
         core.get_arch(machine_id).map_err(internal_error)?
     };
-    receiver
-        .await
-        .map_err(|_| internal_error("backend channel closed"))?
-        .map_err(internal_error)
+    future.await.map_err(internal_error)
 }
 
 /// Fetch a calibration data set from the backend.
@@ -57,14 +54,11 @@ pub(crate) async fn get_machine_calibration(
     State(state): State<Arc<AppState>>,
     Path((machine, calibration, endpoint)): Path<(String, String, String)>,
 ) -> Result<String, (StatusCode, String)> {
-    let receiver = {
+    let future = {
         let core = state.core_ref.lock().unwrap();
         let machine_id = find_machine(&core, &machine)?;
         core.get_calibration(machine_id, &calibration, &endpoint)
             .map_err(internal_error)?
     };
-    receiver
-        .await
-        .map_err(|_| internal_error("backend channel closed"))?
-        .map_err(internal_error)
+    future.await.map_err(internal_error)
 }

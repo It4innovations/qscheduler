@@ -1,18 +1,18 @@
 use crate::TaskId;
-use crate::backend::{Backend, FromBackendMessage};
+use crate::backend::{Backend, BackendFuture, ByteStream, FromBackendMessage};
 use crate::error::RunnerError;
 use crate::task::{CompletedState, TaskState};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use reqwest::{Method, RequestBuilder};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::select;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot::Receiver;
-use tokio::sync::{mpsc, oneshot};
 use tokio::time::{MissedTickBehavior, sleep};
-use tokio::{select, spawn};
 use tracing::{debug, log};
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -171,41 +171,37 @@ impl Backend for IqmBackend {
         });
     }
 
-    fn get_arch(self: Arc<Self>) -> oneshot::Receiver<crate::Result<String>> {
-        let (sx, rx) = oneshot::channel();
+    fn get_arch(self: Arc<Self>) -> BackendFuture<String> {
         let request = self.setup_qc_request(Method::GET, "artifacts/static-quantum-architectures");
-        fetch_to_oneshot(request, sx);
-        rx
+        Box::pin(fetch_text(request))
     }
 
     fn get_calibration(
         self: Arc<Self>,
         calibration_id: &str,
         end_point: &str,
-    ) -> Receiver<crate::Result<String>> {
-        let (sx, rx) = oneshot::channel();
+    ) -> BackendFuture<String> {
         let request = self.setup_calibration_request(Method::GET, calibration_id, end_point);
-        fetch_to_oneshot(request, sx);
-        rx
+        Box::pin(fetch_text(request))
     }
 
-    fn get_task_result(self: Arc<Self>, backend_id: &str) -> Receiver<crate::Result<String>> {
-        let (sx, rx) = oneshot::channel();
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<ByteStream> {
         let request = self.setup_job_request(Method::GET, backend_id, false);
-        fetch_to_oneshot(request, sx);
-        rx
+        Box::pin(fetch_stream(request, None::<fn() -> RunnerError>))
     }
 
     fn get_task_artifact(
         self: Arc<Self>,
         backend_id: &str,
         name: &str,
-    ) -> Receiver<crate::Result<String>> {
-        let (sx, rx) = oneshot::channel();
+    ) -> BackendFuture<ByteStream> {
         let end_point = format!("{backend_id}/artifacts/{name}");
         let request = self.setup_job_request(Method::GET, &end_point, false);
-        fetch_to_oneshot(request, sx);
-        rx
+        let name = name.to_string();
+        Box::pin(fetch_stream(
+            request,
+            Some(move || RunnerError::UnknownArtifact(name)),
+        ))
     }
 }
 
@@ -268,28 +264,47 @@ impl IqmBackend {
     }
 }
 
-fn fetch_to_oneshot(request: RequestBuilder, sx: oneshot::Sender<crate::Result<String>>) {
-    spawn(async move {
-        let result = match request.send().await {
-            Err(e) => Err(RunnerError::GenericError(format!(
-                "IQM request failed: {e}"
-            ))),
-            Ok(resp) => {
-                let http_status = resp.status();
-                if !http_status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    Err(RunnerError::GenericError(format!(
-                        "IQM backend HTTP {http_status}: {body}"
-                    )))
-                } else {
-                    resp.text().await.map_err(|e| {
-                        RunnerError::GenericError(format!("Failed to read IQM response: {e}"))
-                    })
-                }
-            }
-        };
-        let _ = sx.send(result);
+async fn fetch_text(request: RequestBuilder) -> crate::Result<String> {
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| RunnerError::GenericError(format!("IQM request failed: {e}")))?;
+    let http_status = resp.status();
+    if !http_status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(RunnerError::GenericError(format!(
+            "IQM backend HTTP {http_status}: {body}"
+        )));
+    }
+    resp.text()
+        .await
+        .map_err(|e| RunnerError::GenericError(format!("Failed to read IQM response: {e}")))
+}
+
+async fn fetch_stream(
+    request: RequestBuilder,
+    not_found: Option<impl FnOnce() -> RunnerError>,
+) -> crate::Result<ByteStream> {
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| RunnerError::GenericError(format!("IQM request failed: {e}")))?;
+    let http_status = resp.status();
+    if http_status == reqwest::StatusCode::NOT_FOUND
+        && let Some(not_found) = not_found
+    {
+        return Err(not_found());
+    }
+    if !http_status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(RunnerError::GenericError(format!(
+            "IQM backend HTTP {http_status}: {body}"
+        )));
+    }
+    let stream = resp.bytes_stream().map(|chunk| {
+        chunk.map_err(|e| RunnerError::GenericError(format!("IQM stream error: {e}")))
     });
+    Ok(Box::pin(stream))
 }
 
 pub fn start_iqm_backend(
