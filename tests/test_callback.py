@@ -96,6 +96,19 @@ def test_callback_fires_on_task_cancel(notify_qs, callback_server):
     assert states[t2] == "cancelled"
 
 
+def test_callback_task_matches_get_task(notify_qs, callback_server):
+    """The `task` object embedded in the callback is identical to what GET /tasks/{id}
+    returns right after — both build a TaskInfo from the same (by then frozen,
+    terminal) task state."""
+    notify_qs.start()
+    task_id = notify_qs.submit(TT())
+    notify_qs.wait_for_finished(task_id)
+
+    wait_for_callbacks(callback_server)
+    cb_task = callback_server.callbacks[0]["task"]
+    assert cb_task == notify_qs.get_task(task_id)
+
+
 def test_callback_fires_on_session_open_and_close(notify_qs, callback_server):
     notify_qs.start()
     session_id = notify_qs.new_session(time_limit=1)
@@ -134,3 +147,31 @@ def test_callback_fires_on_queued_session_cancel(notify_qs, callback_server):
     assert (session1, "closed") in session_cbs
     assert (session2, "open") not in session_cbs
     assert (session2, "closed") in session_cbs
+
+
+def test_callback_session_matches_get_session(notify_qs, callback_server):
+    """The `session` object embedded in each callback is identical to what
+    GET /sessions/{id} returns right after.
+
+    For the "open" event, `exectime_ms` is excluded from the comparison: it's
+    checkpointed periodically while the session stays open, so a GET issued after the
+    callback was received can legitimately show a larger value. The "closed" event has
+    no such caveat — a closed session's fields are frozen — so it's compared in full.
+    """
+    notify_qs.start()
+    session_id = notify_qs.new_session(time_limit=5)
+    notify_qs.wait_for_session_open(session_id)
+
+    wait_for_callbacks(callback_server, count=1)
+    open_cb = callback_server.callbacks[0]["session"]
+    fetched_open = notify_qs.get_session(session_id)
+    assert open_cb["state"] == "open"
+    assert {k: v for k, v in open_cb.items() if k != "exectime_ms"} == {
+        k: v for k, v in fetched_open.items() if k != "exectime_ms"
+    }
+
+    notify_qs.wait_for_session_closed(session_id)
+    wait_for_callbacks(callback_server, count=2)
+    closed_cb = callback_server.callbacks[1]["session"]
+    assert closed_cb["state"] == "closed"
+    assert closed_cb == notify_qs.get_session(session_id)
