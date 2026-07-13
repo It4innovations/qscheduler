@@ -2,7 +2,6 @@ use crate::backend_iqm::IqmBackendConfig;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
@@ -47,7 +46,6 @@ pub(crate) enum FromBackendMessage {
     TaskStateChange {
         task_id: TaskId,
         state: TaskState,
-        exec_time: Duration,
     },
 }
 

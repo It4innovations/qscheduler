@@ -57,8 +57,8 @@ def test_callback_fires_on_task_finish(notify_qs, callback_server):
 
     wait_for_callbacks(callback_server)
     cb = callback_server.callbacks[0]
-    assert cb["task_id"] == task_id
-    assert cb["state"] == "finished"
+    assert cb["task"]["id"] == task_id
+    assert cb["task"]["state"] == "finished"
     assert cb["token"] == NOTIFY_TOKEN
 
 
@@ -69,8 +69,9 @@ def test_callback_fires_on_task_fail(notify_qs, callback_server):
 
     wait_for_callbacks(callback_server)
     cb = callback_server.callbacks[0]
-    assert cb["task_id"] == task_id
-    assert cb["state"] == "failed"
+    assert cb["task"]["id"] == task_id
+    assert cb["task"]["state"] == "failed"
+    assert cb["task"]["error"] == "something went wrong"
     assert cb["token"] == NOTIFY_TOKEN
 
 
@@ -87,9 +88,9 @@ def test_callback_fires_on_task_cancel(notify_qs, callback_server):
     time.sleep(0.3)
     wait_for_callbacks(callback_server, count=3)
     states = {
-        cb["task_id"]: cb["state"]
+        cb["task"]["id"]: cb["task"]["state"]
         for cb in callback_server.callbacks
-        if "task_id" in cb
+        if "task" in cb
     }
     assert states[t1] == "finished"
     assert states[t2] == "cancelled"
@@ -102,13 +103,13 @@ def test_callback_fires_on_session_open_and_close(notify_qs, callback_server):
     notify_qs.wait_for_session_closed(session_id)
 
     wait_for_callbacks(callback_server, count=2)
-    session_cbs = [cb for cb in callback_server.callbacks if "session_id" in cb]
+    session_cbs = [cb for cb in callback_server.callbacks if "session" in cb]
     assert len(session_cbs) == 2
     for cb in session_cbs:
-        assert cb["session_id"] == session_id
+        assert cb["session"]["id"] == session_id
         assert cb["token"] == NOTIFY_TOKEN
-    states = [cb["state"] for cb in session_cbs]
-    assert states == ["opened", "closed"]
+    states = [cb["session"]["state"] for cb in session_cbs]
+    assert states == ["open", "closed"]
 
 
 def test_callback_fires_on_queued_session_cancel(notify_qs, callback_server):
@@ -125,11 +126,11 @@ def test_callback_fires_on_queued_session_cancel(notify_qs, callback_server):
 
     wait_for_callbacks(callback_server, count=3)
     session_cbs = {
-        (cb["session_id"], cb["state"])
+        (cb["session"]["id"], cb["session"]["state"])
         for cb in callback_server.callbacks
-        if "session_id" in cb
+        if "session" in cb
     }
-    assert (session1, "opened") in session_cbs
+    assert (session1, "open") in session_cbs
     assert (session1, "closed") in session_cbs
-    assert (session2, "opened") not in session_cbs
+    assert (session2, "open") not in session_cbs
     assert (session2, "closed") in session_cbs

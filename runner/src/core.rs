@@ -6,9 +6,10 @@ use crate::error::RunnerError;
 use crate::launcher::start_launcher;
 use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
-use crate::session::{Session, SessionConfig, SessionId, SessionMap, SessionState};
-use crate::task::{Task, TaskConfig, TaskId, TaskMap, TaskParent, TaskState};
+use crate::session::{Session, SessionConfig, SessionId, SessionInfo, SessionMap, SessionState};
+use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskMap, TaskParent, TaskState};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -139,7 +140,8 @@ impl Core {
         let mut orphan_cancels: Vec<TaskId> = Vec::new();
         let mut woken: HashSet<MachineId> = HashSet::new();
         let mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>> = HashMap::new();
-        let mut dead_session_ids: Vec<SessionId> = Vec::new();
+        let mut dead_sessions: Vec<(SessionId, DateTime<Utc>)> = Vec::new();
+        let now = Utc::now();
         let task_len = tasks.len();
         {
             let mut core = core_ref.lock().unwrap();
@@ -167,12 +169,22 @@ impl Core {
                     project_id,
                     time_limit: Duration::from_millis(s.time_limit_ms as u64),
                 };
-                let mut session = Session::new(session_id, config);
-                if s.opened {
-                    session.state = SessionState::Closed;
+                let mut session = Session::new(session_id, s.created_at, config);
+                session.consumed = Duration::from_millis(s.exec_time_ms.unwrap_or(0) as u64);
+                if let Some(opened_at) = s.opened_at {
+                    // Was opened but crashed before (or without) a clean close: prefer the DB's
+                    // own closed_at if it's already set (closed, just not yet reflected at the
+                    // task level — see the doc comment on `load_active_sessions`), else fall
+                    // back to the last checkpoint (`updated_at`) rather than the restart time,
+                    // which would overstate how long the session was actually open.
+                    let closed_at = s.closed_at.or(s.updated_at).unwrap_or(now);
+                    session.state = SessionState::Closed {
+                        opened_at: Some(opened_at),
+                        closed_at,
+                    };
                     session_map.insert(session);
-                    if !s.closed {
-                        dead_session_ids.push(session_id);
+                    if s.closed_at.is_none() {
+                        dead_sessions.push((session_id, closed_at));
                     }
                 } else {
                     // Never opened (and therefore has no tasks yet): re-queue it.
@@ -201,7 +213,7 @@ impl Core {
 
                 if let Some(backend_id) = t.backend_id {
                     // Already submitted to the backend: re-attach for monitoring.
-                    let mut task = Task::new(task_id, config);
+                    let mut task = Task::new(task_id, t.created_at, config);
                     task.set_state(TaskState::Running);
                     task.set_backend_id(backend_id.clone());
                     task_map.insert(task);
@@ -220,7 +232,7 @@ impl Core {
                     orphan_cancels.push(task_id);
                 } else {
                     // Still waiting in the queue: re-queue it.
-                    let task = Task::new(task_id, config);
+                    let task = Task::new(task_id, t.created_at, config);
                     if let Ok(machine) = machine_map.find_machine_mut(machine_id)
                         && machine.queue_task(&task).is_ok()
                     {
@@ -237,8 +249,8 @@ impl Core {
             }
         }
 
-        for session_id in dead_session_ids {
-            close_dead_session(&pool, session_id).await;
+        for (session_id, closed_at) in dead_sessions {
+            close_dead_session(&pool, session_id, closed_at).await;
         }
 
         if !orphan_cancels.is_empty() {
@@ -349,6 +361,7 @@ impl Core {
     pub(crate) fn add_task(
         &mut self,
         task_id: TaskId,
+        created_at: DateTime<Utc>,
         config: TaskConfig,
     ) -> crate::Result<TaskId> {
         let CoreSplitMut {
@@ -357,7 +370,7 @@ impl Core {
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
-        let task = Task::new(task_id, config);
+        let task = Task::new(task_id, created_at, config);
         machine.queue_task(&task)?;
         task_map.insert(task);
         machine.wake_launcher();
@@ -367,6 +380,7 @@ impl Core {
     pub(crate) fn add_session(
         &mut self,
         session_id: SessionId,
+        created_at: DateTime<Utc>,
         config: SessionConfig,
     ) -> crate::Result<SessionId> {
         let CoreSplitMut {
@@ -375,19 +389,44 @@ impl Core {
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
-        let session = Session::new(session_id, config);
+        let session = Session::new(session_id, created_at, config);
         machine.queue_session(&session)?;
         session_map.insert(session);
         machine.wake_launcher();
         Ok(session_id)
     }
 
-    pub fn task_state(&self, task_id: TaskId) -> Option<&TaskState> {
-        self.task_map.find_task(task_id).map(|t| t.state())
+    pub fn task_info(&self, task_id: TaskId) -> Option<TaskInfo> {
+        let task = self.task_map.find_task(task_id)?;
+        let machine = self
+            .machine_map
+            .get_machine(task.config().machine_id)
+            .config()
+            .name
+            .clone();
+        let project = task
+            .config()
+            .parent
+            .project_id()
+            .and_then(|pid| self.project_map.find_project(pid))
+            .map(|p| p.name.clone());
+        Some(TaskInfo::build(task, task.state(), machine, project))
     }
 
-    pub fn session_state(&self, session_id: SessionId) -> Option<SessionState> {
-        self.session_map.find_session(session_id).map(|s| s.state)
+    pub fn session_info(&self, session_id: SessionId) -> Option<SessionInfo> {
+        let session = self.session_map.find_session(session_id)?;
+        let machine = self
+            .machine_map
+            .get_machine(session.config.machine_id)
+            .config()
+            .name
+            .clone();
+        let project = self
+            .project_map
+            .find_project(session.config.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        Some(SessionInfo::build(session, machine, project))
     }
 
     pub fn get_arch(

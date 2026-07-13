@@ -20,7 +20,7 @@ pub use backend_iqm::IqmBackendConfig;
 pub use callback::NotifyConfig;
 pub use machine::MachineId;
 pub use project::Project;
-pub use session::{SessionConfig, SessionId, SessionState};
+pub use session::{SessionConfig, SessionId, SessionInfo, SessionState};
 pub use task::TaskId;
 
 pub type Result<T> = std::result::Result<T, RunnerError>;

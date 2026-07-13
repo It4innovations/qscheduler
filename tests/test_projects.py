@@ -165,5 +165,5 @@ def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
     task2 = qscheduler_test.submit(TT(), project="myproject")
 
     qscheduler_test.wait_for_finished(task1)
-    state = qscheduler_test.wait_for_failed(task2)
-    assert "time limit" in state["error"].lower()
+    qscheduler_test.wait_for_failed(task2)
+    assert "time limit" in qscheduler_test.get_task(task2)["error"].lower()

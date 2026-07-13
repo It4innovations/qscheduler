@@ -8,8 +8,10 @@ use axum::{
 use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
-use runner::reactor::{cancel_task, get_machine_id_by_name, get_project_id_by_name, submit_task};
-use runner::task::{TaskConfig, TaskId, TaskParent, TaskState};
+use runner::reactor::{
+    cancel_task, get_machine_id_by_name, get_project_id_by_name, get_task_info, submit_task,
+};
+use runner::task::{TaskConfig, TaskId, TaskInfo, TaskParent};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -97,55 +99,27 @@ async fn create_task_config(
     })
 }
 
-/// Current state of a task.
-#[derive(serde::Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "lowercase")]
-#[serde(tag = "state")]
-pub(crate) enum TaskStateResponse {
-    /// Task is queued and waiting to be assigned to a machine.
-    Waiting,
-    /// Task is currently executing on a machine.
-    Running,
-    /// Task completed successfully.
-    Finished,
-    /// Task failed. The `error` field contains the failure reason.
-    Failed { error: String },
-    /// Task was cancelled before it could finish.
-    Cancelled,
-}
-
-impl From<&TaskState> for TaskStateResponse {
-    fn from(s: &TaskState) -> Self {
-        match s {
-            TaskState::Waiting => Self::Waiting,
-            TaskState::Running => Self::Running,
-            TaskState::Finished => Self::Finished,
-            TaskState::Failed { error } => Self::Failed {
-                error: error.clone(),
-            },
-            TaskState::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-/// Get the current state of a task.
+/// Get a task's current info (state, timings, and its session/project/machine/user).
 #[utoipa::path(
     get,
     path = "/tasks/{id}",
     params(("id" = u64, Path, description = "Task ID")),
     responses(
-        (status = 200, description = "Task state", body = TaskStateResponse),
+        (status = 200, description = "Task info", body = TaskInfo),
         (status = 404, description = "Task not found")
     )
 )]
 pub(crate) async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> Result<Json<TaskStateResponse>, StatusCode> {
-    let task_id = TaskId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let core = state.core_ref.lock().unwrap();
-    let task_state = core.task_state(task_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(TaskStateResponse::from(task_state)))
+) -> Result<Json<TaskInfo>, (StatusCode, String)> {
+    let task_id =
+        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+    let info = get_task_info(&state.core_ref, task_id)
+        .await
+        .map_err(|e| internal_error(&e))?
+        .ok_or((StatusCode::NOT_FOUND, format!("task '{id}' not found")))?;
+    Ok(Json(info))
 }
 
 /// Request cancellation of a task. Cancellation is asynchronous: a queued task is removed from

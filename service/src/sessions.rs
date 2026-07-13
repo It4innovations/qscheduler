@@ -3,10 +3,9 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use runner::SessionId;
 use runner::error::RunnerError;
-use runner::reactor::{cancel_session, create_session, get_project_id_by_name};
-use runner::{SessionConfig, SessionState};
+use runner::reactor::{cancel_session, create_session, get_project_id_by_name, get_session_info};
+use runner::{SessionConfig, SessionId, SessionInfo};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,48 +24,27 @@ pub(crate) struct CreateSessionParams {
     time_limit_ms: u64,
 }
 
-/// Current state of a session.
-#[derive(serde::Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum SessionStateResponse {
-    /// Session is queued and waiting for the machine to become available.
-    Waiting,
-    /// Session is open and ready to accept tasks.
-    Open,
-    /// Session has ended and no longer accepts tasks.
-    Closed,
-}
-
-impl From<SessionState> for SessionStateResponse {
-    fn from(s: SessionState) -> Self {
-        match s {
-            SessionState::Waiting => Self::Waiting,
-            SessionState::Open => Self::Open,
-            SessionState::Closed => Self::Closed,
-        }
-    }
-}
-
-/// Get the current state of a session.
+/// Get a session's current info (state, timings, and its machine/project).
 #[utoipa::path(
     get,
     path = "/sessions/{id}",
     params(("id" = u64, Path, description = "Session ID")),
     responses(
-        (status = 200, description = "Session state", body = SessionStateResponse),
+        (status = 200, description = "Session info", body = SessionInfo),
         (status = 404, description = "Session not found")
     )
 )]
 pub(crate) async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> Result<Json<SessionStateResponse>, StatusCode> {
-    let session_id = SessionId::try_from(id).map_err(|_| StatusCode::NOT_FOUND)?;
-    let core = state.core_ref.lock().unwrap();
-    let session_state = core
-        .session_state(session_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(SessionStateResponse::from(session_state)))
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let session_id = SessionId::try_from(id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "invalid session id".to_string()))?;
+    let info = get_session_info(&state.core_ref, session_id)
+        .await
+        .map_err(|e| internal_error(&e))?
+        .ok_or((StatusCode::NOT_FOUND, format!("session '{id}' not found")))?;
+    Ok(Json(info))
 }
 
 /// Create a session — a time-bounded, exclusive reservation of one machine for one project.

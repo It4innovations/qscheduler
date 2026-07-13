@@ -1,7 +1,7 @@
 use crate::TaskId;
 use crate::backend::{Backend, FromBackendMessage};
 use crate::error::RunnerError;
-use crate::task::TaskState;
+use crate::task::{CompletedState, TaskState};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use reqwest::{Method, RequestBuilder};
@@ -67,7 +67,7 @@ struct JobStatusResponse {
 }
 
 impl JobStatusResponse {
-    fn get_exec_time(&self) -> Option<Duration> {
+    fn get_exec_time(&self) -> Option<(DateTime<Utc>, Duration)> {
         let timeline = &self.data.timeline;
         let start_idx = timeline
             .iter()
@@ -76,8 +76,12 @@ impl JobStatusResponse {
         let ended = timeline[start_idx + 1..].iter().find(|e| {
             e.status == "execution_ended" || e.status == "cancelled" || e.status == "failed"
         })?;
-        let diff = ended.timestamp - started.timestamp;
-        diff.to_std().ok()
+        Some((
+            ended.timestamp,
+            (ended.timestamp - started.timestamp)
+                .to_std()
+                .unwrap_or_default(),
+        ))
     }
 }
 
@@ -240,20 +244,11 @@ impl IqmBackend {
     }
 
     pub fn send_task_error(&self, task_id: TaskId, message: String) {
-        self.send_task_state(
-            task_id,
-            TaskState::Failed { error: message },
-            Duration::ZERO,
-        )
-    }
-
-    pub fn send_task_state(&self, task_id: TaskId, state: TaskState, exec_time: Duration) {
         let _ = self
             .backend_sender
             .send(FromBackendMessage::TaskStateChange {
                 task_id,
-                state,
-                exec_time,
+                state: TaskState::simple_error(message),
             });
     }
 }
@@ -335,14 +330,13 @@ async fn iqm_main(
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
                     let request = backend.setup_job_request(Method::GET, &task.iqm_task_id, false);
                     let result = request.send().await;
-                    if let Some((new_state, exec_time)) = process_result(task, result).await {
+                    if let Some(new_state) = process_result(task, result).await {
                         if !matches!(&new_state, TaskState::Running) {
                             to_delete.push(idx);
                         }
                         let _ = backend.backend_sender.send(FromBackendMessage::TaskStateChange {
                             task_id: task.task_id,
                             state: new_state,
-                            exec_time,
                         });
                     }
 
@@ -358,18 +352,16 @@ async fn iqm_main(
 async fn process_result(
     task: &mut MonitoredTask,
     result: Result<reqwest::Response, reqwest::Error>,
-) -> Option<(TaskState, Duration)> {
+) -> Option<TaskState> {
     match result {
         Err(e) => {
             log::error!("IQM polling job {}: {}", task.iqm_task_id, e);
             task.fails += 1;
             if task.fails > MAX_FAILS {
-                return Some((
-                    TaskState::Failed {
-                        error: format!("IQM poll do not respond: {}", e),
-                    },
-                    Duration::ZERO,
-                ));
+                return Some(TaskState::simple_error(format!(
+                    "IQM poll do not respond: {}",
+                    e
+                )));
             }
             None
         }
@@ -383,43 +375,42 @@ async fn process_result(
                 );
                 task.fails += 1;
                 if task.fails > MAX_FAILS {
-                    return Some((
-                        TaskState::Failed {
-                            error: format!("IQM poll do not respond: {http_status}"),
-                        },
-                        Duration::ZERO,
-                    ));
+                    return Some(TaskState::simple_error(format!(
+                        "IQM poll do not respond: {http_status}"
+                    )));
                 }
                 return None;
             }
             match resp.json::<JobStatusResponse>().await {
-                Err(_) => Some((
-                    TaskState::Failed {
-                        error: "Could not parse IQM response".to_string(),
-                    },
-                    Duration::ZERO,
+                Err(_) => Some(TaskState::simple_error(
+                    "Could not parse IQM response".to_string(),
                 )),
                 Ok(data) => {
                     let status = data.status.as_str();
                     match status {
                         "waiting" => None,
                         status => {
-                            let exec_time = data.get_exec_time().unwrap_or_default();
+                            let (end_time, exec_time) = data.get_exec_time().unwrap_or_default();
+                            let completed = CompletedState {
+                                consumed: exec_time,
+                                timestamp: end_time,
+                            };
                             let new_state = match status {
                                 "processing" => TaskState::Running,
-                                "completed" => TaskState::Finished,
+                                "completed" => TaskState::Finished { completed },
                                 "failed" => {
                                     let msgs: Vec<_> =
                                         data.errors.into_iter().map(|e| e.message).collect();
                                     let error = msgs.join("; ");
-                                    TaskState::Failed { error }
+                                    TaskState::Failed { completed, error }
                                 }
-                                "cancelled" => TaskState::Cancelled,
+                                "cancelled" => TaskState::Cancelled { completed },
                                 state_name => TaskState::Failed {
+                                    completed,
                                     error: format!("Invalid task state: {state_name}"),
                                 },
                             };
-                            Some((new_state, exec_time))
+                            Some(new_state)
                         }
                     }
                 }

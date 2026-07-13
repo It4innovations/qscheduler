@@ -1,8 +1,8 @@
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
-use crate::session::{SessionConfig, SessionId, SessionState};
-use crate::task::{TaskConfig, TaskId};
+use crate::session::{SessionConfig, SessionId, SessionInfo, SessionState};
+use crate::task::{TaskConfig, TaskId, TaskInfo};
 use crate::{MachineId, db};
 use std::time::Duration;
 
@@ -18,14 +18,46 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
         core.validate_task_config(&config)?;
         core.pool().clone()
     };
-    let task_id = db::insert_task(&pool, &config).await?;
+    let (task_id, created_at) = db::insert_task(&pool, &config).await?;
     tracing::debug!(%task_id, "New task");
-    let result = core_ref.lock().unwrap().add_task(task_id, config);
+    let result = core_ref
+        .lock()
+        .unwrap()
+        .add_task(task_id, created_at, config);
     if result.is_err() {
         tracing::debug!("Deleting task after failed submit");
         db::delete_task(&pool, task_id).await;
     }
     result
+}
+
+/// Looks up a task's public info, preferring `Core`'s in-memory state and falling back to the
+/// DB for terminal tasks evicted from memory across a restart.
+pub async fn get_task_info(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<Option<TaskInfo>> {
+    let (found, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.task_info(task_id), core.pool().clone())
+    };
+    if found.is_some() {
+        return Ok(found);
+    }
+    db::find_task_info(&pool, task_id).await
+}
+
+/// Looks up a session's public info, preferring `Core`'s in-memory state and falling back to
+/// the DB for closed sessions evicted from memory across a restart.
+pub async fn get_session_info(
+    core_ref: &CoreRef,
+    session_id: SessionId,
+) -> crate::Result<Option<SessionInfo>> {
+    let (found, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.session_info(session_id), core.pool().clone())
+    };
+    if found.is_some() {
+        return Ok(found);
+    }
+    db::find_session_info(&pool, session_id).await
 }
 
 pub async fn cancel_task(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<()> {
@@ -58,7 +90,7 @@ pub async fn cancel_session(core_ref: &CoreRef, session_id: SessionId) -> crate:
     let session = session_map
         .find_session(session_id)
         .ok_or(RunnerError::InvalidSession(session_id))?;
-    if matches!(session.state, SessionState::Closed) {
+    if matches!(session.state, SessionState::Closed { .. }) {
         return Err(RunnerError::SessionAlreadyClosed(session_id));
     }
     let machine_id = session.config.machine_id;
@@ -74,9 +106,12 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
         core.validate_session_config(&config)?;
         core.pool().clone()
     };
-    let session_id = db::insert_session(&pool, &config).await?;
+    let (session_id, created_at) = db::insert_session(&pool, &config).await?;
     tracing::debug!(%session_id, "New session");
-    let result = core_ref.lock().unwrap().add_session(session_id, config);
+    let result = core_ref
+        .lock()
+        .unwrap()
+        .add_session(session_id, created_at, config);
     if result.is_err() {
         tracing::debug!("Deleting session after failed submit");
         db::delete_session(&pool, session_id).await;

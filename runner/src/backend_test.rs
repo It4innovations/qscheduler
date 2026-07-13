@@ -1,8 +1,9 @@
 use crate::TaskId;
 use crate::backend::{Backend, FromBackendMessage};
 use crate::error::RunnerError;
-use crate::task::TaskState;
+use crate::task::{CompletedState, TaskState};
 use bytes::Bytes;
+use chrono::Utc;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,6 @@ use tokio::sync::{mpsc, oneshot};
 struct TestTask {
     started: Option<Instant>,
     state: TaskState,
-    exec_time: Option<Duration>,
 }
 
 struct TestBackend {
@@ -46,20 +46,21 @@ impl Backend for TestBackend {
             return;
         }
         let exec_time = if let Some(started) = task.started {
-            let exec_time = Instant::now() - started;
-            task.exec_time = Some(exec_time);
-            exec_time
+            
+            Instant::now() - started
         } else {
             Duration::ZERO
         };
-        task.state = TaskState::Cancelled;
+        let state = TaskState::Cancelled {
+            completed: CompletedState {
+                consumed: exec_time,
+                timestamp: Utc::now(),
+            },
+        };
+        task.state = state.clone();
         let _ = self
             .backend_sender
-            .send(FromBackendMessage::TaskStateChange {
-                task_id,
-                state: TaskState::Cancelled,
-                exec_time,
-            });
+            .send(FromBackendMessage::TaskStateChange { task_id, state });
     }
 
     fn resume_task(
@@ -87,7 +88,6 @@ impl Backend for TestBackend {
                 TestTask {
                     started: None,
                     state: TaskState::Waiting,
-                    exec_time: None,
                 },
             );
         }
@@ -95,10 +95,7 @@ impl Backend for TestBackend {
             let Ok(body) = serde_json::from_slice::<TestBackendTaskBody>(payload.as_ref()) else {
                 let _ = sender.send(FromBackendMessage::TaskStateChange {
                     task_id,
-                    state: TaskState::Failed {
-                        error: "Cannot parse task body".to_string(),
-                    },
-                    exec_time: Duration::ZERO,
+                    state: TaskState::simple_error("Cannot parse task body".to_string()),
                 });
                 return;
             };
@@ -121,31 +118,34 @@ impl Backend for TestBackend {
             let _ = sender.send(FromBackendMessage::TaskStateChange {
                 task_id,
                 state: TaskState::Running,
-                exec_time: Duration::ZERO,
             });
             if body.compute_time > 0.0 {
                 let ms = (body.compute_time * 1000.0).round() as u64;
                 tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
             }
-            let new_state = match body.result {
-                TestBackendResult::Ok => TaskState::Finished,
-                TestBackendResult::Fail { message } => TaskState::Failed { error: message },
-            };
-            let exec_time = {
+            let new_state = {
                 let mut tasks = tasks.lock().unwrap();
                 let task = tasks.get_mut(&task_id).unwrap();
                 if task.state.is_final() {
                     return;
                 }
-                let exec_time = Instant::now() - task.started.unwrap();
-                task.exec_time = Some(exec_time);
+                let completed = CompletedState {
+                    timestamp: Utc::now(),
+                    consumed: Instant::now() - task.started.unwrap(),
+                };
+                let new_state = match body.result {
+                    TestBackendResult::Ok => TaskState::Finished { completed },
+                    TestBackendResult::Fail { message } => TaskState::Failed {
+                        completed,
+                        error: message,
+                    },
+                };
                 task.state = new_state.clone();
-                exec_time
+                new_state
             };
             let _ = sender.send(FromBackendMessage::TaskStateChange {
                 task_id,
                 state: new_state,
-                exec_time,
             });
         });
     }

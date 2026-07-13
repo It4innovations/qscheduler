@@ -5,6 +5,7 @@ from utils import TestTask as TT
 
 def _wait_db_task(cur, task_id, expected_state, timeout=5.0):
     deadline = time.monotonic() + timeout
+    row = None
     while time.monotonic() < deadline:
         cur.execute(
             "SELECT state, finished_at, error FROM tasks WHERE id = %s", [task_id]
@@ -14,7 +15,7 @@ def _wait_db_task(cur, task_id, expected_state, timeout=5.0):
             return row
         time.sleep(0.1)
     raise TimeoutError(
-        f"Task {task_id} not in DB state '{expected_state}' after {timeout}s"
+        f"Task {task_id} not in DB state '{expected_state}' after {timeout}s (last entry: {row})"
     )
 
 

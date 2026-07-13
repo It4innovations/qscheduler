@@ -55,6 +55,7 @@ class QScheduler:
         self.notify_token = None
         self.queue_size = 2
         self.max_session_time = None
+        self.session_check_interval = None
         self._process = None
         self._log_file = None
 
@@ -87,6 +88,8 @@ class QScheduler:
             args.append(f"--notify-token={self.notify_token}")
         if self.max_session_time is not None:
             args.append(f"--max-session-time={self.max_session_time}s")
+        if self.session_check_interval is not None:
+            args.append(f"--session-check-interval={self.session_check_interval}s")
         args += self.backend.machine_args()
         subprocess.run(
             args,
@@ -303,10 +306,13 @@ class QScheduler:
         r.raise_for_status()
         return r
 
-    def get_session_state(self, session_id: int) -> dict:
+    def get_session(self, session_id: int) -> dict:
         r = requests.get(self.url(f"sessions/{session_id}"), timeout=5)
         r.raise_for_status()
         return r.json()
+
+    def get_session_state(self, session_id: int) -> str:
+        return self.get_session(session_id)["state"]
 
     def wait_for_session_state(self, session_id: int, target: str):
         TIMEOUT = 10
@@ -334,29 +340,28 @@ class QScheduler:
         deadline = time.monotonic() + TIMEOUT
         wait_time = 0.1
         while time.monotonic() < deadline:
-            state = self.get_task_status(task_id)
-            tp = state["state"]
-            if tp in target:
+            state = self.get_task_state(task_id)
+            if state in target:
                 return state
-            if tp in ("failed", "finished", "cancelled"):
+            if state in ("failed", "finished", "cancelled"):
                 raise Exception(
-                    f"Task {task_id}: expects state {target} but got {tp} (full state: {state})"
+                    f"Task {task_id}: expects state {target} but got {state}"
                 )
             time.sleep(wait_time)
             wait_time += 0.1
         raise Exception(
-            f"Task {task_id}: expects state {target} but got {tp} (full state: {state}) after {TIMEOUT}s"
+            f"Task {task_id}: expects state {target} but got {state} after {TIMEOUT}s"
         )
 
     def assert_task_finished(self, task_id: int):
-        state = self.get_task_status(task_id)
-        assert state["state"] == "finished", (
+        state = self.get_task_state(task_id)
+        assert state == "finished", (
             f"Expected task {task_id} to be finished, got {state!r}"
         )
 
     def assert_task_canceled(self, task_id: int):
-        state = self.get_task_status(task_id)
-        assert state["state"] == "cancelled", (
+        state = self.get_task_state(task_id)
+        assert state == "cancelled", (
             f"Expected task {task_id} to be cancelled, got {state!r}"
         )
 
@@ -388,12 +393,15 @@ class QScheduler:
         self.wait_for_session_state(task_id, "closed")
 
     def assert_task_waiting(self, task_id: int):
-        return self.get_task_status(task_id) == {"state": "waiting"}
+        return self.get_task_state(task_id) == "waiting"
 
-    def get_task_status(self, task_id: int) -> str:
+    def get_task(self, task_id: int) -> dict:
         r = requests.get(self.url(f"tasks/{task_id}"), timeout=5)
         r.raise_for_status()
         return r.json()
+
+    def get_task_state(self, task_id: int) -> str:
+        return self.get_task(task_id)["state"]
 
     def version(self) -> str:
         r = requests.get(self.url("version"), timeout=5)
