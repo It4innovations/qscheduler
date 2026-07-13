@@ -36,6 +36,15 @@ pub(crate) trait Backend: Send + Sync {
         calibration_id: &str,
         endpoint: &str,
     ) -> oneshot::Receiver<crate::Result<String>>;
+    fn get_task_result(
+        self: Arc<Self>,
+        backend_id: &str,
+    ) -> oneshot::Receiver<crate::Result<String>>;
+    fn get_task_artifact(
+        self: Arc<Self>,
+        backend_id: &str,
+        name: &str,
+    ) -> oneshot::Receiver<crate::Result<String>>;
 }
 
 pub(crate) enum FromBackendMessage {

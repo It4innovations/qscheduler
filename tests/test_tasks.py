@@ -1,5 +1,11 @@
+from datetime import datetime
+
 from utils import TEST_MACHINE_NAME, TEST_PROJECT, TEST_USER
 from utils import TestTask as TT
+
+
+def _parse_ts(ts: str) -> datetime:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def test_task_info_fields_project(qscheduler):
@@ -17,6 +23,9 @@ def test_task_info_fields_project(qscheduler):
     assert "error" not in info
     assert info["created_at"] is not None
     assert info["finished_at"] is not None
+    # Regression check: finished_at must be derived from the backend's actual
+    # execution timeline, not a zero-value default (e.g. the Unix epoch).
+    assert _parse_ts(info["finished_at"]) >= _parse_ts(info["created_at"])
 
 
 def test_task_info_fields_session(qscheduler):
@@ -137,3 +146,34 @@ def test_cancel_finished_task(qscheduler):
 def test_cancel_nonexistent_task(qscheduler):
     qscheduler.start()
     qscheduler.cancel_task(999_999, expect_error=404)
+
+
+def test_task_result_and_artifact(qscheduler_iqm):
+    qscheduler_iqm.start()
+    t = qscheduler_iqm.submit(TT())
+    qscheduler_iqm.wait_for_finished(t)
+
+    result = qscheduler_iqm.get_task_result(t)
+    assert result["status"] == "completed"
+
+    artifact = qscheduler_iqm.get_task_artifact(t, "measurements")
+    assert artifact == {"artifact": "measurements", "values": [0, 1, 0, 1]}
+
+
+def test_task_result_not_submitted(qscheduler):
+    qscheduler.queue_size = 1
+    qscheduler.start()
+    t = qscheduler.submit(TT().compute_time(2))
+    t1 = qscheduler.submit(TT())
+    qscheduler.wait_for_running(t)
+    assert qscheduler.get_task_state(t1) == "waiting"
+    qscheduler.get_task_result(t1, expect_error=409)
+    qscheduler.get_task_artifact(t1, "measurements", expect_error=409)
+    qscheduler.wait_for_finished(t)
+    qscheduler.wait_for_finished(t1)
+
+
+def test_task_result_nonexistent_task(qscheduler):
+    qscheduler.start()
+    qscheduler.get_task_result(999_999, expect_error=404)
+    qscheduler.get_task_artifact(999_999, "measurements", expect_error=404)

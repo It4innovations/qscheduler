@@ -93,6 +93,8 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         .routes(routes!(tasks::create_task))
         .routes(routes!(tasks::get_task))
         .routes(routes!(tasks::cancel_task_handler))
+        .routes(routes!(tasks::get_task_result))
+        .routes(routes!(tasks::get_task_artifact))
         .routes(routes!(sessions::get_session))
         .routes(routes!(sessions::create_session_handler))
         .routes(routes!(sessions::cancel_session_handler))

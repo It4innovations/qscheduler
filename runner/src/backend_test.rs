@@ -166,6 +166,18 @@ impl Backend for TestBackend {
         )));
         rx
     }
+
+    fn get_task_result(self: Arc<Self>, _backend_id: &str) -> Receiver<crate::Result<String>> {
+        todo!()
+    }
+
+    fn get_task_artifact(
+        self: Arc<Self>,
+        _backend_id: &str,
+        _name: &str,
+    ) -> Receiver<crate::Result<String>> {
+        todo!()
+    }
 }
 
 pub fn start_test_backend() -> (Arc<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {
