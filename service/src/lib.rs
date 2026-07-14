@@ -67,6 +67,22 @@ fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
+/// Maps a business-rule rejection to its HTTP status, logging it at `debug` so the reason a
+/// request was rejected is visible in server logs without relying on the client to report it.
+pub(crate) fn client_error(status: StatusCode, e: impl std::fmt::Display) -> (StatusCode, String) {
+    let msg = e.to_string();
+    tracing::debug!(%status, "{msg}");
+    (status, msg)
+}
+
+/// Like [`client_error`], but for less-expected rejections (e.g. a project over its time limit)
+/// that are worth surfacing more prominently.
+pub(crate) fn client_warn(status: StatusCode, e: impl std::fmt::Display) -> (StatusCode, String) {
+    let msg = e.to_string();
+    tracing::warn!(%status, "{msg}");
+    (status, msg)
+}
+
 #[derive(OpenApi)]
 struct ApiDoc;
 

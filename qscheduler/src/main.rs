@@ -205,6 +205,7 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
             println!("Restart the service for the change to take effect.");
         }
         Err(RunnerError::MachineAlreadyExists(_)) => {
+            tracing::error!(name = %config.name, "machine already exists");
             eprintln!(
                 "Error: a machine named '{name}' already exists.",
                 name = config.name
@@ -212,6 +213,7 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
             std::process::exit(1);
         }
         Err(e) => {
+            tracing::error!(name = %config.name, error = %e, "failed to add machine");
             eprintln!("Error: failed to add machine: {e}");
             std::process::exit(1);
         }
@@ -223,10 +225,12 @@ async fn cmd_machine_update(args: MachineConfigArgs) {
     match runner::db::get_machine_by_name(&pool, &args.name).await {
         Ok(Some(_)) => {}
         Ok(None) => {
+            tracing::error!(name = %args.name, "machine not found");
             eprintln!("Error: machine '{}' not found.", args.name);
             std::process::exit(1);
         }
         Err(e) => {
+            tracing::error!(name = %args.name, error = %e, "failed to fetch machine");
             eprintln!("Error: failed to fetch machine '{}': {e}", args.name);
             std::process::exit(1);
         }
@@ -247,10 +251,12 @@ async fn cmd_machine_update(args: MachineConfigArgs) {
             println!("Restart the service for the change to take effect.");
         }
         Ok(false) => {
+            tracing::error!(name = %args.name, "machine not found");
             eprintln!("Error: machine '{}' not found.", args.name);
             std::process::exit(1);
         }
         Err(e) => {
+            tracing::error!(name = %args.name, error = %e, "failed to update machine");
             eprintln!("Error: failed to update machine '{}': {e}", args.name);
             std::process::exit(1);
         }

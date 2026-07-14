@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub fn start_launcher(
     core_ref: &CoreRef,
@@ -99,6 +99,14 @@ fn project_name(project_map: &ProjectMap, project_id: ProjectId) -> Option<Strin
     project_map.find_project(project_id).map(|p| p.name.clone())
 }
 
+/// Sends a notify event, warning if the notify worker's channel has already closed instead of
+/// silently dropping the event.
+fn send_notify(sender: &UnboundedSender<NotifyEvent>, event: NotifyEvent) {
+    if sender.send(event).is_err() {
+        warn!("failed to send notify event, notify worker channel closed");
+    }
+}
+
 fn pick_task(
     core: &mut Core,
     machine_id: MachineId,
@@ -159,7 +167,7 @@ fn pick_task(
                             machine.config().name.clone(),
                             project_name(project_map, project_id).unwrap_or_default(),
                         );
-                        let _ = sender.send(NotifyEvent::Session { session: info });
+                        send_notify(sender, NotifyEvent::Session { session: info });
                     }
                     db_updates.push(DbUpdate::SessionOpened {
                         session_id,
@@ -223,7 +231,7 @@ fn close_running_session(
                 .project_id()
                 .and_then(|pid| project_name(project_map, pid));
             let info = TaskInfo::build(task, task.state(), machine.config().name.clone(), proj);
-            let _ = sender.send(NotifyEvent::Task { task: info });
+            send_notify(sender, NotifyEvent::Task { task: info });
         }
         cancelled_tasks.push(task_id);
     }
@@ -231,7 +239,7 @@ fn close_running_session(
     if let Some(sender) = notify_sender {
         let proj = project_name(project_map, session.config.project_id).unwrap_or_default();
         let info = SessionInfo::build(session, machine.config().name.clone(), proj);
-        let _ = sender.send(NotifyEvent::Session { session: info });
+        send_notify(sender, NotifyEvent::Session { session: info });
     }
     db_updates.push(DbUpdate::SessionClosed {
         session_id: s.session_id,
@@ -248,6 +256,7 @@ enum LauncherEvent {
     BackendMessage(FromBackendMessage),
 }
 
+#[tracing::instrument(skip_all, fields(%machine_id))]
 async fn launcher_main(
     core_ref: CoreRef,
     machine_id: MachineId,
@@ -307,8 +316,12 @@ async fn launcher_main(
                 }
             } =>
                 LauncherEvent::SessionQuotaCheck,
-            msg = backend_receiver.recv() =>
+            msg = backend_receiver.recv() => {
+                if msg.is_none() {
+                    tracing::error!(%machine_id, "backend channel closed unexpectedly");
+                }
                 LauncherEvent::BackendMessage(msg.unwrap())
+            }
         };
 
         let mut db_updates: Vec<DbUpdate> = Vec::new();
@@ -394,7 +407,7 @@ async fn launcher_main(
                                         .project_id()
                                         .and_then(|pid| project_name(project_map, pid));
                                     let info = TaskInfo::build(task, &state, machine_name, proj);
-                                    let _ = sender.send(NotifyEvent::Task { task: info });
+                                    send_notify(sender, NotifyEvent::Task { task: info });
                                 }
                                 db_updates.push(DbUpdate::TaskFinished {
                                     task_id,
@@ -414,7 +427,7 @@ async fn launcher_main(
                                         .project_id()
                                         .and_then(|pid| project_name(project_map, pid));
                                     let info = TaskInfo::build(task, &state, machine_name, proj);
-                                    let _ = sender.send(NotifyEvent::Task { task: info });
+                                    send_notify(sender, NotifyEvent::Task { task: info });
                                 }
                                 db_updates.push(DbUpdate::TaskFailed {
                                     task_id,
@@ -442,7 +455,7 @@ async fn launcher_main(
                                             .and_then(|pid| project_name(project_map, pid));
                                         let info =
                                             TaskInfo::build(task, &state, machine_name, proj);
-                                        let _ = sender.send(NotifyEvent::Task { task: info });
+                                        send_notify(sender, NotifyEvent::Task { task: info });
                                     }
                                     db_updates.push(DbUpdate::TaskCancelled {
                                         task_id,
@@ -505,7 +518,7 @@ async fn launcher_main(
                                 .unwrap_or_default();
                             let info =
                                 SessionInfo::build(session, machine.config().name.clone(), proj);
-                            let _ = sender.send(NotifyEvent::Session { session: info });
+                            send_notify(sender, NotifyEvent::Session { session: info });
                         }
                         db_updates.push(DbUpdate::SessionClosed {
                             session_id,
@@ -547,7 +560,7 @@ async fn launcher_main(
                                 machine.config().name.clone(),
                                 proj,
                             );
-                            let _ = sender.send(NotifyEvent::Task { task: info });
+                            send_notify(sender, NotifyEvent::Task { task: info });
                         }
                         db_updates.push(DbUpdate::TaskCancelled {
                             task_id,
@@ -596,7 +609,7 @@ async fn launcher_main(
                             .project_id()
                             .and_then(|pid| project_name(split.project_map, pid));
                         let info = TaskInfo::build(task, &state, machine_name, proj);
-                        let _ = sender.send(NotifyEvent::Task { task: info });
+                        send_notify(sender, NotifyEvent::Task { task: info });
                     }
                     core.split_mut()
                         .task_map

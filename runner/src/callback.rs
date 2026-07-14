@@ -3,7 +3,7 @@ use crate::task::TaskInfo;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotifyConfig {
@@ -43,19 +43,20 @@ pub(crate) async fn notify_worker(
         loop {
             match client.post(&config.url).json(&evt).send().await {
                 Ok(resp) if resp.status().is_success() => break,
-                _ => {
+                result => {
                     fail_count += 1;
                     if fail_count >= MAX_NOTIFY_FAILS {
                         match &evt.event {
                             NotifyEvent::Task { task } => {
-                                debug!(task_id = %task.id, "Discarding notification after max failures")
+                                warn!(task_id = %task.id, "discarding notification after max failures")
                             }
                             NotifyEvent::Session { session } => {
-                                debug!(session_id = %session.id, "Discarding notification after max failures")
+                                warn!(session_id = %session.id, "discarding notification after max failures")
                             }
                         }
                         break;
                     }
+                    debug!(?result, fail_count, "notify attempt failed, retrying");
                     sleep_until(Instant::now() + delay).await;
                     delay = (delay * 2).min(Duration::from_secs(30));
                 }

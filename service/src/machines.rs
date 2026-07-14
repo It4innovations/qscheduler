@@ -1,4 +1,4 @@
-use crate::{AppState, internal_error};
+use crate::{AppState, client_error, internal_error};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,7 +9,7 @@ use runner::reactor::get_machine_id_by_name;
 use std::sync::Arc;
 
 pub(crate) fn find_machine(core: &Core, machine: &str) -> Result<MachineId, (StatusCode, String)> {
-    get_machine_id_by_name(core, machine).map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))
+    get_machine_id_by_name(core, machine).map_err(|e| client_error(StatusCode::NOT_FOUND, e))
 }
 
 /// Fetch the backend's architecture description.

@@ -1,4 +1,4 @@
-use crate::{AppState, internal_error};
+use crate::{AppState, client_error, client_warn, internal_error};
 use axum::{
     Json,
     body::{Body, Bytes},
@@ -54,16 +54,16 @@ pub(crate) async fn create_task(
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
     let task = create_task_config(&state.core_ref, params, body)
         .await
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     tracing::debug!(task_config=?task, "new task");
     let task_id = submit_task(&state.core_ref, task)
         .await
         .map_err(|e| match &e {
             RunnerError::InvalidSession(_) | RunnerError::NonRunningSession(_) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+                client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
             }
             RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
-                (StatusCode::PAYMENT_REQUIRED, e.to_string())
+                client_warn(StatusCode::PAYMENT_REQUIRED, e)
             }
             _ => internal_error(&e),
         })?;
@@ -115,11 +115,11 @@ pub(crate) async fn get_task(
     Path(id): Path<u64>,
 ) -> Result<Json<TaskInfo>, (StatusCode, String)> {
     let task_id =
-        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+        TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
     let info = get_task_info(&state.core_ref, task_id)
         .await
         .map_err(|e| internal_error(&e))?
-        .ok_or((StatusCode::NOT_FOUND, format!("task '{id}' not found")))?;
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, format!("task '{id}' not found")))?;
     Ok(Json(info))
 }
 
@@ -141,12 +141,12 @@ pub(crate) async fn cancel_task_handler(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let task_id =
-        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+        TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
     cancel_task(&state.core_ref, task_id)
         .await
         .map_err(|e| match &e {
-            RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
-            RunnerError::TaskAlreadyFinished(_) => (StatusCode::CONFLICT, e.to_string()),
+            RunnerError::InvalidTask(_) => client_error(StatusCode::NOT_FOUND, e),
+            RunnerError::TaskAlreadyFinished(_) => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
         })?;
     tracing::info!(%task_id, "task cancellation requested");
@@ -171,12 +171,12 @@ pub(crate) async fn get_task_result(
     Path(id): Path<u64>,
 ) -> Result<Response, (StatusCode, String)> {
     let task_id =
-        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+        TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
     let future = {
         let core = state.core_ref.lock().unwrap();
         core.get_task_result(task_id).map_err(|e| match &e {
-            RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
-            RunnerError::TaskNotSubmitted(_) => (StatusCode::CONFLICT, e.to_string()),
+            RunnerError::InvalidTask(_) => client_error(StatusCode::NOT_FOUND, e),
+            RunnerError::TaskNotSubmitted(_) => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
         })?
     };
@@ -208,18 +208,18 @@ pub(crate) async fn get_task_artifact(
     Path((id, name)): Path<(u64, String)>,
 ) -> Result<Response, (StatusCode, String)> {
     let task_id =
-        TaskId::try_from(id).map_err(|_| (StatusCode::NOT_FOUND, "invalid task id".to_string()))?;
+        TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
     let future = {
         let core = state.core_ref.lock().unwrap();
         core.get_task_artifact(task_id, &name)
             .map_err(|e| match &e {
-                RunnerError::InvalidTask(_) => (StatusCode::NOT_FOUND, e.to_string()),
-                RunnerError::TaskNotSubmitted(_) => (StatusCode::CONFLICT, e.to_string()),
+                RunnerError::InvalidTask(_) => client_error(StatusCode::NOT_FOUND, e),
+                RunnerError::TaskNotSubmitted(_) => client_error(StatusCode::CONFLICT, e),
                 _ => internal_error(&e),
             })?
     };
     let stream = future.await.map_err(|e| match &e {
-        RunnerError::UnknownArtifact(_) => (StatusCode::NOT_FOUND, e.to_string()),
+        RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
         _ => internal_error(&e),
     })?;
     Ok(Response::builder()

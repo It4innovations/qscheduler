@@ -11,6 +11,7 @@ pub async fn check_db_health(core_ref: &CoreRef) -> bool {
     db::ping(&pool).await
 }
 
+#[tracing::instrument(skip_all, fields(task_id = tracing::field::Empty))]
 pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
     tracing::debug!("Submitting task");
     let pool = {
@@ -19,7 +20,8 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
         core.pool().clone()
     };
     let (task_id, created_at) = db::insert_task(&pool, &config).await?;
-    tracing::debug!(%task_id, "New task");
+    tracing::Span::current().record("task_id", tracing::field::display(task_id));
+    tracing::debug!("New task");
     let result = core_ref
         .lock()
         .unwrap()
@@ -60,6 +62,7 @@ pub async fn get_session_info(
     db::find_session_info(&pool, session_id).await
 }
 
+#[tracing::instrument(skip(core_ref), fields(%task_id))]
 pub async fn cancel_task(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<()> {
     let mut core = core_ref.lock().unwrap();
     let CoreSplitMut {
@@ -80,6 +83,7 @@ pub async fn cancel_task(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<(
     Ok(())
 }
 
+#[tracing::instrument(skip(core_ref), fields(%session_id))]
 pub async fn cancel_session(core_ref: &CoreRef, session_id: SessionId) -> crate::Result<()> {
     let mut core = core_ref.lock().unwrap();
     let CoreSplitMut {
@@ -100,6 +104,7 @@ pub async fn cancel_session(core_ref: &CoreRef, session_id: SessionId) -> crate:
     Ok(())
 }
 
+#[tracing::instrument(skip_all, fields(session_id = tracing::field::Empty))]
 pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate::Result<SessionId> {
     let pool = {
         let core = core_ref.lock().unwrap();
@@ -107,7 +112,8 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
         core.pool().clone()
     };
     let (session_id, created_at) = db::insert_session(&pool, &config).await?;
-    tracing::debug!(%session_id, "New session");
+    tracing::Span::current().record("session_id", tracing::field::display(session_id));
+    tracing::debug!("New session");
     let result = core_ref
         .lock()
         .unwrap()
@@ -119,6 +125,7 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
     result
 }
 
+#[tracing::instrument(skip(core_ref))]
 pub async fn create_project(
     core_ref: &CoreRef,
     name: String,
@@ -151,6 +158,7 @@ pub async fn create_project(
     Ok(id)
 }
 
+#[tracing::instrument(skip(core_ref))]
 pub async fn update_project(
     core_ref: &CoreRef,
     name: &str,
