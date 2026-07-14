@@ -13,7 +13,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{MissedTickBehavior, sleep};
-use tracing::{debug, log};
+use tracing::{Instrument, debug, error, warn};
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct IqmBackendConfig {
@@ -84,29 +84,38 @@ impl JobStatusResponse {
 impl Backend for IqmBackend {
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str) {
         let backend_id = backend_id.to_string();
-        tokio::spawn(async move {
-            let url = &format!("{}/cancel", backend_id);
-            for _ in 0..10 {
-                let builder = self.setup_job_request(Method::POST, url, false);
-                let result = builder.send().await;
-                match result {
-                    Ok(resp) if resp.status().is_success() => {
-                        log::debug!("cancel task {} with status {}", backend_id, resp.status());
-                        return;
+        let span = tracing::info_span!("iqm_cancel_task", %task_id, %backend_id);
+        tokio::spawn(
+            async move {
+                let url = &format!("{}/cancel", backend_id);
+                for _ in 0..10 {
+                    let builder = self.setup_job_request(Method::POST, url, false);
+                    let result = builder.send().await;
+                    match result {
+                        Ok(resp) if resp.status().is_success() => {
+                            debug!(status = %resp.status(), "cancel task succeeded");
+                            return;
+                        }
+                        result => {
+                            debug!(?result, "cancel attempt failed, retrying");
+                        }
                     }
-                    e => {
-                        log::debug!("cancel task {} with status {:?}", backend_id, e);
-                    }
+                    sleep(Duration::from_millis(2000)).await;
                 }
-                sleep(Duration::from_millis(2000)).await;
+                error!("failed to cancel task from backend after max retries");
+                if self
+                    .monitor_sender
+                    .send(MonitorCommand::UnregisterTask { task_id })
+                    .is_err()
+                {
+                    error!("failed to unregister task from monitor after cancel failure");
+                }
             }
-            log::error!("Failed to cancel task from backend");
-            let _ = self
-                .monitor_sender
-                .send(MonitorCommand::UnregisterTask { task_id });
-        });
+            .instrument(span),
+        );
     }
 
+    #[tracing::instrument(skip(self, _payload))]
     fn resume_task(
         self: Arc<Self>,
         task_id: TaskId,
@@ -120,55 +129,77 @@ impl Backend for IqmBackend {
         if cancel {
             self.clone().cancel_task(task_id, &backend_id);
         };
-        let _ = self.monitor_sender.send(MonitorCommand::NewTask {
-            task_id,
-            backend_id,
-        });
+        if self
+            .monitor_sender
+            .send(MonitorCommand::NewTask {
+                task_id,
+                backend_id,
+            })
+            .is_err()
+        {
+            error!(%task_id, "monitor channel closed while resuming task");
+        }
     }
 
     fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
-        tokio::spawn(async move {
-            let url = &format!("{}/circuit", self.config.machine_name);
-            let builder = self.setup_job_request(Method::POST, url, true);
-            log::debug!("Connecting to {url}");
-            let result = builder.body(payload).send().await;
-            match result {
-                Err(e) => self.send_task_error(task_id, format!("IQM request failed: {}", e)),
-                Ok(resp) => {
-                    let http_status = resp.status();
-                    if !http_status.is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        self.send_task_error(
-                            task_id,
-                            format!("IQM backend HTTP {}: {}", http_status, body),
-                        );
-                        return;
-                    }
-                    match resp.json::<IdField>().await {
-                        Err(e) => {
+        let span = tracing::info_span!("iqm_submit_task", %task_id);
+        tokio::spawn(
+            async move {
+                let url = &format!("{}/circuit", self.config.machine_name);
+                let builder = self.setup_job_request(Method::POST, url, true);
+                debug!(%url, "connecting to IQM backend");
+                let result = builder.body(payload).send().await;
+                match result {
+                    Err(e) => self.send_task_error(task_id, format!("IQM request failed: {}", e)),
+                    Ok(resp) => {
+                        let http_status = resp.status();
+                        if !http_status.is_success() {
+                            let body = resp.text().await.unwrap_or_default();
                             self.send_task_error(
                                 task_id,
-                                format!("Parsing IQM backend failed: {e}"),
+                                format!("IQM backend HTTP {}: {}", http_status, body),
                             );
+                            return;
                         }
-                        Ok(id_field) => {
-                            self.backend_sender
-                                .send(FromBackendMessage::TaskSubmitted {
+                        match resp.json::<IdField>().await {
+                            Err(e) => {
+                                self.send_task_error(
                                     task_id,
-                                    backend_task_id: id_field.id.clone(),
-                                })
-                                .unwrap();
-                            self.monitor_sender
-                                .send(MonitorCommand::NewTask {
-                                    task_id,
-                                    backend_id: id_field.id,
-                                })
-                                .unwrap();
+                                    format!("Parsing IQM backend failed: {e}"),
+                                );
+                            }
+                            Ok(id_field) => {
+                                if self
+                                    .backend_sender
+                                    .send(FromBackendMessage::TaskSubmitted {
+                                        task_id,
+                                        backend_task_id: id_field.id.clone(),
+                                    })
+                                    .is_err()
+                                {
+                                    error!(
+                                        "backend channel closed while reporting task submission"
+                                    );
+                                }
+                                if self
+                                    .monitor_sender
+                                    .send(MonitorCommand::NewTask {
+                                        task_id,
+                                        backend_id: id_field.id,
+                                    })
+                                    .is_err()
+                                {
+                                    error!(
+                                        "monitor channel closed while registering task for polling"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     fn get_arch(self: Arc<Self>) -> BackendFuture<String> {
@@ -255,12 +286,16 @@ impl IqmBackend {
     }
 
     pub fn send_task_error(&self, task_id: TaskId, message: String) {
-        let _ = self
+        if self
             .backend_sender
             .send(FromBackendMessage::TaskStateChange {
                 task_id,
                 state: TaskState::simple_error(message),
-            });
+            })
+            .is_err()
+        {
+            error!(%task_id, "backend channel closed while reporting task error");
+        }
     }
 }
 
@@ -364,10 +399,12 @@ async fn iqm_main(
                         if !matches!(&new_state, TaskState::Running) {
                             to_delete.push(idx);
                         }
-                        let _ = backend.backend_sender.send(FromBackendMessage::TaskStateChange {
+                        if backend.backend_sender.send(FromBackendMessage::TaskStateChange {
                             task_id: task.task_id,
                             state: new_state,
-                        });
+                        }).is_err() {
+                            error!(task_id = %task.task_id, "backend channel closed while reporting poll result");
+                        }
                     }
 
                 }
@@ -379,36 +416,35 @@ async fn iqm_main(
     }
 }
 
+#[tracing::instrument(skip_all, fields(task_id = %task.task_id, backend_id = %task.iqm_task_id))]
 async fn process_result(
     task: &mut MonitoredTask,
     result: Result<reqwest::Response, reqwest::Error>,
 ) -> Option<TaskState> {
     match result {
         Err(e) => {
-            log::error!("IQM polling job {}: {}", task.iqm_task_id, e);
             task.fails += 1;
             if task.fails > MAX_FAILS {
+                error!(error = %e, fails = task.fails, "IQM polling failed repeatedly, giving up");
                 return Some(TaskState::simple_error(format!(
                     "IQM poll do not respond: {}",
                     e
                 )));
             }
+            warn!(error = %e, fails = task.fails, "IQM polling request failed");
             None
         }
         Ok(resp) => {
             let http_status = resp.status();
             if !http_status.is_success() {
-                log::error!(
-                    "IQM polling job {}: HTTP status {}",
-                    task.iqm_task_id,
-                    http_status
-                );
                 task.fails += 1;
                 if task.fails > MAX_FAILS {
+                    error!(%http_status, fails = task.fails, "IQM polling failed repeatedly, giving up");
                     return Some(TaskState::simple_error(format!(
                         "IQM poll do not respond: {http_status}"
                     )));
                 }
+                warn!(%http_status, fails = task.fails, "IQM polling request returned non-success status");
                 return None;
             }
             match resp.json::<JobStatusResponse>().await {

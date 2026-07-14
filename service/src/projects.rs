@@ -11,7 +11,7 @@ use runner::reactor::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{AppState, internal_error};
+use crate::{AppState, client_error, internal_error};
 
 fn default_active() -> bool {
     true
@@ -69,7 +69,9 @@ pub(crate) async fn get_project_handler(
     let project = get_project_by_name(&state.core_ref, &name)
         .await
         .map_err(|e| internal_error(&e))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("project '{name}' not found")))?;
+        .ok_or_else(|| {
+            client_error(StatusCode::NOT_FOUND, format!("project '{name}' not found"))
+        })?;
     Ok(Json(ProjectResponse::from_project(project)))
 }
 
@@ -92,7 +94,7 @@ pub(crate) async fn create_project_handler(
     create_project(&state.core_ref, body.name, body.active, limit)
         .await
         .map_err(|e| match &e {
-            RunnerError::ProjectAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
+            RunnerError::ProjectAlreadyExists(_) => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
         })?;
     Ok(StatusCode::CREATED)
@@ -127,7 +129,7 @@ pub(crate) async fn update_project_handler(
     let project = update_project(&state.core_ref, &name, body.active, limit)
         .await
         .map_err(|e| match &e {
-            RunnerError::ProjectNotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            RunnerError::ProjectNotFound(_) => client_error(StatusCode::NOT_FOUND, e),
             _ => internal_error(&e),
         })?;
     Ok(Json(ProjectResponse::from_project(project)))

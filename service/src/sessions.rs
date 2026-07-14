@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::machines::find_machine;
-use crate::{AppState, internal_error};
+use crate::{AppState, client_error, client_warn, internal_error};
 
 #[derive(Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -39,11 +39,11 @@ pub(crate) async fn get_session(
     Path(id): Path<u64>,
 ) -> Result<Json<SessionInfo>, (StatusCode, String)> {
     let session_id = SessionId::try_from(id)
-        .map_err(|_| (StatusCode::NOT_FOUND, "invalid session id".to_string()))?;
+        .map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid session id"))?;
     let info = get_session_info(&state.core_ref, session_id)
         .await
         .map_err(|e| internal_error(&e))?
-        .ok_or((StatusCode::NOT_FOUND, format!("session '{id}' not found")))?;
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, format!("session '{id}' not found")))?;
     Ok(Json(info))
 }
 
@@ -67,7 +67,7 @@ pub(crate) async fn create_session_handler(
     let machine_id = find_machine(&state.core_ref.lock().unwrap(), &params.machine)?;
     let project_id = get_project_id_by_name(&state.core_ref, &params.project)
         .await
-        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+        .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let config = SessionConfig {
         machine_id,
         project_id,
@@ -77,10 +77,10 @@ pub(crate) async fn create_session_handler(
         .await
         .map_err(|e| match &e {
             RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
-                (StatusCode::PAYMENT_REQUIRED, e.to_string())
+                client_warn(StatusCode::PAYMENT_REQUIRED, e)
             }
             RunnerError::SessionDurationExceedsLimit { .. } => {
-                (StatusCode::UNPROCESSABLE_ENTITY, e.to_string())
+                client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
             }
             _ => internal_error(&e),
         })?;
@@ -107,12 +107,12 @@ pub(crate) async fn cancel_session_handler(
     Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let session_id = SessionId::try_from(id)
-        .map_err(|_| (StatusCode::NOT_FOUND, "invalid session id".to_string()))?;
+        .map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid session id"))?;
     cancel_session(&state.core_ref, session_id)
         .await
         .map_err(|e| match &e {
-            RunnerError::InvalidSession(_) => (StatusCode::NOT_FOUND, e.to_string()),
-            RunnerError::SessionAlreadyClosed(_) => (StatusCode::CONFLICT, e.to_string()),
+            RunnerError::InvalidSession(_) => client_error(StatusCode::NOT_FOUND, e),
+            RunnerError::SessionAlreadyClosed(_) => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
         })?;
     tracing::info!(

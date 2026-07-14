@@ -158,11 +158,24 @@ impl Core {
 
             for s in &sessions {
                 let Ok(session_id) = SessionId::try_from(s.id as u64) else {
+                    tracing::error!(
+                        raw_id = s.id,
+                        "skipping session with invalid id during restore"
+                    );
                     continue;
                 };
                 let machine_id = MachineId::from(s.machine_id as u32);
-                let project_id =
-                    ProjectId::try_from(s.project_id as u32).expect("Invalid project id");
+                let project_id = match ProjectId::try_from(s.project_id as u32) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        tracing::error!(
+                            %session_id,
+                            raw_project_id = s.project_id,
+                            "invalid project id on session during restore"
+                        );
+                        panic!("Invalid project id");
+                    }
+                };
                 let config = SessionConfig {
                     machine_id,
                     project_id,
@@ -187,9 +200,25 @@ impl Core {
                     }
                 } else {
                     // Never opened (and therefore has no tasks yet): re-queue it.
-                    if let Ok(machine) = machine_map.find_machine_mut(machine_id) {
-                        let _ = machine.queue_session(&session);
-                        woken.insert(machine_id);
+                    match machine_map.find_machine_mut(machine_id) {
+                        Ok(machine) => {
+                            if machine.queue_session(&session).is_ok() {
+                                woken.insert(machine_id);
+                            } else {
+                                tracing::warn!(
+                                    %session_id,
+                                    %machine_id,
+                                    "failed to requeue session on restore (queue full)"
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %session_id,
+                                %machine_id,
+                                "session references unknown machine on restore, not requeued"
+                            );
+                        }
                     }
                     session_map.insert(session);
                 }
@@ -197,12 +226,34 @@ impl Core {
 
             for t in tasks {
                 let Ok(task_id) = TaskId::try_from(t.id as u64) else {
+                    tracing::error!(
+                        raw_id = t.id,
+                        "skipping task with invalid id during restore"
+                    );
                     continue;
                 };
                 let machine_id = MachineId::from(t.machine_id as u32);
                 let payload = Bytes::from(t.payload.clone().unwrap_or_default());
-                let session_id = t.session_id.map(|id| SessionId::try_from(id).unwrap());
-                let project_id = t.project_id.map(|id| ProjectId::try_from(id).unwrap());
+                let session_id = t.session_id.map(|id| {
+                    SessionId::try_from(id).unwrap_or_else(|_| {
+                        tracing::error!(
+                            %task_id,
+                            raw_session_id = id,
+                            "invalid session id on task during restore"
+                        );
+                        panic!("Invalid session id");
+                    })
+                });
+                let project_id = t.project_id.map(|id| {
+                    ProjectId::try_from(id).unwrap_or_else(|_| {
+                        tracing::error!(
+                            %task_id,
+                            raw_project_id = id,
+                            "invalid project id on task during restore"
+                        );
+                        panic!("Invalid project id");
+                    })
+                });
                 let config = TaskConfig {
                     machine_id,
                     parent: TaskParent::new(session_id, project_id),
@@ -226,16 +277,37 @@ impl Core {
                                 payload,
                                 cancel: session_id.is_some(),
                             });
+                    } else {
+                        tracing::warn!(
+                            %task_id,
+                            %machine_id,
+                            "submitted task references unknown machine on restore, will never be re-attached for monitoring"
+                        );
                     }
                 } else if session_id.is_some() {
                     orphan_cancels.push(task_id);
                 } else {
                     // Still waiting in the queue: re-queue it.
                     let task = Task::new(task_id, t.created_at, config);
-                    if let Ok(machine) = machine_map.find_machine_mut(machine_id)
-                        && machine.queue_task(&task).is_ok()
-                    {
-                        woken.insert(machine_id);
+                    match machine_map.find_machine_mut(machine_id) {
+                        Ok(machine) => {
+                            if machine.queue_task(&task).is_ok() {
+                                woken.insert(machine_id);
+                            } else {
+                                tracing::warn!(
+                                    %task_id,
+                                    %machine_id,
+                                    "failed to requeue task on restore (queue full)"
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %task_id,
+                                %machine_id,
+                                "task references unknown machine on restore, not requeued"
+                            );
+                        }
                     }
                     task_map.insert(task);
                 }
