@@ -179,7 +179,7 @@ jobs:
 
           task_id=$(curl -sf -X POST 'http://localhost:4300/tasks?machine=TestMachine&project=smoke-project&user=ci' \
             -H 'Content-Type: application/octet-stream' \
-            --data-raw '{"result": {"type": "Ok"}}')
+            --data-raw '{"outcome": {"type": "Ok"}}')
 
           for i in $(seq 1 30); do
             state=$(curl -sf http://localhost:4300/tasks/$task_id | jq -r .state)
