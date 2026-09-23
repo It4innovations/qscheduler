@@ -1,16 +1,16 @@
-from pathlib import Path
-from dotenv import load_dotenv
-from pytest_httpserver import HTTPServer
 import os
 import socket
 import subprocess
+from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import psycopg2
 import pytest
+from dotenv import load_dotenv
 from psycopg2 import sql
 from pytest import fixture
+from pytest_httpserver import HTTPServer
 from utils import QScheduler
 from utils_iqm import IqmFakeBackend
 
