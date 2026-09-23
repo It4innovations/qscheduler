@@ -1,8 +1,9 @@
-import re
-import uuid
 import json
+import re
 import time
-from datetime import datetime, timedelta
+import uuid
+from datetime import UTC, datetime, timedelta
+
 from werkzeug.wrappers import Response
 
 _QC_ID = "00000000-0000-0000-0000-000000000000"
@@ -67,7 +68,7 @@ class Task:
 
     def cancel(self):
         self.cancelled = True
-        self.cancelled_at = datetime.now()
+        self.cancelled_at = datetime.now(UTC)
 
     def status(self):
         if self.cancelled:
@@ -120,7 +121,7 @@ class Task:
                 "messages": [],
             }
 
-        now = datetime.now()
+        now = datetime.now(UTC)
         exec_start = self._exec_start()
 
         if now < exec_start:
@@ -207,7 +208,7 @@ class IqmFakeBackend:
         task_id = str(uuid.uuid4())
         # Record created_at before the submit delay so the compilation window
         # is anchored to when the job arrived, not when it was accepted.
-        task = Task(config, datetime.now(), task_id)
+        task = Task(config, datetime.now(UTC), task_id)
 
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}",

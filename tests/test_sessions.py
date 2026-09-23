@@ -1,6 +1,7 @@
+import time
+
 from utils import TEST_MACHINE_NAME, TEST_PROJECT
 from utils import TestTask as TT
-import time
 
 
 def test_session_info_fields(qscheduler):

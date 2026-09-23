@@ -1,14 +1,19 @@
-from typing import Sequence
-import requests
+import json
 import os
 import subprocess
 import time
-import json
+from collections.abc import Sequence
+
+import requests
 
 OK_OUTCOME = {"type": "Ok"}
 TEST_PROJECT = "test-project"
 TEST_MACHINE_NAME = "TestMachine"
 TEST_USER = "test-user"
+
+
+class QSchedulerError(Exception):
+    pass
 
 
 class TestTask:
@@ -113,7 +118,9 @@ class QScheduler:
 
     def _start_binary(self, log_name="qscheduler.log"):
         log_path = os.path.join(self.working_dir, log_name)
-        self._log_file = open(log_path, "w")
+        # Handle outlives this function: it is the subprocess' stdout/stderr and
+        # is closed in stop()/cleanup, so a context manager is not applicable.
+        self._log_file = open(log_path, "w")  # noqa: SIM115
         self._process = subprocess.Popen(
             [self._binary, "serve", "--port", str(self.port)],
             stdout=self._log_file,
@@ -249,7 +256,7 @@ class QScheduler:
         expect_error: int | None = None,
     ):
         if session_id is not None and project is not None:
-            raise Exception("Cannot set both session_id and project")
+            raise ValueError("Cannot set both session_id and project")
         if session_id is None and project is None:
             # Attach to default project
             project = TEST_PROJECT
@@ -276,7 +283,7 @@ class QScheduler:
             )
             return r
         if not r.ok:
-            raise Exception(f"HTTP {r.status_code} submitting task: {r.text}")
+            raise QSchedulerError(f"HTTP {r.status_code} submitting task: {r.text}")
         return r.json()
 
     def new_session(
@@ -338,12 +345,12 @@ class QScheduler:
             if state == target:
                 return state
             if state == "closed":
-                raise Exception(
+                raise QSchedulerError(
                     f"Session {session_id}: expected state {target} but got {state}"
                 )
             time.sleep(wait_time)
             wait_time += 0.1
-        raise Exception(
+        raise QSchedulerError(
             f"Session {session_id}: expected state {target} but got {state} after {TIMEOUT}s"
         )
 
@@ -358,12 +365,12 @@ class QScheduler:
             if state in target:
                 return state
             if state in ("failed", "finished", "cancelled"):
-                raise Exception(
+                raise QSchedulerError(
                     f"Task {task_id}: expects state {target} but got {state}"
                 )
             time.sleep(wait_time)
             wait_time += 0.1
-        raise Exception(
+        raise QSchedulerError(
             f"Task {task_id}: expects state {target} but got {state} after {TIMEOUT}s"
         )
 
