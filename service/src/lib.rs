@@ -115,6 +115,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         .routes(routes!(sessions::create_session_handler))
         .routes(routes!(sessions::cancel_session_handler))
         .routes(routes!(machines::get_machine_arch))
+        .routes(routes!(machines::get_machine_about))
         .routes(routes!(machines::get_machine_calibration))
         .routes(routes!(projects::create_project_handler))
         .routes(routes!(projects::list_projects_handler))

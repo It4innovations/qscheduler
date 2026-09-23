@@ -1,5 +1,5 @@
 use crate::TaskId;
-use crate::backend::{Backend, BackendFuture, ByteStream, FromBackendMessage};
+use crate::backend::{Backend, BackendFuture, BackendVersion, ByteStream, FromBackendMessage};
 use crate::error::RunnerError;
 use crate::task::{CompletedState, TaskState};
 use bytes::Bytes;
@@ -51,6 +51,10 @@ struct TestBackendTaskBody {
 }
 
 impl Backend for TestBackend {
+    fn get_name(&self) -> &'static str {
+        "test"
+    }
+
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str) {
         let mut tasks = self.tasks.lock().unwrap();
         let task = tasks.get_mut(backend_id).unwrap();
@@ -168,6 +172,10 @@ impl Backend for TestBackend {
 
     fn get_arch(self: Arc<Self>) -> BackendFuture<String> {
         Box::pin(std::future::ready(Ok("{\"arch\": \"Test\"}".to_string())))
+    }
+
+    fn get_version(self: Arc<Self>) -> BackendFuture<BackendVersion> {
+        Box::pin(std::future::ready(Ok(BackendVersion::Plain("1.0"))))
     }
 
     fn get_calibration(

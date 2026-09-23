@@ -444,6 +444,18 @@ class QScheduler:
         r.raise_for_status()
         return r.text
 
+    def get_machine_about(
+        self, machine: str = TEST_MACHINE_NAME, expect_error: int | None = None
+    ):
+        r = requests.get(self.url(f"machine/{machine}/about"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
     def version(self) -> str:
         r = requests.get(self.url("version"), timeout=5)
         r.raise_for_status()
