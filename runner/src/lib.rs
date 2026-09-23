@@ -15,8 +15,8 @@ pub mod task;
 
 use crate::error::RunnerError;
 
-pub use backend::BackendConfig;
-pub use backend_iqm::IqmBackendConfig;
+pub use backend::{BackendConfig, BackendVersion};
+pub use backend_iqm::{IqmBackendConfig, IqmVersion};
 pub use callback::NotifyConfig;
 pub use machine::MachineId;
 pub use project::Project;

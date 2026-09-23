@@ -1,4 +1,4 @@
-use crate::backend_iqm::IqmBackendConfig;
+use crate::backend_iqm::{IqmBackendConfig, IqmVersion};
 use bytes::Bytes;
 use serde::Deserialize;
 use std::future::Future;
@@ -23,6 +23,16 @@ pub(crate) type BackendFuture<T> = Pin<Box<dyn Future<Output = crate::Result<T>>
 /// A boxed stream of raw result/artifact bytes as they arrive from the backend.
 pub(crate) type ByteStream = Pin<Box<dyn futures_util::Stream<Item = crate::Result<Bytes>> + Send>>;
 
+/// Backend-specific version info.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum BackendVersion {
+    /// Versions reported by the IQM server's `/about` endpoint.
+    Iqm(IqmVersion),
+    /// Plain version string (test backend).
+    Plain(&'static str),
+}
+
 pub(crate) trait Backend: Send + Sync {
     fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes);
     /// Re-attach to a task that was already submitted before a restart, using the
@@ -37,6 +47,8 @@ pub(crate) trait Backend: Send + Sync {
     );
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str);
     fn get_arch(self: Arc<Self>) -> BackendFuture<String>;
+    fn get_version(self: Arc<Self>) -> BackendFuture<BackendVersion>;
+    fn get_name(&self) -> &'static str;
     fn get_calibration(
         self: Arc<Self>,
         calibration_id: &str,

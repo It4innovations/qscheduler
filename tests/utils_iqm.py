@@ -19,6 +19,15 @@ _COMPILE_STEPS = [
 ]
 _COMPILE_DURATION = sum(d for _, _, d in _COMPILE_STEPS)
 
+# Mirrors the shape of a real IQM server's GET /about response.
+ABOUT = {
+    "iqm_server": True,
+    "license_mode": "single_station",
+    "qccsw_version": "4.6.3-00027338-127701ef",
+    "server_version": "2.204.9.20260728110546",
+    "station_control_version": "49.0.3",
+}
+
 
 def make_result(obj):
     return Response(
@@ -183,6 +192,9 @@ class IqmFakeBackend:
         return Response("Unauthorized", status=401)
 
     def start(self):
+        self.httpserver.expect_request("/about", method="GET").respond_with_handler(
+            lambda request: make_result(ABOUT)
+        )
         self.httpserver.expect_request(
             f"/api/v1/jobs/{self.machine_name}/circuit",
             method="POST",

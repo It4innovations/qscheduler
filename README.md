@@ -543,6 +543,44 @@ Fetch the backend's architecture description.
 
 ---
 
+### `GET /machine/{machine}/about`
+
+Describe the machine's backend: its type and version information.
+
+**Response `200`**
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | Backend type: `iqm` or `test`. |
+| `version` | object \| string | Backend-specific version info (see below). |
+
+For the `iqm` backend, `version` holds the version fields reported by the IQM server's `/about`
+endpoint (other fields of that response are omitted):
+
+```json
+{
+  "type": "iqm",
+  "version": {
+    "qccsw_version": "4.6.3-00027338-127701ef",
+    "server_version": "2.204.9.20260728110546",
+    "station_control_version": "49.0.3"
+  }
+}
+```
+
+For the `test` backend, `version` is a plain string:
+
+```json
+{ "type": "test", "version": "1.0" }
+```
+
+**Response `404`** — unknown machine.
+
+**Response `500`** — backend error (including an IQM `/about` response missing any of the
+version fields above).
+
+---
+
 ### `GET /machine/{machine}/calibration/{calibration}/{endpoint}`
 
 Fetch a calibration data set from the backend.

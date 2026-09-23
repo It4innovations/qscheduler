@@ -1,6 +1,5 @@
 use crate::backend::{BackendFuture, ByteStream, FromBackendMessage, create_backend};
 use crate::config::RunnerConfiguration;
-use crate::db;
 use crate::db::close_dead_session;
 use crate::error::RunnerError;
 use crate::launcher::start_launcher;
@@ -8,6 +7,7 @@ use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionInfo, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskMap, TaskParent, TaskState};
+use crate::{BackendVersion, db};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
@@ -503,6 +503,17 @@ impl Core {
     pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<BackendFuture<String>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_arch())
+    }
+
+    pub fn get_about(
+        &self,
+        machine_id: MachineId,
+    ) -> crate::Result<(&'static str, BackendFuture<BackendVersion>)> {
+        let machine = self.machine_map.find_machine(machine_id)?;
+        let backend = Arc::clone(machine.backend());
+        let name = backend.get_name();
+        let version = backend.get_version();
+        Ok((name, version))
     }
 
     pub fn get_calibration(

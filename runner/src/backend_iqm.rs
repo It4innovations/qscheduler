@@ -1,5 +1,5 @@
 use crate::TaskId;
-use crate::backend::{Backend, BackendFuture, ByteStream, FromBackendMessage};
+use crate::backend::{Backend, BackendFuture, BackendVersion, ByteStream, FromBackendMessage};
 use crate::error::RunnerError;
 use crate::task::{CompletedState, TaskState};
 use bytes::Bytes;
@@ -33,6 +33,14 @@ struct IqmBackend {
     client: reqwest::Client,
     backend_sender: UnboundedSender<FromBackendMessage>,
     monitor_sender: UnboundedSender<MonitorCommand>,
+}
+
+/// Version fields of the IQM `GET /about` response; other keys are ignored.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, utoipa::ToSchema)]
+pub struct IqmVersion {
+    pub qccsw_version: String,
+    pub server_version: String,
+    pub station_control_version: String,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +90,10 @@ impl JobStatusResponse {
 }
 
 impl Backend for IqmBackend {
+    fn get_name(&self) -> &'static str {
+        "iqm"
+    }
+
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str) {
         let backend_id = backend_id.to_string();
         let span = tracing::info_span!("iqm_cancel_task", %task_id, %backend_id);
@@ -205,6 +217,23 @@ impl Backend for IqmBackend {
     fn get_arch(self: Arc<Self>) -> BackendFuture<String> {
         let request = self.setup_qc_request(Method::GET, "artifacts/static-quantum-architectures");
         Box::pin(fetch_text(request))
+    }
+
+    fn get_version(self: Arc<Self>) -> BackendFuture<BackendVersion> {
+        let url = format!("{}/about", self.config.url);
+        debug!(%url, "IQM about request");
+        let request = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "application/json");
+        Box::pin(async move {
+            let text = fetch_text(request).await?;
+            let version: IqmVersion = serde_json::from_str(&text).map_err(|e| {
+                RunnerError::GenericError(format!("Invalid IQM /about response: {e}"))
+            })?;
+            Ok(BackendVersion::Iqm(version))
+        })
     }
 
     fn get_calibration(
