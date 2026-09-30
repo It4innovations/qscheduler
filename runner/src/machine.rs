@@ -4,6 +4,7 @@ use crate::error::RunnerError;
 use crate::session::{Session, SessionId};
 use crate::task::{Task, TaskId};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -28,8 +29,9 @@ pub(crate) enum QueueItem {
 pub struct MachineConfig {
     pub name: String,
     pub queue_size: usize,
-    pub session_check_interval: Duration,
+    pub limit_check_interval: Duration,
     pub max_session_time: Duration,
+    pub default_task_time_limit: Duration,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }
@@ -46,6 +48,10 @@ pub(crate) struct ResumeTask {
     pub backend_id: String,
     pub payload: Bytes,
     pub cancel: bool,
+    /// When the backend first reported the task running, if it did before the restart;
+    /// the time limit deadline is rebuilt from it.
+    pub started_at: Option<DateTime<Utc>>,
+    pub time_limit: Duration,
 }
 
 pub(crate) struct Machine {

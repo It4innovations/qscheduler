@@ -74,7 +74,8 @@ class QScheduler:
         self.notify_token = None
         self.queue_size = 2
         self.max_session_time = None
-        self.session_check_interval = None
+        self.limit_check_interval = None
+        self.default_task_time_limit = None
         self._process = None
         self._log_file = None
 
@@ -107,8 +108,10 @@ class QScheduler:
             args.append(f"--notify-token={self.notify_token}")
         if self.max_session_time is not None:
             args.append(f"--max-session-time={self.max_session_time}s")
-        if self.session_check_interval is not None:
-            args.append(f"--session-check-interval={self.session_check_interval}s")
+        if self.limit_check_interval is not None:
+            args.append(f"--limit-check-interval={self.limit_check_interval}s")
+        if self.default_task_time_limit is not None:
+            args.append(f"--default-task-time-limit={self.default_task_time_limit}s")
         args += self.backend.machine_args()
         subprocess.run(
             args,
@@ -253,6 +256,7 @@ class QScheduler:
         machine: str = TEST_MACHINE_NAME,
         project: str | None = None,
         user: str = TEST_USER,
+        time_limit_ms: int | None = None,
         expect_error: int | None = None,
     ):
         if session_id is not None and project is not None:
@@ -269,6 +273,8 @@ class QScheduler:
         }
         if session_id is not None:
             msg["session_id"] = session_id
+        if time_limit_ms is not None:
+            msg["time_limit_ms"] = time_limit_ms
 
         r = requests.post(
             self.url("tasks"),

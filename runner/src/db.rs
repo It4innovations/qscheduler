@@ -128,6 +128,8 @@ pub struct RestoredTask {
     pub user: String,
     pub payload: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
+    pub time_limit_ms: Option<i64>,
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 /// A non-terminal session loaded from the database during startup restoration.
@@ -404,13 +406,14 @@ pub async fn insert_task(
     config: &TaskConfig,
 ) -> crate::Result<(TaskId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at",
+        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload, time_limit_ms) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_u32() as i32)
     .bind(config.parent.session_id().map(|s| s.as_i64()))
     .bind(config.parent.project_id().map(|p| p.as_i32()))
     .bind(&config.user)
     .bind(config.payload.as_ref())
+    .bind(config.time_limit.as_millis() as i64)
     .fetch_one(pool)
     .await?;
 
@@ -420,6 +423,19 @@ pub async fn insert_task(
     let task_id = TaskId::try_from(id as u64)
         .map_err(|_| crate::error::RunnerError::GenericError("invalid task id from db".into()))?;
     Ok((task_id, created_at))
+}
+
+/// Records when the backend first reported the task as running; later reports are ignored.
+pub async fn update_task_started(pool: &PgPool, task_id: TaskId, started_at: DateTime<Utc>) {
+    if let Err(e) =
+        sqlx::query("UPDATE tasks SET started_at = $2 WHERE id = $1 AND started_at IS NULL")
+            .bind(task_id.as_i64())
+            .bind(started_at)
+            .execute(pool)
+            .await
+    {
+        tracing::error!(%task_id, error = %e, "failed to update task started_at in db");
+    }
 }
 
 pub async fn update_session_exec_time(pool: &PgPool, session_id: SessionId, exec_time_ms: i64) {
@@ -487,7 +503,9 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
 /// Load all tasks that are still in a non-terminal state (stored as `waiting`).
 pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>> {
     sqlx::query_as::<_, RestoredTask>(
-        "SELECT id, machine_id, session_id, project_id, backend_id, \"user\", payload, created_at FROM tasks WHERE state = 'waiting'",
+        "SELECT id, machine_id, session_id, project_id, backend_id, \"user\", payload, created_at, \
+                time_limit_ms, started_at \
+         FROM tasks WHERE state = 'waiting'",
     )
     .fetch_all(pool)
     .await
@@ -526,6 +544,8 @@ struct TaskInfoRow {
     finished_at: Option<DateTime<Utc>>,
     exec_time_ms: Option<i64>,
     created_at: DateTime<Utc>,
+    time_limit_ms: Option<i64>,
+    started_at: Option<DateTime<Utc>>,
 }
 
 impl TaskInfoRow {
@@ -546,6 +566,8 @@ impl TaskInfoRow {
             machine: self.machine,
             state,
             created_at: self.created_at,
+            time_limit_ms: self.time_limit_ms.map(|ms| ms as u64),
+            started_at: self.started_at,
             finished_at: self.finished_at,
             exectime_ms: self.exec_time_ms,
             error: self.error,
@@ -563,7 +585,7 @@ pub(crate) async fn find_task_info(
     sqlx::query_as::<_, TaskInfoRow>(
         "SELECT t.id, m.name AS machine, t.session_id, p.name AS project, t.backend_id, \
                 t.\"user\", t.state::text AS state, t.error, t.finished_at, t.exec_time_ms, \
-                t.created_at \
+                t.created_at, t.time_limit_ms, t.started_at \
          FROM tasks t \
          JOIN machines m ON m.id = t.machine_id \
          LEFT JOIN projects p ON p.id = t.project_id \

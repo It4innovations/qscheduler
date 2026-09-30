@@ -197,6 +197,9 @@ pub struct TaskConfig {
     pub parent: TaskParent,
     pub user: String,
     pub payload: Bytes,
+    /// Effective execution time limit, counted from when the backend first reports the task
+    /// as running. Resolved at submit time (explicit value or the machine's default).
+    pub time_limit: Duration,
 }
 
 impl Debug for TaskConfig {
@@ -208,6 +211,7 @@ impl Debug for TaskConfig {
             TaskParent::Session(session_id) => f.field("session", &session_id),
         };
         f.field("user", &self.user);
+        f.field("time_limit", &self.time_limit);
         f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
         f.finish()
     }
@@ -218,6 +222,8 @@ pub(crate) struct Task {
     state: TaskState,
     backend_id: Option<String>,
     created_at: DateTime<Utc>,
+    /// When the backend first reported the task as running (start of the time limit).
+    started_at: Option<DateTime<Utc>>,
     config: TaskConfig,
 }
 
@@ -228,6 +234,7 @@ impl Task {
             state: TaskState::Waiting,
             backend_id: None,
             created_at,
+            started_at: None,
             config,
         }
     }
@@ -243,6 +250,14 @@ impl Task {
 
     pub fn created_at(&self) -> DateTime<Utc> {
         self.created_at
+    }
+
+    pub fn started_at(&self) -> Option<DateTime<Utc>> {
+        self.started_at
+    }
+
+    pub fn set_started_at(&mut self, started_at: DateTime<Utc>) {
+        self.started_at = Some(started_at);
     }
 
     pub fn set_backend_id(&mut self, backend_id: String) {
@@ -277,6 +292,13 @@ pub struct TaskInfo {
     pub machine: String,
     pub state: TaskStateKind,
     pub created_at: DateTime<Utc>,
+    /// Execution time limit in milliseconds, counted from `started_at`. When exceeded, the task
+    /// is cancelled on the backend and ends `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_limit_ms: Option<u64>,
+    /// When the backend started running the task. Absent until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// Absent if the task is still `waiting` or `running`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -321,6 +343,8 @@ impl TaskInfo {
             machine,
             state: TaskStateKind::from(state),
             created_at: task.created_at(),
+            time_limit_ms: Some(task.config().time_limit.as_millis() as u64),
+            started_at: task.started_at(),
             finished_at,
             exectime_ms,
             error,

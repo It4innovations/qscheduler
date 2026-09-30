@@ -1,5 +1,6 @@
 use crate::backend_iqm::{IqmBackendConfig, IqmVersion};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
@@ -70,6 +71,13 @@ pub(crate) enum FromBackendMessage {
     TaskStateChange {
         task_id: TaskId,
         state: TaskState,
+    },
+    /// The backend started executing the task at `started_at` (backend's own timestamp, not
+    /// the time the message was produced). The task's time limit is counted from it. May be
+    /// reported more than once (e.g. after a restart); only the first report is used.
+    ExecutionStarted {
+        task_id: TaskId,
+        started_at: DateTime<Utc>,
     },
 }
 

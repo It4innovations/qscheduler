@@ -59,14 +59,19 @@ struct MachineConfigArgs {
     #[arg(long)]
     notify_token: Option<String>,
 
-    /// How often is session consumption stored into DB.
-    #[arg(long, value_parser = parse_human_time, default_value = "5s")]
-    session_check_interval: Duration,
+    /// How often session consumption is stored into DB and task time limits are checked.
+    #[arg(long, value_parser = parse_human_time, default_value = "2s")]
+    limit_check_interval: Duration,
 
     /// Maximum duration a session on this machine may request. Sessions requesting
     /// longer are rejected at submit time.
     #[arg(long, value_parser = parse_human_time, default_value = "2h")]
     max_session_time: Duration,
+
+    /// Execution time limit for tasks submitted without an explicit `time_limit_ms`.
+    /// Counted from when the backend starts running the task.
+    #[arg(long, value_parser = parse_human_time, default_value = "1h")]
+    default_task_time_limit: Duration,
 
     #[clap(subcommand)]
     backend: MachineBackendArgs,
@@ -81,8 +86,9 @@ impl MachineConfigArgs {
         MachineConfiguration {
             name: self.name,
             queue_size: self.queue_size,
-            session_check_interval_ms: self.session_check_interval.as_millis() as u32,
+            limit_check_interval_ms: self.limit_check_interval.as_millis() as u32,
             max_session_time_ms: self.max_session_time.as_millis() as u64,
+            default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
             notify,
             backend: self.backend.into_config(),
         }
@@ -105,9 +111,9 @@ struct IqmBackendArgs {
     #[arg(long)]
     machine_name: String,
 
-    /// Job status polling interval in milliseconds
+    /// Job status polling interval, e.g. `1s` or `500ms`
     #[arg(long, value_parser = parse_human_time)]
-    check_interval: Duration,
+    poll_interval: Duration,
 }
 
 // #[derive(Parser)]
@@ -136,7 +142,7 @@ impl MachineBackendArgs {
                 url: args.url,
                 token: args.token,
                 machine_name: args.machine_name,
-                check_interval: args.check_interval,
+                poll_interval: args.poll_interval,
             }),
         }
     }

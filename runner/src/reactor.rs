@@ -230,6 +230,14 @@ pub fn get_machine_id_by_name(core: &Core, name: &str) -> crate::Result<MachineI
     core.split().machine_map.find_machine_by_name(name)
 }
 
+pub fn get_machine_default_task_time_limit(core: &Core, machine_id: MachineId) -> Duration {
+    core.split()
+        .machine_map
+        .get_machine(machine_id)
+        .config()
+        .default_task_time_limit
+}
+
 pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<ProjectId> {
     let cached = core_ref
         .lock()

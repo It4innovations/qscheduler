@@ -26,6 +26,25 @@ def test_restore_running_task(qscheduler_test):
     qs.wait_for_finished(task_id)
 
 
+def test_restore_task_time_limit(qscheduler_test):
+    """A running task's time limit counts from its original start across a restart."""
+    qs = qscheduler_test
+    qs.limit_check_interval = 1
+    qs.start()
+
+    task_id = qs.submit(TT().compute_time(30), time_limit_ms=4_000)
+    qs.wait_for_running(task_id)
+    started_at = qs.get_task(task_id)["started_at"]
+    assert started_at is not None
+
+    qs.restart()
+
+    qs.wait_for_failed(task_id)
+    info = qs.get_task(task_id)
+    assert info["error"] == "Task time limit exceeded"
+    assert info["started_at"] == started_at
+
+
 def test_restore_waiting_task(qscheduler_test):
     """A task still waiting in the queue is re-queued and runs after a restart."""
     qs = qscheduler_test
@@ -109,7 +128,7 @@ def test_restore_dangling_session_closed_at_last_checkpoint(qscheduler_test):
     restart time (which would overstate how long it was open by however long the
     process was down)."""
     qs = qscheduler_test
-    qs.session_check_interval = 1
+    qs.limit_check_interval = 1
     qs.start()
 
     session_id = qs.new_session(time_limit=60)

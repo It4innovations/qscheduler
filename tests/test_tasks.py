@@ -146,3 +146,51 @@ def test_cancel_finished_task(qscheduler):
 def test_cancel_nonexistent_task(qscheduler):
     qscheduler.start()
     qscheduler.cancel_task(999_999, expect_error=404)
+
+
+def test_task_time_limit_exceeded(qscheduler):
+    qscheduler.limit_check_interval = 1
+    qscheduler.start()
+    t = qscheduler.submit(TT().compute_time(30), time_limit_ms=1_000)
+    qscheduler.wait_for_failed(t)
+
+    info = qscheduler.get_task(t)
+    assert info["error"] == "Task time limit exceeded"
+    assert info["time_limit_ms"] == 1_000
+    assert info["started_at"] is not None
+
+
+def test_task_time_limit_not_exceeded(qscheduler_test):
+    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.start()
+    t = qscheduler_test.submit(TT().compute_time(1), time_limit_ms=10_000)
+    qscheduler_test.wait_for_finished(t)
+    assert qscheduler_test.get_task(t)["time_limit_ms"] == 10_000
+
+
+def test_task_time_limit_default(qscheduler_test):
+    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.default_task_time_limit = 1
+    qscheduler_test.start()
+    t = qscheduler_test.submit(TT().compute_time(30))
+    qscheduler_test.wait_for_failed(t)
+
+    info = qscheduler_test.get_task(t)
+    assert info["error"] == "Task time limit exceeded"
+    assert info["time_limit_ms"] == 1_000
+
+
+def test_task_time_limit_zero_rejected(qscheduler_test):
+    qscheduler_test.start()
+    qscheduler_test.submit(TT(), time_limit_ms=0, expect_error=422)
+
+
+def test_task_time_limit_ignores_queue_wait(qscheduler_test):
+    """The limit counts from when the backend runs the task, not from submission."""
+    qscheduler_test.queue_size = 1
+    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.start()
+    t0 = qscheduler_test.submit(TT().compute_time(3))
+    t1 = qscheduler_test.submit(TT().compute_time(1), time_limit_ms=2_000)
+    qscheduler_test.wait_for_finished(t0)
+    qscheduler_test.wait_for_finished(t1)
