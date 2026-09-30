@@ -59,6 +59,7 @@ impl Core {
                     limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
                     max_session_time: Duration::from_millis(m.max_session_time_ms),
                     default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
+                    max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
                     notify: m.notify,
                     backend: m.backend,
                 },
@@ -289,6 +290,7 @@ impl Core {
                                 cancel: session_id.is_some(),
                                 started_at: t.started_at,
                                 time_limit,
+                                project_id,
                             });
                     } else {
                         tracing::warn!(

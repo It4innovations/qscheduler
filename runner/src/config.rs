@@ -15,6 +15,12 @@ fn default_task_time_limit_ms() -> u64 {
     60 * 60 * 1000
 }
 
+/// Default maximum clock skew (4 seconds) for machines whose stored configuration predates the
+/// `max_clock_skew_ms` field.
+fn default_max_clock_skew_ms() -> u64 {
+    4 * 1000
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MachineConfiguration {
     pub name: String,
@@ -30,6 +36,10 @@ pub struct MachineConfiguration {
     /// Time limit applied to tasks submitted without an explicit `time_limit_ms`.
     #[serde(default = "default_task_time_limit_ms")]
     pub default_task_time_limit_ms: u64,
+    /// Assumed upper bound of how far the backend's clock may lag behind ours; used to keep the
+    /// running-time estimate of tasks from ever exceeding the true time.
+    #[serde(default = "default_max_clock_skew_ms")]
+    pub max_clock_skew_ms: u64,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }

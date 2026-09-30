@@ -151,3 +151,20 @@ def test_session_cancel_already_closed(qscheduler):
 def test_cancel_nonexistent_session(qscheduler):
     qscheduler.start()
     qscheduler.cancel_session(999_999, expect_error=404)
+
+
+def test_session_task_time_charged_only_via_session(qscheduler_test):
+    """A task in a session isn't charged to the project itself (the session is): the
+    project's consumption equals the session's exec time, not session + task time."""
+    qs = qscheduler_test
+    qs.limit_check_interval = 1
+    qs.start()
+    s = qs.new_session(time_limit=30)
+    qs.wait_for_session_open(s)
+    t = qs.submit(TT().compute_time(2.5), session_id=s)
+    qs.wait_for_finished(t)
+    qs.cancel_session(s)
+    qs.wait_for_session_closed(s)
+
+    session_ms = qs.get_session(s)["exectime_ms"]
+    assert abs(qs.get_project(TEST_PROJECT)["consumed_ms"] - session_ms) < 100

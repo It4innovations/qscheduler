@@ -60,9 +60,10 @@ qscheduler machine add <NAME> [OPTIONS] <BACKEND> [BACKEND OPTIONS]
 | `--queue-size <N>` | Maximum number of tasks that can be queued on this machine (default: `4`). |
 | `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state, or a session on this machine opens or closes. See [Notifications](#notifications). |
 | `--notify-token <TOKEN>` | Arbitrary token included in notification payloads. |
-| `--limit-check-interval <DURATION>` | How often session time-consumption is persisted to the database and task time limits are checked, e.g. `5s` (default: `2s`). |
+| `--limit-check-interval <DURATION>` | How often session time-consumption is persisted to the database and task and project time limits are checked for running work, e.g. `5s` (default: `2s`). |
 | `--max-session-time <DURATION>` | Maximum duration a session on this machine may request, e.g. `2h`. Sessions requesting longer are rejected at submit time (default: `2h`). |
 | `--default-task-time-limit <DURATION>` | Execution time limit for tasks submitted without `time_limit_ms`, e.g. `30m` (default: `1h`). |
+| `--max-clock-skew <DURATION>` | Assumed maximum amount by which the backend's clock lags this host's (default: `4s`). Running tasks' time is estimated so it never exceeds the true time while the skew stays within this bound, so time limits never fail a task early; the estimate may lag the true time by up to this amount (plus one poll interval), letting a task overrun its limit or its project's budget slightly. |
 
 `<BACKEND>` is one of:
 
@@ -85,6 +86,11 @@ qscheduler machine add QuantumDevice iqm --url https://iqm.machine.com --token y
 | `--token <TOKEN>` | Bearer token for authentication. |
 | `--machine-name <NAME>` | Name of the target quantum device on the IQM server. |
 | `--poll-interval <DURATION>` | Polling interval for job status, as a humantime string, e.g. `1s`/`500ms` (a unit suffix is required). |
+
+If the IQM server is unreachable or returns errors, a job is never given up on: its polls back
+off exponentially (starting at `--poll-interval`, capped at 60s) and return to the normal
+interval after the first successful poll. A cancel that can't be delivered is retried on the
+job's later polls. Each poll/cancel request times out after 10s.
 
 `qscheduler machine update <NAME> ...` is intended to change an existing machine's configuration
 using the same arguments as `add`.
@@ -292,7 +298,7 @@ Submit a task for execution.
 | `project` | string | exactly one of `project` / `session_id` | Name of the project to charge the task's time to. |
 | `session_id` | integer | exactly one of `project` / `session_id` | Session to associate the task with. The session must be in the `"open"` state or the task is rejected. |
 | `user` | string | yes | Free-form identifier of the user submitting the task, stored alongside the task. |
-| `time_limit_ms` | integer | no | Maximum execution time in milliseconds, counted from when the backend starts running the task (queue time doesn't count). When exceeded, the task is cancelled on the backend and ends `"failed"` with error `"Task time limit exceeded"`. Checked every machine `--limit-check-interval`, so it may overrun by up to that interval. Defaults to the machine's `--default-task-time-limit`. |
+| `time_limit_ms` | integer | no | Maximum execution time in milliseconds, counted from when the backend starts running the task (queue time doesn't count). When exceeded, the task is cancelled on the backend and ends `"failed"` with error `"Task time limit exceeded"`. Enforced with a running-time estimate that never exceeds the true time (see `--max-clock-skew`) and checked every machine `--limit-check-interval`, so a task is never stopped early but may overrun slightly. Defaults to the machine's `--default-task-time-limit`. |
 
 **Request body** — `application/octet-stream` — raw task payload forwarded to the backend.
 
@@ -322,8 +328,8 @@ restart) — the service falls back to the database for terminal tasks.
 | `state` | string | always | One of `"waiting"`, `"running"`, `"finished"`, `"failed"`, `"cancelled"`. |
 | `created_at` | timestamp | always | When the task was submitted. |
 | `time_limit_ms` | integer | always (except tasks created before time limits existed) | Execution time limit in milliseconds, counted from `started_at`. |
-| `started_at` | timestamp | once the backend started running the task | Start of the time limit. |
-| `finished_at` | timestamp | once in a terminal state | When the task reached its final state. |
+| `started_at` | timestamp | once the backend started running the task | When the backend started executing the task, on the **backend's clock**. |
+| `finished_at` | timestamp | once in a terminal state | When the task reached its final state. For a task that ran on the backend this is the backend's timestamp (**backend's clock**; `finished_at − started_at` equals `exectime_ms`); for a task ended by the scheduler itself (e.g. cancelled while queued) it's the scheduler's time. |
 | `exectime_ms` | integer | if any execution time was consumed | Milliseconds of execution time. |
 | `error` | string | only when `state` is `"failed"` | Failure reason. |
 
@@ -469,6 +475,12 @@ eventually reaches the `"closed"` state.
 Register a project — a named, time-accounted budget that tasks and sessions are charged
 against.
 
+A task submitted with `project` is charged its execution time; a task in a session is not
+charged itself — the session's open time is. Running work counts against the budget while it
+runs (checked every machine `--limit-check-interval`): once the budget is exhausted, the
+project's open sessions are closed and its submitted tasks are cancelled and end `"failed"` with
+error `"Project time limit exceeded"`, as do its tasks still waiting in the queue.
+
 **Request body**
 
 ```json
@@ -497,7 +509,9 @@ List all projects.
 
 ### `GET /projects/{name}`
 
-Get a single project by name.
+Get a single project by name. `consumed_ms` is confirmed consumption only — finished tasks and
+checkpointed session time — so it never decreases. Running tasks' time counts toward the limit
+checks but is not included until the task finishes (then with its exact execution time).
 
 **Response `200`**
 

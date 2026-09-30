@@ -136,6 +136,7 @@ impl Backend for TestBackend {
             let _ = sender.send(FromBackendMessage::ExecutionStarted {
                 task_id,
                 started_at: Utc::now(),
+                observed_at: tokio::time::Instant::now(),
             });
             let _ = sender.send(FromBackendMessage::TaskStateChange {
                 task_id,

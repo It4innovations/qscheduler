@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::Instant;
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -72,12 +73,14 @@ pub(crate) enum FromBackendMessage {
         task_id: TaskId,
         state: TaskState,
     },
-    /// The backend started executing the task at `started_at` (backend's own timestamp, not
-    /// the time the message was produced). The task's time limit is counted from it. May be
-    /// reported more than once (e.g. after a restart); only the first report is used.
+    /// The backend started executing the task at `started_at` (backend's own clock; reported
+    /// as the task's `started_at`). `observed_at` is when we learned it, on our clock — the
+    /// execution certainly started before then. Both feed a running-time estimate that never
+    /// exceeds the true time. May be reported more than once (e.g. after a restart).
     ExecutionStarted {
         task_id: TaskId,
         started_at: DateTime<Utc>,
+        observed_at: Instant,
     },
 }
 

@@ -167,6 +167,7 @@ impl From<ProjectRow> for Project {
             consumed: Duration::from_millis(r.consumed_ms as u64),
             limit: Duration::from_millis(r.limit_ms as u64),
             active: r.active,
+            in_flight: Duration::ZERO,
         }
     }
 }
