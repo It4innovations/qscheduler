@@ -9,7 +9,7 @@ use crate::task::{CompletedState, TaskInfo, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, SubsecRound, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +62,63 @@ struct RunningSession {
 
 /// Error recorded on a task cancelled because it exceeded its time limit.
 const TASK_TIME_LIMIT_ERROR: &str = "Task time limit exceeded";
+/// Error recorded on a task failed because its project ran out of time.
+const PROJECT_LIMIT_ERROR: &str = "Project time limit exceeded";
+
+/// A task the backend reported as executing, tracked until its terminal state.
+///
+/// Its running time is an estimate that must never exceed the true time (so a task is never
+/// failed early), kept as "at least `elapsed` had passed at local `elapsed_at`" and advanced by
+/// our monotonic clock; wall-clock time is only used once, to map the backend's start time.
+struct RunningTask {
+    elapsed: Duration,
+    elapsed_at: Instant,
+    time_limit: Duration,
+    /// Project charged for the task's time; `None` for session tasks (charged via the session).
+    project_id: Option<ProjectId>,
+    /// Estimate already added to the project's `in_flight`. Never persisted or reported: on
+    /// completion it's replaced by the backend's exact exec time (see `settle_in_flight`).
+    charged: Duration,
+}
+
+impl RunningTask {
+    fn new(elapsed: Duration, time_limit: Duration, project_id: Option<ProjectId>) -> Self {
+        RunningTask {
+            elapsed,
+            elapsed_at: Instant::now(),
+            time_limit,
+            project_id,
+            charged: Duration::ZERO,
+        }
+    }
+
+    /// Estimated running time now (never more than the true time).
+    fn elapsed(&self) -> Duration {
+        self.elapsed + self.elapsed_at.elapsed()
+    }
+
+    /// Raises the estimate to another lower bound of the running time, if it's larger. Taking
+    /// the larger of two lower bounds keeps it a lower bound.
+    fn raise_elapsed(&mut self, elapsed: Duration) {
+        let current = self.elapsed();
+        self.elapsed = current.max(elapsed);
+        self.elapsed_at = Instant::now();
+    }
+
+    fn is_over_time_limit(&self) -> bool {
+        self.elapsed() >= self.time_limit
+    }
+}
+
+/// Lower bound of a task's running time from the backend's reported start, assuming the
+/// backend's clock lags ours by at most `max_clock_skew`: time since `started_at + skew`.
+fn elapsed_since_backend_start(started_at: DateTime<Utc>, max_clock_skew: Duration) -> Duration {
+    let skew = chrono::Duration::from_std(max_clock_skew).unwrap_or(chrono::Duration::MAX);
+    (Utc::now() - started_at)
+        .checked_sub(&skew)
+        .and_then(|d| d.to_std().ok())
+        .unwrap_or(Duration::ZERO)
+}
 
 enum DbUpdate {
     TaskSubmitted {
@@ -208,36 +265,56 @@ fn request_backend_cancel(
     }
 }
 
-/// The instant a task started at `started_at` (wall clock, as reported by the backend)
-/// exceeds `time_limit`; already-elapsed time counts against the limit.
-fn time_limit_deadline(started_at: DateTime<Utc>, time_limit: Duration) -> Instant {
-    let elapsed = (Utc::now() - started_at).to_std().unwrap_or(Duration::ZERO);
-    Instant::now() + time_limit.saturating_sub(elapsed)
-}
-
-/// Cancels every running task whose time limit deadline has passed. The task is remembered in
-/// `timed_out` so that the backend's cancellation confirmation is recorded as a failure.
-fn check_task_deadlines(
-    task_deadlines: &mut HashMap<TaskId, Instant>,
-    timed_out: &mut HashSet<TaskId>,
+/// Periodic check of submitted tasks: adds running tasks' estimated time to their projects'
+/// `in_flight`, then cancels every task that exceeded its own time limit or whose project is
+/// over its limit (`consumed + in_flight`). Project charging and the project limit apply only
+/// to project-parented tasks; a session task is accounted through its session (see the session
+/// branch of the periodic check).
+/// The reason is remembered in `fail_reasons` so that the backend's cancellation confirmation
+/// is recorded as a failure.
+fn check_running_tasks(
+    running_tasks: &mut HashMap<TaskId, RunningTask>,
+    fail_reasons: &mut HashMap<TaskId, &'static str>,
     submitted_tasks: &mut HashMap<TaskId, bool>,
     task_map: &TaskMap,
+    project_map: &mut ProjectMap,
     backend: &Arc<dyn Backend>,
 ) {
-    let now = Instant::now();
-    task_deadlines.retain(|&task_id, deadline| {
-        if *deadline > now {
-            return true;
+    for rt in running_tasks.values_mut() {
+        if let Some(project_id) = rt.project_id {
+            // Capped at the task's own limit: past it the task is being cancelled, and if the
+            // backend can't confirm that (e.g. unreachable), the estimate mustn't grow without
+            // bound. The exact exec time replaces it once the task's final state arrives.
+            let elapsed = rt.elapsed().min(rt.time_limit);
+            project_map
+                .get_project_mut(project_id)
+                .add_in_flight(elapsed.saturating_sub(rt.charged));
+            rt.charged = rt.charged.max(elapsed);
         }
-        if let Some(cancelling) = submitted_tasks.get_mut(&task_id)
-            && !*cancelling
+    }
+    for (&task_id, cancelling) in submitted_tasks.iter_mut() {
+        if *cancelling {
+            continue;
+        }
+        let reason = if running_tasks
+            .get(&task_id)
+            .is_some_and(|rt| rt.is_over_time_limit())
         {
-            debug!(%task_id, "Task time limit exceeded");
-            timed_out.insert(task_id);
-            request_backend_cancel(task_map, backend, task_id, cancelling);
-        }
-        false
-    });
+            TASK_TIME_LIMIT_ERROR
+        } else if task_map
+            .find_task(task_id)
+            .and_then(|t| t.config().parent.project_id())
+            .and_then(|pid| project_map.find_project(pid))
+            .is_some_and(|p| p.is_over_limit())
+        {
+            PROJECT_LIMIT_ERROR
+        } else {
+            continue;
+        };
+        debug!(%task_id, reason, "Failing submitted task");
+        fail_reasons.insert(task_id, reason);
+        request_backend_cancel(task_map, backend, task_id, cancelling);
+    }
 }
 
 /// Cancels every submitted task of `s`, cancels its remaining queued tasks, and frees the
@@ -303,7 +380,7 @@ fn close_running_session(
 enum LauncherEvent {
     Notified,
     SessionEnd,
-    /// Periodic session quota checkpoint and task time limit check.
+    /// Periodic session quota checkpoint, task time limit and project limit check.
     PeriodicCheck,
     BackendMessage(FromBackendMessage),
 }
@@ -318,21 +395,29 @@ async fn launcher_main(
     resume_tasks: Vec<ResumeTask>,
 ) {
     debug!(%machine_id, "Starting launcher");
-    let (notifier, queue_size, mut limit_check_interval) = {
+    let (notifier, queue_size, max_clock_skew, mut limit_check_interval) = {
         let core = core_ref.lock().unwrap();
         let machine = core.split().machine_map.get_machine(machine_id);
-        let mut limit_check_interval = tokio::time::interval(machine.config().limit_check_interval);
+        let period = machine.config().limit_check_interval;
+        // No immediate first tick: the first check comes one full period after start.
+        let mut limit_check_interval = tokio::time::interval_at(Instant::now() + period, period);
         limit_check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let queue_size = machine.config().queue_size;
-        (machine.notifier().clone(), queue_size, limit_check_interval)
+        (
+            machine.notifier().clone(),
+            queue_size,
+            machine.config().max_clock_skew,
+            limit_check_interval,
+        )
     };
     let pool = core_ref.lock().unwrap().pool().clone();
     assert!(queue_size > 0);
     let mut submitted_tasks: HashMap<TaskId, bool> = HashMap::new();
-    // Time limit deadlines of tasks the backend reported as running.
-    let mut task_deadlines: HashMap<TaskId, Instant> = HashMap::new();
-    // Tasks cancelled for exceeding their time limit, awaiting the backend's confirmation.
-    let mut timed_out: HashSet<TaskId> = HashSet::new();
+    // Tasks the backend reported as executing, until their terminal state.
+    let mut running_tasks: HashMap<TaskId, RunningTask> = HashMap::new();
+    // Tasks cancelled for exceeding a limit (with the error to record), awaiting the backend's
+    // confirmation.
+    let mut fail_reasons: HashMap<TaskId, &'static str> = HashMap::new();
 
     for rt in resume_tasks {
         debug!(task_id = %rt.task_id, "Re-attaching submitted task to backend");
@@ -343,10 +428,21 @@ async fn launcher_main(
             .clone()
             .resume_task(rt.task_id, rt.backend_id, rt.payload, rt.cancel);
         submitted_tasks.insert(rt.task_id, rt.cancel);
+        // Restored projects start with `in_flight` at zero (it's never persisted) and their
+        // `consumed` from the DB excludes unfinished tasks, so the task starts uncharged here and
+        // is charged exactly once by the next periodic check. The local observation time didn't
+        // survive the restart, so the estimate comes from the backend's start alone.
         if !rt.cancel
             && let Some(started_at) = rt.started_at
         {
-            task_deadlines.insert(rt.task_id, time_limit_deadline(started_at, rt.time_limit));
+            running_tasks.insert(
+                rt.task_id,
+                RunningTask::new(
+                    elapsed_since_backend_start(started_at, max_clock_skew),
+                    rt.time_limit,
+                    rt.project_id,
+                ),
+            );
         }
     }
 
@@ -365,7 +461,7 @@ async fn launcher_main(
             } =>
                 LauncherEvent::SessionEnd,
             _ = async {
-                if running_session.is_some() || !task_deadlines.is_empty() {
+                if running_session.is_some() || !submitted_tasks.is_empty() {
                     limit_check_interval.tick().await;
                 } else {
                     pending().await
@@ -426,11 +522,12 @@ async fn launcher_main(
                         }
                     }
                     if matches!(event, LauncherEvent::PeriodicCheck) {
-                        check_task_deadlines(
-                            &mut task_deadlines,
-                            &mut timed_out,
+                        check_running_tasks(
+                            &mut running_tasks,
+                            &mut fail_reasons,
                             &mut submitted_tasks,
                             task_map,
+                            project_map,
                             &backend,
                         );
                     }
@@ -457,21 +554,37 @@ async fn launcher_main(
                     FromBackendMessage::ExecutionStarted {
                         task_id,
                         started_at,
+                        observed_at,
                     } => {
-                        // Start the time limit clock on the first start report of a task that
-                        // isn't being cancelled. A task restored with a persisted `started_at`
-                        // already has its deadline, so a repeated report is ignored.
-                        if submitted_tasks.get(&task_id) == Some(&false) {
+                        if let Some(&cancelling) = submitted_tasks.get(&task_id) {
                             let task = task_map.get_task_mut(task_id);
-                            if task.started_at().is_none() {
-                                // Truncated to the DB's precision so the value is stable across
-                                // a restart.
-                                let started_at = started_at.trunc_subsecs(6);
+                            // Truncated to the DB's precision so the value is stable across a
+                            // restart.
+                            let started_at = started_at.trunc_subsecs(6);
+                            // The larger of two lower bounds of the running time: since our own
+                            // observation (the execution started before it), and since the
+                            // backend's start shifted by the maximum clock skew.
+                            let elapsed = observed_at
+                                .elapsed()
+                                .max(elapsed_since_backend_start(started_at, max_clock_skew));
+                            match running_tasks.get_mut(&task_id) {
+                                // Already tracked (e.g. restored, then re-reported): only ever
+                                // raised, so it's never reset or charged twice.
+                                Some(rt) => rt.raise_elapsed(elapsed),
+                                None if !cancelling => {
+                                    running_tasks.insert(
+                                        task_id,
+                                        RunningTask::new(
+                                            elapsed,
+                                            task.config().time_limit,
+                                            task.config().parent.project_id(),
+                                        ),
+                                    );
+                                }
+                                None => {}
+                            }
+                            if task.started_at().is_none() && !cancelling {
                                 task.set_started_at(started_at);
-                                task_deadlines.insert(
-                                    task_id,
-                                    time_limit_deadline(started_at, task.config().time_limit),
-                                );
                                 db_updates.push(DbUpdate::TaskStarted {
                                     task_id,
                                     timestamp: started_at,
@@ -480,14 +593,19 @@ async fn launcher_main(
                         }
                     }
                     FromBackendMessage::TaskStateChange { task_id, mut state } => {
+                        // In-flight time charged to the project so far; replaced by the exact
+                        // exec time below.
+                        let mut charged = Duration::ZERO;
                         if state.is_final() {
-                            task_deadlines.remove(&task_id);
-                            if timed_out.remove(&task_id)
+                            if let Some(rt) = running_tasks.remove(&task_id) {
+                                charged = rt.charged;
+                            }
+                            if let Some(reason) = fail_reasons.remove(&task_id)
                                 && let TaskState::Cancelled { completed } = state
                             {
                                 state = TaskState::Failed {
                                     completed,
-                                    error: TASK_TIME_LIMIT_ERROR.to_string(),
+                                    error: reason.to_string(),
                                 };
                             }
                         }
@@ -568,12 +686,12 @@ async fn launcher_main(
                         if update_state {
                             let task = task_map.get_task_mut(task_id);
                             task.set_state(state);
-                            if !exec_time.is_zero()
+                            if (!exec_time.is_zero() || !charged.is_zero())
                                 && let Some(project_id) = task.config().parent.project_id()
                             {
                                 project_map
                                     .get_project_mut(project_id)
-                                    .update_consumed(exec_time);
+                                    .settle_in_flight(charged, exec_time);
                             }
                         }
                     }
@@ -683,7 +801,7 @@ async fn launcher_main(
                         .unwrap_or(false)
                 };
                 if project_limit_exceeded {
-                    let error = "Project time limit exceeded".to_string();
+                    let error = PROJECT_LIMIT_ERROR.to_string();
                     let state = TaskState::simple_error(error.clone());
                     let completed = *state.completed().unwrap();
                     if let Some(sender) = &notify_sender {

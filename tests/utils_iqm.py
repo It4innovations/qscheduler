@@ -37,7 +37,13 @@ def make_result(obj):
     )
 
 
+# Seconds the fake IQM server's clock is ahead (+) or behind (-) of the real one; applied to
+# every timestamp it reports. Tests monkeypatch it to simulate clock skew.
+CLOCK_OFFSET = 0.0
+
+
 def _fmt_ts(dt):
+    dt += timedelta(seconds=CLOCK_OFFSET)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
@@ -198,6 +204,8 @@ class IqmFakeBackend:
         self.httpserver = httpserver
         self.machine_name = "start24"
         self.token = "test-token-1234"
+        # When set, job status and cancel requests fail with 503 (simulated outage).
+        self.unavailable = False
 
     def _check_auth(self, request):
         expected = f"Bearer {self.token}"
@@ -205,6 +213,13 @@ class IqmFakeBackend:
 
     def _auth_error(self):
         return Response("Unauthorized", status=401)
+
+    def _job_response(self, request, handler):
+        if not self._check_auth(request):
+            return self._auth_error()
+        if self.unavailable:
+            return Response("Service Unavailable", status=503)
+        return make_result(handler())
 
     def start(self):
         self.httpserver.expect_request("/about", method="GET").respond_with_handler(
@@ -227,23 +242,13 @@ class IqmFakeBackend:
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}",
             method="GET",
-        ).respond_with_handler(
-            lambda request: (
-                self._auth_error()
-                if not self._check_auth(request)
-                else make_result(task.status())
-            )
-        )
+        ).respond_with_handler(lambda request: self._job_response(request, task.status))
 
         self.httpserver.expect_request(
             f"/api/v1/jobs/{task_id}/cancel",
             method="POST",
         ).respond_with_handler(
-            lambda request: (
-                self._auth_error()
-                if not self._check_auth(request)
-                else make_result(task.cancel() or {})
-            )
+            lambda request: self._job_response(request, lambda: task.cancel() or {})
         )
 
         artifacts = config.get("artifacts", {})

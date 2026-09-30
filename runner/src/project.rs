@@ -38,8 +38,13 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub active: bool,
+    /// Confirmed consumption: finished tasks and checkpointed session time, i.e. what the DB
+    /// holds (or is about to). Only ever grows; this is what the API reports.
     pub consumed: Duration,
     pub limit: Duration,
+    /// Estimated time of currently running project tasks. Counted by the limit checks but
+    /// never reported or persisted; replaced by the exact exec time when a task finishes.
+    pub in_flight: Duration,
 }
 
 impl Project {
@@ -47,12 +52,24 @@ impl Project {
         self.consumed += delta;
     }
 
+    pub fn add_in_flight(&mut self, delta: Duration) {
+        self.in_flight += delta;
+    }
+
+    /// Settles a finished task: drops its `charged` in-flight estimate and confirms the
+    /// `actual` consumed time, in whole milliseconds as the DB stores it (`tasks.exec_time_ms`),
+    /// so the in-memory `consumed` matches the DB's `consumed_ms` exactly.
+    pub fn settle_in_flight(&mut self, charged: Duration, actual: Duration) {
+        self.in_flight = self.in_flight.saturating_sub(charged);
+        self.consumed += Duration::from_millis(actual.as_millis() as u64);
+    }
+
     pub fn is_over_limit(&self) -> bool {
-        self.consumed >= self.limit
+        self.consumed + self.in_flight >= self.limit
     }
 
     pub fn has_time_for(&self, duration: Duration) -> bool {
-        self.consumed + duration < self.limit
+        self.consumed + self.in_flight + duration < self.limit
     }
 }
 

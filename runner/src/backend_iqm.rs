@@ -7,12 +7,13 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use reqwest::{Method, RequestBuilder};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::time::{MissedTickBehavior, sleep};
+use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{Instrument, debug, error, warn};
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -26,9 +27,27 @@ pub struct IqmBackendConfig {
 }
 
 enum MonitorCommand {
-    NewTask { task_id: TaskId, backend_id: String },
-    UnregisterTask { task_id: TaskId },
+    NewTask {
+        task_id: TaskId,
+        backend_id: String,
+    },
+    /// Cancel the job; retried on the task's later polls until an attempt succeeds.
+    Cancel {
+        task_id: TaskId,
+        backend_id: String,
+    },
+    /// Outcome of a cancel attempt spawned by the monitor.
+    CancelDone {
+        task_id: TaskId,
+        ok: bool,
+    },
 }
+
+/// Timeout of a single job poll or cancel request, so an unreachable server (e.g. dropped
+/// packets) can't stall the monitor loop; a timed-out request counts as a failed attempt.
+const IQM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound of the exponential backoff between polls of an unreachable job.
+const MAX_POLL_BACKOFF: Duration = Duration::from_secs(60);
 
 struct IqmBackend {
     config: IqmBackendConfig,
@@ -81,6 +100,11 @@ impl JobStatusResponse {
             .map(|e| e.timestamp)
     }
 
+    /// Timestamp of the newest timeline entry.
+    fn last_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.timeline.iter().map(|e| e.timestamp).max()
+    }
+
     fn get_exec_time(&self) -> Option<(DateTime<Utc>, Duration)> {
         let timeline = &self.timeline;
         let start_idx = timeline
@@ -105,36 +129,18 @@ impl Backend for IqmBackend {
     }
 
     fn cancel_task(self: Arc<Self>, task_id: TaskId, backend_id: &str) {
-        let backend_id = backend_id.to_string();
-        let span = tracing::info_span!("iqm_cancel_task", %task_id, %backend_id);
-        tokio::spawn(
-            async move {
-                let url = &format!("{}/cancel", backend_id);
-                for _ in 0..10 {
-                    let builder = self.setup_job_request(Method::POST, url, false);
-                    let result = builder.send().await;
-                    match result {
-                        Ok(resp) if resp.status().is_success() => {
-                            debug!(status = %resp.status(), "cancel task succeeded");
-                            return;
-                        }
-                        result => {
-                            debug!(?result, "cancel attempt failed, retrying");
-                        }
-                    }
-                    sleep(Duration::from_millis(2000)).await;
-                }
-                error!("failed to cancel task from backend after max retries");
-                if self
-                    .monitor_sender
-                    .send(MonitorCommand::UnregisterTask { task_id })
-                    .is_err()
-                {
-                    error!("failed to unregister task from monitor after cancel failure");
-                }
-            }
-            .instrument(span),
-        );
+        // The monitor owns cancellation: it retries a failed attempt on the task's later polls
+        // (with the same backoff), so a cancel issued while IQM is unreachable isn't lost.
+        if self
+            .monitor_sender
+            .send(MonitorCommand::Cancel {
+                task_id,
+                backend_id: backend_id.to_string(),
+            })
+            .is_err()
+        {
+            error!(%task_id, "monitor channel closed while requesting task cancel");
+        }
     }
 
     #[tracing::instrument(skip(self, _payload))]
@@ -148,18 +154,18 @@ impl Backend for IqmBackend {
         // The job already exists on the backend; re-register it for polling so the
         // monitor reconciles its current state. Do not re-submit the circuit.
         debug!(%task_id, %backend_id, "Resuming monitoring of IQM job");
-        if cancel {
-            self.clone().cancel_task(task_id, &backend_id);
-        };
         if self
             .monitor_sender
             .send(MonitorCommand::NewTask {
                 task_id,
-                backend_id,
+                backend_id: backend_id.clone(),
             })
             .is_err()
         {
             error!(%task_id, "monitor channel closed while resuming task");
+        }
+        if cancel {
+            self.cancel_task(task_id, &backend_id);
         }
     }
 
@@ -399,22 +405,94 @@ pub fn start_iqm_backend(
     (backend, b_receiver)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CancelState {
+    None,
+    /// Requested but not yet delivered; an attempt is made on the task's next poll.
+    Pending,
+    /// An attempt is running.
+    InFlight,
+    /// IQM accepted the cancel; the job's final state arrives via polling.
+    Sent,
+}
+
 struct MonitoredTask {
     task_id: TaskId,
     iqm_task_id: String,
+    /// Consecutive failed polls; reset by any successful poll.
     fails: u32,
+    /// Earliest time of the next poll (pushed out by backoff after failures).
+    next_poll: Instant,
     /// Whether `FromBackendMessage::ExecutionStarted` was already sent for this task.
     start_reported: bool,
+    cancel: CancelState,
 }
 
-const MAX_FAILS: u32 = 120;
+impl MonitoredTask {
+    fn new(task_id: TaskId, iqm_task_id: String) -> Self {
+        MonitoredTask {
+            task_id,
+            iqm_task_id,
+            fails: 0,
+            next_poll: Instant::now(),
+            start_reported: false,
+            cancel: CancelState::None,
+        }
+    }
+}
+
+/// Delay before the next poll after `fails` consecutive failures: the poll interval, doubled
+/// per further failure, capped at `MAX_POLL_BACKOFF`.
+fn poll_backoff(poll_interval: Duration, fails: u32) -> Duration {
+    let factor = 1u32 << fails.saturating_sub(1).min(16);
+    poll_interval.saturating_mul(factor).min(MAX_POLL_BACKOFF)
+}
+
+/// Spawns one cancel attempt; the outcome is reported back as `MonitorCommand::CancelDone`.
+fn spawn_cancel_attempt(backend: &Arc<IqmBackend>, task_id: TaskId, iqm_task_id: &str) {
+    let backend = backend.clone();
+    let url = format!("{iqm_task_id}/cancel");
+    let span = tracing::info_span!("iqm_cancel_task", %task_id, backend_id = %iqm_task_id);
+    tokio::spawn(
+        async move {
+            let result = backend
+                .setup_job_request(Method::POST, &url, false)
+                .timeout(IQM_REQUEST_TIMEOUT)
+                .send()
+                .await;
+            let ok = match result {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(status = %resp.status(), "cancel task succeeded");
+                    true
+                }
+                result => {
+                    warn!(?result, "cancel attempt failed, will retry on next poll");
+                    false
+                }
+            };
+            if backend
+                .monitor_sender
+                .send(MonitorCommand::CancelDone { task_id, ok })
+                .is_err()
+            {
+                error!("monitor channel closed while reporting cancel result");
+            }
+        }
+        .instrument(span),
+    );
+}
 
 async fn iqm_main(
     backend: Arc<IqmBackend>,
     mut monitor_receiver: UnboundedReceiver<MonitorCommand>,
 ) {
+    let poll_interval = backend.config.poll_interval;
     let mut monitored_tasks: Vec<MonitoredTask> = Vec::new();
-    let mut interval = tokio::time::interval(backend.config.poll_interval);
+    // Cancels requested for tasks not (yet) monitored: applied if the task's `NewTask`
+    // arrives later (a cancel can race ahead of it). Never starts monitoring by itself, so a
+    // cancel for an already-finished task can't produce a second final state.
+    let mut early_cancels: HashSet<TaskId> = HashSet::new();
+    let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate first tick
     let mut to_delete: Vec<usize> = Vec::new();
@@ -422,32 +500,89 @@ async fn iqm_main(
         select! {
             entry = monitor_receiver.recv() => {
                 match entry {
-                    Some(MonitorCommand::NewTask {task_id, backend_id}) => monitored_tasks.push(MonitoredTask {
-                        task_id, iqm_task_id: backend_id, fails: 0, start_reported: false
-                    }),
-                    Some(MonitorCommand::UnregisterTask { task_id}) => {
-                        monitored_tasks.retain(|m| m.task_id != task_id);
+                    Some(MonitorCommand::NewTask { task_id, backend_id }) => {
+                        if !monitored_tasks.iter().any(|m| m.task_id == task_id) {
+                            let mut task = MonitoredTask::new(task_id, backend_id);
+                            if early_cancels.remove(&task_id) {
+                                task.cancel = CancelState::Pending;
+                            }
+                            monitored_tasks.push(task);
+                        }
+                    }
+                    Some(MonitorCommand::Cancel { task_id, backend_id }) => {
+                        match monitored_tasks.iter_mut().find(|m| m.task_id == task_id) {
+                            Some(task) => {
+                                if task.cancel == CancelState::None || task.cancel == CancelState::Pending {
+                                    task.cancel = CancelState::InFlight;
+                                    spawn_cancel_attempt(&backend, task_id, &task.iqm_task_id);
+                                }
+                            }
+                            None => {
+                                // One best-effort attempt; retried only if the task shows up.
+                                early_cancels.insert(task_id);
+                                spawn_cancel_attempt(&backend, task_id, &backend_id);
+                            }
+                        }
+                    }
+                    Some(MonitorCommand::CancelDone { task_id, ok }) => {
+                        if let Some(task) = monitored_tasks.iter_mut().find(|m| m.task_id == task_id)
+                            && task.cancel == CancelState::InFlight
+                        {
+                            task.cancel = if ok { CancelState::Sent } else { CancelState::Pending };
+                        }
                     }
                     None => return,
                 }
             }
             _ = interval.tick(), if !monitored_tasks.is_empty() => {
                 to_delete.clear();
+                let now = Instant::now();
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
-                    let request = backend.setup_job_request(Method::GET, &task.iqm_task_id, false);
+                    if task.next_poll > now {
+                        continue;
+                    }
+                    if task.cancel == CancelState::Pending {
+                        task.cancel = CancelState::InFlight;
+                        spawn_cancel_attempt(&backend, task.task_id, &task.iqm_task_id);
+                    }
+                    let request = backend
+                        .setup_job_request(Method::GET, &task.iqm_task_id, false)
+                        .timeout(IQM_REQUEST_TIMEOUT);
                     let result = request.send().await;
-                    if let Some(new_state) = process_result(task, result, &backend.backend_sender).await {
-                        if !matches!(&new_state, TaskState::Running) {
-                            to_delete.push(idx);
+                    // Local receive time: anything the response reports happened before it.
+                    let received_at = Instant::now();
+                    match process_result(task, result, received_at, &backend.backend_sender).await {
+                        Ok(new_state) => {
+                            task.fails = 0;
+                            task.next_poll = now;
+                            if let Some(new_state) = new_state {
+                                if !matches!(&new_state, TaskState::Running) {
+                                    to_delete.push(idx);
+                                }
+                                if backend.backend_sender.send(FromBackendMessage::TaskStateChange {
+                                    task_id: task.task_id,
+                                    state: new_state,
+                                }).is_err() {
+                                    error!(task_id = %task.task_id, "backend channel closed while reporting poll result");
+                                }
+                            }
                         }
-                        if backend.backend_sender.send(FromBackendMessage::TaskStateChange {
-                            task_id: task.task_id,
-                            state: new_state,
-                        }).is_err() {
-                            error!(task_id = %task.task_id, "backend channel closed while reporting poll result");
+                        Err(error) => {
+                            // Never give up: IQM is the source of truth for the job's outcome and
+                            // exec time, so keep polling (with backoff) until it answers.
+                            task.fails += 1;
+                            let delay = poll_backoff(poll_interval, task.fails);
+                            task.next_poll = Instant::now() + delay;
+                            warn!(
+                                task_id = %task.task_id,
+                                backend_id = %task.iqm_task_id,
+                                fails = task.fails,
+                                retry_in_ms = delay.as_millis(),
+                                %error,
+                                "IQM polling failed"
+                            );
                         }
                     }
-
                 }
                 for idx in to_delete.iter().rev() {
                     monitored_tasks.remove(*idx);
@@ -458,47 +593,53 @@ async fn iqm_main(
 }
 
 #[tracing::instrument(skip_all, fields(task_id = %task.task_id, backend_id = %task.iqm_task_id))]
+/// Interprets one poll response: `Ok` with the job's new state (if it changed to something
+/// worth reporting), or `Err` describing a failed poll (transport error, non-success status,
+/// unparsable body), which the caller retries with backoff.
 async fn process_result(
     task: &mut MonitoredTask,
     result: Result<reqwest::Response, reqwest::Error>,
+    received_at: Instant,
     sender: &UnboundedSender<FromBackendMessage>,
-) -> Option<TaskState> {
+) -> Result<Option<TaskState>, String> {
     match result {
-        Err(e) => {
-            task.fails += 1;
-            if task.fails > MAX_FAILS {
-                error!(error = %e, fails = task.fails, "IQM polling failed repeatedly, giving up");
-                return Some(TaskState::simple_error(format!(
-                    "IQM poll do not respond: {}",
-                    e
-                )));
-            }
-            warn!(error = %e, fails = task.fails, "IQM polling request failed");
-            None
-        }
+        Err(e) => Err(format!("request failed: {e}")),
         Ok(resp) => {
             let http_status = resp.status();
             if !http_status.is_success() {
-                task.fails += 1;
-                if task.fails > MAX_FAILS {
-                    error!(%http_status, fails = task.fails, "IQM polling failed repeatedly, giving up");
-                    return Some(TaskState::simple_error(format!(
-                        "IQM poll do not respond: {http_status}"
-                    )));
-                }
-                warn!(%http_status, fails = task.fails, "IQM polling request returned non-success status");
-                return None;
+                return Err(format!("HTTP status {http_status}"));
             }
             match resp.json::<JobStatusResponse>().await {
-                Err(_) => Some(TaskState::simple_error(
-                    "Could not parse IQM response".to_string(),
-                )),
+                Err(e) => Err(format!("could not parse IQM response: {e}")),
                 Ok(data) => {
+                    if !task.start_reported
+                        && let Some(started_at) = data.execution_started()
+                    {
+                        task.start_reported = true;
+                        if sender
+                            .send(FromBackendMessage::ExecutionStarted {
+                                task_id: task.task_id,
+                                started_at,
+                                observed_at: received_at,
+                            })
+                            .is_err()
+                        {
+                            error!("backend channel closed while reporting task start");
+                        }
+                    }
                     let status = data.status.as_str();
-                    match status {
+                    Ok(match status {
                         "waiting" => None,
                         status => {
-                            let (end_time, exec_time) = data.get_exec_time().unwrap_or_default();
+                            // IQM timestamps; a job that never executed (e.g. cancelled or
+                            // failed during compilation) consumed nothing and ends at its last
+                            // timeline entry.
+                            let (end_time, exec_time) = data.get_exec_time().unwrap_or_else(|| {
+                                (
+                                    data.last_timestamp().unwrap_or_else(Utc::now),
+                                    Duration::ZERO,
+                                )
+                            });
                             let completed = CompletedState {
                                 consumed: exec_time,
                                 timestamp: end_time,
@@ -520,9 +661,45 @@ async fn process_result(
                             };
                             Some(new_state)
                         }
-                    }
+                    })
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobStatusResponse;
+    use std::time::Duration;
+
+    #[test]
+    fn exec_time_from_timeline() {
+        let data: JobStatusResponse = serde_json::from_str(
+            r#"{"status": "completed", "timeline": [
+                {"status": "created", "timestamp": "2026-01-01T10:00:00Z"},
+                {"status": "execution_started", "timestamp": "2026-01-01T10:00:05Z"},
+                {"status": "execution_ended", "timestamp": "2026-01-01T10:00:07.500Z"},
+                {"status": "completed", "timestamp": "2026-01-01T10:00:08Z"}]}"#,
+        )
+        .unwrap();
+        let (end, exec) = data.get_exec_time().unwrap();
+        assert_eq!(end.to_rfc3339(), "2026-01-01T10:00:07.500+00:00");
+        assert_eq!(exec, Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn never_executed_job_ends_at_last_entry() {
+        let data: JobStatusResponse = serde_json::from_str(
+            r#"{"status": "cancelled", "timeline": [
+                {"status": "created", "timestamp": "2026-01-01T10:00:00Z"},
+                {"status": "cancelled", "timestamp": "2026-01-01T10:00:02Z"}]}"#,
+        )
+        .unwrap();
+        assert!(data.get_exec_time().is_none());
+        assert_eq!(
+            data.last_timestamp().unwrap().to_rfc3339(),
+            "2026-01-01T10:00:02+00:00"
+        );
     }
 }

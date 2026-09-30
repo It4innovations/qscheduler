@@ -1,3 +1,6 @@
+import time
+
+from utils import TEST_PROJECT
 from utils import TestTask as TT
 
 
@@ -133,6 +136,8 @@ def test_consumed_time_many_tasks(qscheduler):
 
 
 def test_submit_rejected_when_quota_exceeded(qscheduler):
+    # Keep the periodic in-flight project check from failing the task while it runs.
+    qscheduler.limit_check_interval = 60
     qscheduler.start(add_test_project=False)
     qscheduler.add_project("myproject", limit_ms=1)
 
@@ -157,6 +162,8 @@ def test_session_create_rejected_when_project_inactive(qscheduler):
 
 
 def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
+    # Keep the periodic in-flight project check from failing task1 while it runs.
+    qscheduler_test.limit_check_interval = 60
     qscheduler_test.queue_size = 1
     qscheduler_test.start(add_test_project=False)
     qscheduler_test.add_project("myproject", limit_ms=100)
@@ -167,3 +174,108 @@ def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
     qscheduler_test.wait_for_finished(task1)
     qscheduler_test.wait_for_failed(task2)
     assert "time limit" in qscheduler_test.get_task(task2)["error"].lower()
+
+
+def test_running_tasks_failed_when_project_limit_exceeded(qscheduler):
+    qscheduler.limit_check_interval = 1
+    qscheduler.queue_size = 2
+    qscheduler.start(add_test_project=False)
+    qscheduler.add_project("myproject", limit_ms=1_500)
+
+    t1 = qscheduler.submit(TT().compute_time(30), project="myproject")
+    t2 = qscheduler.submit(TT().compute_time(30), project="myproject")
+    for t in (t1, t2):
+        qscheduler.wait_for_failed(t)
+        assert qscheduler.get_task(t)["error"] == "Project time limit exceeded"
+
+    # In-flight charges were replaced by the backend's exact exec times.
+    exec_ms = sum(qscheduler.get_task(t).get("exectime_ms", 0) for t in (t1, t2))
+    consumed = qscheduler.get_project("myproject")["consumed_ms"]
+    assert consumed >= 1_500
+    assert abs(consumed - exec_ms) < 100
+
+    qscheduler.submit(TT(), project="myproject", expect_error=402)
+
+
+def test_queued_tasks_failed_after_running_task_exhausts_project(qscheduler_test):
+    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.queue_size = 1
+    qscheduler_test.start(add_test_project=False)
+    qscheduler_test.add_project("myproject", limit_ms=1_500)
+
+    t1 = qscheduler_test.submit(TT().compute_time(30), project="myproject")
+    t2 = qscheduler_test.submit(TT().compute_time(30), project="myproject")
+    t3 = qscheduler_test.submit(TT(), project="myproject")
+    for t in (t1, t2, t3):
+        qscheduler_test.wait_for_failed(t)
+        assert qscheduler_test.get_task(t)["error"] == "Project time limit exceeded"
+    # t2/t3 were never submitted to the backend.
+    assert "started_at" not in qscheduler_test.get_task(t2)
+    assert "started_at" not in qscheduler_test.get_task(t3)
+
+
+def _listed_consumed(qs, name):
+    return next(p for p in qs.list_projects() if p["name"] == name)["consumed_ms"]
+
+
+def _wait_listed_consumed(qs, name, expected):
+    """GET /projects reads the DB, whose write lands just after the in-memory update."""
+    deadline = time.monotonic() + 2
+    while (
+        value := _listed_consumed(qs, name)
+    ) != expected and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return value
+
+
+def test_project_consumption_excludes_running_tasks(qscheduler_test):
+    """Reported consumption is confirmed time only; running tasks' estimates count toward
+    the limit checks but never show up in the API."""
+    qs = qscheduler_test
+    qs.limit_check_interval = 1
+    qs.start()
+
+    task_id = qs.submit(TT().compute_time(30))
+    qs.wait_for_running(task_id)
+    time.sleep(2.5)
+
+    assert _listed_consumed(qs, TEST_PROJECT) == 0
+    assert qs.get_project(TEST_PROJECT)["consumed_ms"] == 0
+
+    qs.cancel_task(task_id)
+    qs.wait_for_cancelled(task_id)
+    exec_ms = qs.get_task(task_id)["exectime_ms"]
+    assert qs.get_project(TEST_PROJECT)["consumed_ms"] == exec_ms
+    assert _wait_listed_consumed(qs, TEST_PROJECT, exec_ms) == exec_ms
+
+
+def test_project_consumption_never_decreases(qscheduler):
+    """While running tasks are charged, cancelled for the project limit, and settled with their
+    exact exec times, reported consumption only ever grows."""
+    qs = qscheduler
+    qs.limit_check_interval = 1
+    qs.queue_size = 2
+    qs.start(add_test_project=False)
+    qs.add_project("myproject", limit_ms=1_500)
+
+    tasks = [qs.submit(TT().compute_time(30), project="myproject") for _ in range(2)]
+    # Sampled per endpoint: the list (DB) may briefly lag the single-project endpoint
+    # (memory) by the DB write, but neither may ever go backwards.
+    single, listed = [], []
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        single.append(qs.get_project("myproject")["consumed_ms"])
+        listed.append(_listed_consumed(qs, "myproject"))
+        if all(qs.get_task_state(t) == "failed" for t in tasks):
+            break
+        time.sleep(0.1)
+    assert all(qs.get_task_state(t) == "failed" for t in tasks)
+
+    # Settled with the exact whole-ms exec times, so memory and DB agree exactly.
+    exec_ms = sum(qs.get_task(t).get("exectime_ms", 0) for t in tasks)
+    single.append(qs.get_project("myproject")["consumed_ms"])
+    listed.append(_wait_listed_consumed(qs, "myproject", exec_ms))
+    assert single == sorted(single)
+    assert listed == sorted(listed)
+    assert single[-1] == listed[-1] == exec_ms
+    assert exec_ms >= 1_500

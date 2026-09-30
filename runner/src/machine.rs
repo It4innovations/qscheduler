@@ -1,6 +1,7 @@
 use crate::backend::{Backend, BackendConfig};
 use crate::callback::NotifyConfig;
 use crate::error::RunnerError;
+use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
 use crate::task::{Task, TaskId};
 use bytes::Bytes;
@@ -32,6 +33,7 @@ pub struct MachineConfig {
     pub limit_check_interval: Duration,
     pub max_session_time: Duration,
     pub default_task_time_limit: Duration,
+    pub max_clock_skew: Duration,
     pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }
@@ -52,6 +54,8 @@ pub(crate) struct ResumeTask {
     /// the time limit deadline is rebuilt from it.
     pub started_at: Option<DateTime<Utc>>,
     pub time_limit: Duration,
+    /// Project charged for the task's time (`None` for session tasks).
+    pub project_id: Option<ProjectId>,
 }
 
 pub(crate) struct Machine {

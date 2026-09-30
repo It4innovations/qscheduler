@@ -153,6 +153,7 @@ pub async fn create_project(
             active,
             consumed: Duration::ZERO,
             limit,
+            in_flight: Duration::ZERO,
         });
     }
     Ok(id)

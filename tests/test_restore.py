@@ -45,6 +45,34 @@ def test_restore_task_time_limit(qscheduler_test):
     assert info["started_at"] == started_at
 
 
+def test_restore_running_project_task_accounted_once(qscheduler_test):
+    """A running project task isn't double-charged across a crash: `in_flight` is never
+    persisted, so the resumed task is charged once from `started_at`, and only its exact exec
+    time is ever confirmed."""
+    qs = qscheduler_test
+    qs.limit_check_interval = 1
+    qs.start(add_test_project=False)
+    # One charge from started_at (~1.5s before the crash + ~5s re-run by the test backend)
+    # stays below the limit; charging it twice would exceed it and fail the task.
+    qs.add_project("p", limit_ms=10_000)
+
+    task_id = qs.submit(TT().compute_time(5), project="p")
+    qs.wait_for_running(task_id)
+    time.sleep(1.5)
+
+    qs.restart()
+    time.sleep(2.5)
+    assert qs.get_project("p")["consumed_ms"] == 0
+
+    qs.wait_for_finished(task_id)
+    exec_ms = qs.get_task(task_id)["exectime_ms"]
+    assert abs(qs.get_project("p")["consumed_ms"] - exec_ms) < 100
+
+    # The DB value (restored after another restart) matches too.
+    qs.restart()
+    assert abs(qs.get_project("p")["consumed_ms"] - exec_ms) < 100
+
+
 def test_restore_waiting_task(qscheduler_test):
     """A task still waiting in the queue is re-queued and runs after a restart."""
     qs = qscheduler_test
