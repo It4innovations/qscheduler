@@ -34,7 +34,7 @@ def test_session_exectime_ms_updates_periodically(qscheduler_test):
     """exectime_ms is refreshed by the periodic checkpoint while a session is still
     open, not just once it closes."""
     qs = qscheduler_test
-    qs.session_check_interval = 1
+    qs.limit_check_interval = 1
     qs.start()
 
     s = qs.new_session(time_limit=30)

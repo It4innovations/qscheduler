@@ -56,10 +56,9 @@ impl Core {
                 MachineConfig {
                     name: m.name,
                     queue_size: m.queue_size,
-                    session_check_interval: Duration::from_millis(
-                        m.session_check_interval_ms as u64,
-                    ),
+                    limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
                     max_session_time: Duration::from_millis(m.max_session_time_ms),
+                    default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
                     notify: m.notify,
                     backend: m.backend,
                 },
@@ -254,11 +253,20 @@ impl Core {
                         panic!("Invalid project id");
                     })
                 });
+                // Rows predating per-task limits have no `time_limit_ms`: use the machine's
+                // default (an unknown machine never runs the task, so the value is moot).
+                let time_limit = match t.time_limit_ms {
+                    Some(ms) => Duration::from_millis(ms as u64),
+                    None => machine_map
+                        .find_machine(machine_id)
+                        .map_or(Duration::ZERO, |m| m.config().default_task_time_limit),
+                };
                 let config = TaskConfig {
                     machine_id,
                     parent: TaskParent::new(session_id, project_id),
                     user: t.user,
                     payload: payload.clone(),
+                    time_limit,
                 };
 
                 if let Some(backend_id) = t.backend_id {
@@ -266,6 +274,9 @@ impl Core {
                     let mut task = Task::new(task_id, t.created_at, config);
                     task.set_state(TaskState::Running);
                     task.set_backend_id(backend_id.clone());
+                    if let Some(started_at) = t.started_at {
+                        task.set_started_at(started_at);
+                    }
                     task_map.insert(task);
                     if machine_map.find_machine(machine_id).is_ok() {
                         resume_tasks
@@ -276,6 +287,8 @@ impl Core {
                                 backend_id,
                                 payload,
                                 cancel: session_id.is_some(),
+                                started_at: t.started_at,
+                                time_limit,
                             });
                     } else {
                         tracing::warn!(

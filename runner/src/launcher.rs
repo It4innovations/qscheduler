@@ -8,8 +8,8 @@ use crate::session::{SessionInfo, SessionMap, SessionState};
 use crate::task::{CompletedState, TaskInfo, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use chrono::{DateTime, SubsecRound, Utc};
+use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,10 +60,17 @@ struct RunningSession {
     exec_time: Duration,
 }
 
+/// Error recorded on a task cancelled because it exceeded its time limit.
+const TASK_TIME_LIMIT_ERROR: &str = "Task time limit exceeded";
+
 enum DbUpdate {
     TaskSubmitted {
         task_id: TaskId,
         backend_id: String,
+    },
+    TaskStarted {
+        task_id: TaskId,
+        timestamp: DateTime<Utc>,
     },
     TaskFinished {
         task_id: TaskId,
@@ -180,6 +187,59 @@ fn pick_task(
     }
 }
 
+/// Marks a submitted task as cancelling and asks the backend to cancel it. A task whose
+/// submission the backend hasn't confirmed yet (no `backend_id`) is cancelled once its
+/// `TaskSubmitted` message arrives.
+fn request_backend_cancel(
+    task_map: &TaskMap,
+    backend: &Arc<dyn Backend>,
+    task_id: TaskId,
+    cancelling: &mut bool,
+) {
+    if *cancelling {
+        return;
+    }
+    *cancelling = true;
+    if let Some(backend_id) = task_map.find_task(task_id).and_then(|t| t.backend_id()) {
+        debug!(%task_id, "Cancelling submitted task");
+        Arc::clone(backend).cancel_task(task_id, backend_id);
+    } else {
+        debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
+    }
+}
+
+/// The instant a task started at `started_at` (wall clock, as reported by the backend)
+/// exceeds `time_limit`; already-elapsed time counts against the limit.
+fn time_limit_deadline(started_at: DateTime<Utc>, time_limit: Duration) -> Instant {
+    let elapsed = (Utc::now() - started_at).to_std().unwrap_or(Duration::ZERO);
+    Instant::now() + time_limit.saturating_sub(elapsed)
+}
+
+/// Cancels every running task whose time limit deadline has passed. The task is remembered in
+/// `timed_out` so that the backend's cancellation confirmation is recorded as a failure.
+fn check_task_deadlines(
+    task_deadlines: &mut HashMap<TaskId, Instant>,
+    timed_out: &mut HashSet<TaskId>,
+    submitted_tasks: &mut HashMap<TaskId, bool>,
+    task_map: &TaskMap,
+    backend: &Arc<dyn Backend>,
+) {
+    let now = Instant::now();
+    task_deadlines.retain(|&task_id, deadline| {
+        if *deadline > now {
+            return true;
+        }
+        if let Some(cancelling) = submitted_tasks.get_mut(&task_id)
+            && !*cancelling
+        {
+            debug!(%task_id, "Task time limit exceeded");
+            timed_out.insert(task_id);
+            request_backend_cancel(task_map, backend, task_id, cancelling);
+        }
+        false
+    });
+}
+
 /// Cancels every submitted task of `s`, cancels its remaining queued tasks, and frees the
 /// machine. Shared by the deadline/over-limit close path and the on-demand session cancel path.
 #[allow(clippy::too_many_arguments)]
@@ -197,16 +257,7 @@ fn close_running_session(
     db_updates: &mut Vec<DbUpdate>,
 ) {
     for (task_id, cancelling) in submitted_tasks.iter_mut() {
-        if !*cancelling {
-            *cancelling = true;
-            let task = task_map.get_task_mut(*task_id);
-            if let Some(backend_id) = task.backend_id() {
-                debug!(%task_id, "Cancelling submitted task");
-                Arc::clone(backend).cancel_task(*task_id, backend_id);
-            } else {
-                debug!(%task_id, "Cancelling not fully submitted task; will be cancelled later");
-            }
-        }
+        request_backend_cancel(task_map, backend, *task_id, cancelling);
     }
     let session = session_map.get_session_mut(s.session_id);
     let now = Utc::now();
@@ -252,7 +303,8 @@ fn close_running_session(
 enum LauncherEvent {
     Notified,
     SessionEnd,
-    SessionQuotaCheck,
+    /// Periodic session quota checkpoint and task time limit check.
+    PeriodicCheck,
     BackendMessage(FromBackendMessage),
 }
 
@@ -266,22 +318,21 @@ async fn launcher_main(
     resume_tasks: Vec<ResumeTask>,
 ) {
     debug!(%machine_id, "Starting launcher");
-    let (notifier, queue_size, mut session_check_interval) = {
+    let (notifier, queue_size, mut limit_check_interval) = {
         let core = core_ref.lock().unwrap();
         let machine = core.split().machine_map.get_machine(machine_id);
-        let mut session_check_interval =
-            tokio::time::interval(machine.config().session_check_interval);
-        session_check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut limit_check_interval = tokio::time::interval(machine.config().limit_check_interval);
+        limit_check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let queue_size = machine.config().queue_size;
-        (
-            machine.notifier().clone(),
-            queue_size,
-            session_check_interval,
-        )
+        (machine.notifier().clone(), queue_size, limit_check_interval)
     };
     let pool = core_ref.lock().unwrap().pool().clone();
     assert!(queue_size > 0);
     let mut submitted_tasks: HashMap<TaskId, bool> = HashMap::new();
+    // Time limit deadlines of tasks the backend reported as running.
+    let mut task_deadlines: HashMap<TaskId, Instant> = HashMap::new();
+    // Tasks cancelled for exceeding their time limit, awaiting the backend's confirmation.
+    let mut timed_out: HashSet<TaskId> = HashSet::new();
 
     for rt in resume_tasks {
         debug!(task_id = %rt.task_id, "Re-attaching submitted task to backend");
@@ -292,6 +343,11 @@ async fn launcher_main(
             .clone()
             .resume_task(rt.task_id, rt.backend_id, rt.payload, rt.cancel);
         submitted_tasks.insert(rt.task_id, rt.cancel);
+        if !rt.cancel
+            && let Some(started_at) = rt.started_at
+        {
+            task_deadlines.insert(rt.task_id, time_limit_deadline(started_at, rt.time_limit));
+        }
     }
 
     let mut running_session: Option<RunningSession> = None;
@@ -309,13 +365,13 @@ async fn launcher_main(
             } =>
                 LauncherEvent::SessionEnd,
             _ = async {
-                if running_session.is_some() {
-                    session_check_interval.tick().await;
+                if running_session.is_some() || !task_deadlines.is_empty() {
+                    limit_check_interval.tick().await;
                 } else {
                     pending().await
                 }
             } =>
-                LauncherEvent::SessionQuotaCheck,
+                LauncherEvent::PeriodicCheck,
             msg = backend_receiver.recv() => {
                 if msg.is_none() {
                     tracing::error!(%machine_id, "backend channel closed unexpectedly");
@@ -336,15 +392,14 @@ async fn launcher_main(
             } = core.split_mut();
             match event {
                 LauncherEvent::Notified => { /* Do nothing */ }
-                LauncherEvent::SessionEnd | LauncherEvent::SessionQuotaCheck => {
+                LauncherEvent::SessionEnd | LauncherEvent::PeriodicCheck => {
                     if let Some(s) = running_session.as_mut() {
                         let exec_time = Instant::now() - s.opened_at;
                         let delta = exec_time - s.exec_time;
                         s.exec_time = exec_time;
                         let project = project_map.get_project_mut(s.project_id);
                         project.update_consumed(delta);
-                        if matches!(event, LauncherEvent::SessionQuotaCheck)
-                            && !project.is_over_limit()
+                        if matches!(event, LauncherEvent::PeriodicCheck) && !project.is_over_limit()
                         {
                             debug!(session_id = %s.session_id, delta_ms=delta.as_millis(), "Session check passed");
                             session_map.get_session_mut(s.session_id).consumed = exec_time;
@@ -370,6 +425,15 @@ async fn launcher_main(
                             running_session = None;
                         }
                     }
+                    if matches!(event, LauncherEvent::PeriodicCheck) {
+                        check_task_deadlines(
+                            &mut task_deadlines,
+                            &mut timed_out,
+                            &mut submitted_tasks,
+                            task_map,
+                            &backend,
+                        );
+                    }
                 }
                 LauncherEvent::BackendMessage(msg) => match msg {
                     FromBackendMessage::TaskSubmitted {
@@ -390,7 +454,43 @@ async fn launcher_main(
                             Arc::clone(&backend).cancel_task(task_id, &backend_task_id);
                         }
                     }
-                    FromBackendMessage::TaskStateChange { task_id, state } => {
+                    FromBackendMessage::ExecutionStarted {
+                        task_id,
+                        started_at,
+                    } => {
+                        // Start the time limit clock on the first start report of a task that
+                        // isn't being cancelled. A task restored with a persisted `started_at`
+                        // already has its deadline, so a repeated report is ignored.
+                        if submitted_tasks.get(&task_id) == Some(&false) {
+                            let task = task_map.get_task_mut(task_id);
+                            if task.started_at().is_none() {
+                                // Truncated to the DB's precision so the value is stable across
+                                // a restart.
+                                let started_at = started_at.trunc_subsecs(6);
+                                task.set_started_at(started_at);
+                                task_deadlines.insert(
+                                    task_id,
+                                    time_limit_deadline(started_at, task.config().time_limit),
+                                );
+                                db_updates.push(DbUpdate::TaskStarted {
+                                    task_id,
+                                    timestamp: started_at,
+                                });
+                            }
+                        }
+                    }
+                    FromBackendMessage::TaskStateChange { task_id, mut state } => {
+                        if state.is_final() {
+                            task_deadlines.remove(&task_id);
+                            if timed_out.remove(&task_id)
+                                && let TaskState::Cancelled { completed } = state
+                            {
+                                state = TaskState::Failed {
+                                    completed,
+                                    error: TASK_TIME_LIMIT_ERROR.to_string(),
+                                };
+                            }
+                        }
                         let mut update_state = true;
                         let exec_time = match &state {
                             TaskState::Waiting => unreachable!(),
@@ -532,16 +632,8 @@ async fn launcher_main(
 
             for task_id in task_cancels {
                 if let Some(cancelling) = submitted_tasks.get_mut(&task_id) {
-                    if !*cancelling {
-                        *cancelling = true;
-                        let task = task_map.get_task_mut(task_id);
-                        if let Some(backend_id) = task.backend_id() {
-                            debug!(%task_id, "Cancelling submitted task on request");
-                            Arc::clone(&backend).cancel_task(task_id, backend_id);
-                        } else {
-                            debug!(%task_id, "Cancelling not fully submitted task on request; will be cancelled later");
-                        }
-                    }
+                    debug!(%task_id, "Task cancel requested");
+                    request_backend_cancel(task_map, &backend, task_id, cancelling);
                 } else {
                     let machine = machine_map.get_machine_mut(machine_id);
                     if machine.remove_queued_task(task_id) {
@@ -633,6 +725,9 @@ async fn launcher_main(
                     task_id,
                     backend_id,
                 } => db::update_task_backend_id(&pool, task_id, &backend_id).await,
+                DbUpdate::TaskStarted { task_id, timestamp } => {
+                    db::update_task_started(&pool, task_id, timestamp).await
+                }
                 DbUpdate::TaskFinished { task_id, completed } => {
                     db::update_task_finished(&pool, task_id, completed).await;
                 }

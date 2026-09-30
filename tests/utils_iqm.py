@@ -130,7 +130,21 @@ class Task:
         if self.compute_time is not None and now < exec_start + timedelta(
             seconds=self.compute_time
         ):
-            return {"status": "processing"}
+            return {
+                "status": "processing",
+                "timeline": [
+                    {
+                        "source": "iqm-server",
+                        "status": "created",
+                        "timestamp": _fmt_ts(self.created_at),
+                    },
+                    {
+                        "source": "iqm-station-control",
+                        "status": "execution_started",
+                        "timestamp": _fmt_ts(exec_start),
+                    },
+                ],
+            }
 
         r = self.config["outcome"]
         if r["type"] == "Ok":
@@ -275,5 +289,5 @@ class IqmFakeBackend:
             f"--url=http://127.0.0.1:{self.httpserver.port}",
             f"--machine-name={self.machine_name}",
             f"--token={self.token}",
-            "--check-interval=200ms",
+            "--poll-interval=200ms",
         ]

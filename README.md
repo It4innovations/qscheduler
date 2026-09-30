@@ -60,8 +60,9 @@ qscheduler machine add <NAME> [OPTIONS] <BACKEND> [BACKEND OPTIONS]
 | `--queue-size <N>` | Maximum number of tasks that can be queued on this machine (default: `4`). |
 | `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state, or a session on this machine opens or closes. See [Notifications](#notifications). |
 | `--notify-token <TOKEN>` | Arbitrary token included in notification payloads. |
-| `--session-check-interval <DURATION>` | How often session time-consumption is persisted to the database, e.g. `5s` (default: `5s`). |
+| `--limit-check-interval <DURATION>` | How often session time-consumption is persisted to the database and task time limits are checked, e.g. `5s` (default: `2s`). |
 | `--max-session-time <DURATION>` | Maximum duration a session on this machine may request, e.g. `2h`. Sessions requesting longer are rejected at submit time (default: `2h`). |
+| `--default-task-time-limit <DURATION>` | Execution time limit for tasks submitted without `time_limit_ms`, e.g. `30m` (default: `1h`). |
 
 `<BACKEND>` is one of:
 
@@ -83,7 +84,7 @@ qscheduler machine add QuantumDevice iqm --url https://iqm.machine.com --token y
 | `--url <URL>` | Base URL of the IQM service. |
 | `--token <TOKEN>` | Bearer token for authentication. |
 | `--machine-name <NAME>` | Name of the target quantum device on the IQM server. |
-| `--check-interval <DURATION>` | Polling interval for job status, as a humantime string, e.g. `1s`/`500ms` (the CLI's own `--help` text says "in milliseconds", but a bare integer is rejected — a unit suffix is required). |
+| `--poll-interval <DURATION>` | Polling interval for job status, as a humantime string, e.g. `1s`/`500ms` (a unit suffix is required). |
 
 `qscheduler machine update <NAME> ...` is intended to change an existing machine's configuration
 using the same arguments as `add`.
@@ -291,6 +292,7 @@ Submit a task for execution.
 | `project` | string | exactly one of `project` / `session_id` | Name of the project to charge the task's time to. |
 | `session_id` | integer | exactly one of `project` / `session_id` | Session to associate the task with. The session must be in the `"open"` state or the task is rejected. |
 | `user` | string | yes | Free-form identifier of the user submitting the task, stored alongside the task. |
+| `time_limit_ms` | integer | no | Maximum execution time in milliseconds, counted from when the backend starts running the task (queue time doesn't count). When exceeded, the task is cancelled on the backend and ends `"failed"` with error `"Task time limit exceeded"`. Checked every machine `--limit-check-interval`, so it may overrun by up to that interval. Defaults to the machine's `--default-task-time-limit`. |
 
 **Request body** — `application/octet-stream` — raw task payload forwarded to the backend.
 
@@ -298,7 +300,7 @@ Submit a task for execution.
 
 **Response `402`** — the project has exceeded its time limit, or the project is not active.
 
-**Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`, or the session is invalid or not open.
+**Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.
 
 ---
 
@@ -319,6 +321,8 @@ restart) — the service falls back to the database for terminal tasks.
 | `machine` | string | always | Name of the target machine. |
 | `state` | string | always | One of `"waiting"`, `"running"`, `"finished"`, `"failed"`, `"cancelled"`. |
 | `created_at` | timestamp | always | When the task was submitted. |
+| `time_limit_ms` | integer | always (except tasks created before time limits existed) | Execution time limit in milliseconds, counted from `started_at`. |
+| `started_at` | timestamp | once the backend started running the task | Start of the time limit. |
 | `finished_at` | timestamp | once in a terminal state | When the task reached its final state. |
 | `exectime_ms` | integer | if any execution time was consumed | Milliseconds of execution time. |
 | `error` | string | only when `state` is `"failed"` | Failure reason. |

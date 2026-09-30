@@ -20,7 +20,9 @@ pub struct IqmBackendConfig {
     pub url: String,
     pub token: String,
     pub machine_name: String,
-    pub check_interval: Duration,
+    /// Accepts the pre-rename `check_interval` key of stored configurations.
+    #[serde(alias = "check_interval")]
+    pub poll_interval: Duration,
 }
 
 enum MonitorCommand {
@@ -71,6 +73,14 @@ struct JobStatusResponse {
 }
 
 impl JobStatusResponse {
+    /// When the job's execution started, per the IQM timeline.
+    fn execution_started(&self) -> Option<DateTime<Utc>> {
+        self.timeline
+            .iter()
+            .find(|e| e.status == "execution_started")
+            .map(|e| e.timestamp)
+    }
+
     fn get_exec_time(&self) -> Option<(DateTime<Utc>, Duration)> {
         let timeline = &self.timeline;
         let start_idx = timeline
@@ -393,6 +403,8 @@ struct MonitoredTask {
     task_id: TaskId,
     iqm_task_id: String,
     fails: u32,
+    /// Whether `FromBackendMessage::ExecutionStarted` was already sent for this task.
+    start_reported: bool,
 }
 
 const MAX_FAILS: u32 = 120;
@@ -402,7 +414,7 @@ async fn iqm_main(
     mut monitor_receiver: UnboundedReceiver<MonitorCommand>,
 ) {
     let mut monitored_tasks: Vec<MonitoredTask> = Vec::new();
-    let mut interval = tokio::time::interval(backend.config.check_interval);
+    let mut interval = tokio::time::interval(backend.config.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await; // consume the immediate first tick
     let mut to_delete: Vec<usize> = Vec::new();
@@ -411,7 +423,7 @@ async fn iqm_main(
             entry = monitor_receiver.recv() => {
                 match entry {
                     Some(MonitorCommand::NewTask {task_id, backend_id}) => monitored_tasks.push(MonitoredTask {
-                        task_id, iqm_task_id: backend_id, fails: 0
+                        task_id, iqm_task_id: backend_id, fails: 0, start_reported: false
                     }),
                     Some(MonitorCommand::UnregisterTask { task_id}) => {
                         monitored_tasks.retain(|m| m.task_id != task_id);
@@ -424,7 +436,7 @@ async fn iqm_main(
                 for (idx, task) in monitored_tasks.iter_mut().enumerate() {
                     let request = backend.setup_job_request(Method::GET, &task.iqm_task_id, false);
                     let result = request.send().await;
-                    if let Some(new_state) = process_result(task, result).await {
+                    if let Some(new_state) = process_result(task, result, &backend.backend_sender).await {
                         if !matches!(&new_state, TaskState::Running) {
                             to_delete.push(idx);
                         }
@@ -449,6 +461,7 @@ async fn iqm_main(
 async fn process_result(
     task: &mut MonitoredTask,
     result: Result<reqwest::Response, reqwest::Error>,
+    sender: &UnboundedSender<FromBackendMessage>,
 ) -> Option<TaskState> {
     match result {
         Err(e) => {

@@ -10,11 +10,13 @@ use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
 use runner::reactor::{
-    cancel_task, get_machine_id_by_name, get_project_id_by_name, get_task_info, submit_task,
+    cancel_task, get_machine_default_task_time_limit, get_machine_id_by_name,
+    get_project_id_by_name, get_task_info, submit_task,
 };
 use runner::task::{TaskConfig, TaskId, TaskInfo, TaskParent};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -29,6 +31,10 @@ pub(crate) struct CreateTaskParams {
     machine: String,
     /// Free-form identifier of the user submitting the task, stored alongside the task.
     user: String,
+    /// Maximum execution time in milliseconds, counted from when the backend starts running
+    /// the task. When exceeded, the task is cancelled and ends `failed`. Defaults to the
+    /// machine's default task time limit.
+    time_limit_ms: Option<u64>,
 }
 
 /// Submit a task for execution.
@@ -44,7 +50,7 @@ pub(crate) struct CreateTaskParams {
     responses(
         (status = 201, description = "Task created", body = u32),
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
-        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`, or the session is invalid or not open.")
+        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.")
     )
 )]
 pub(crate) async fn create_task(
@@ -81,7 +87,18 @@ async fn create_task_config(
             "Task has to fill 'project' or 'session_id' but not both".to_string(),
         ));
     }
-    let machine_id = get_machine_id_by_name(&core_ref.lock().unwrap(), &params.machine)?;
+    if params.time_limit_ms == Some(0) {
+        return Err(RunnerError::GenericError(
+            "'time_limit_ms' must be positive".to_string(),
+        ));
+    }
+    let (machine_id, time_limit) = {
+        let core = core_ref.lock().unwrap();
+        let machine_id = get_machine_id_by_name(&core, &params.machine)?;
+        let default = get_machine_default_task_time_limit(&core, machine_id);
+        let time_limit = params.time_limit_ms.map_or(default, Duration::from_millis);
+        (machine_id, time_limit)
+    };
     let session_id = params
         .session_id
         .map(SessionId::try_from)
@@ -97,6 +114,7 @@ async fn create_task_config(
         parent: TaskParent::new(session_id, project_id),
         user: params.user,
         payload: body,
+        time_limit,
     })
 }
 
