@@ -50,6 +50,7 @@ pub(crate) struct CreateTaskParams {
     responses(
         (status = 201, description = "Task created", body = u32),
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
+        (status = 409, description = "The machine is suspended; the body contains the suspension message."),
         (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.")
     )
 )]
@@ -71,6 +72,7 @@ pub(crate) async fn create_task(
             RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
                 client_warn(StatusCode::PAYMENT_REQUIRED, e)
             }
+            RunnerError::MachineSuspended { .. } => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
         })?;
     tracing::info!(%task_id, "task submitted");

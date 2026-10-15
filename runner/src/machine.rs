@@ -3,6 +3,7 @@ use crate::callback::NotifyConfig;
 use crate::error::RunnerError;
 use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
+use crate::suspension::{SuspendCancel, Suspension};
 use crate::task::{Task, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -67,6 +68,11 @@ pub(crate) struct Machine {
     backend: Arc<dyn Backend>,
     task_cancel_requests: Vec<TaskId>,
     session_cancel_requests: Vec<SessionId>,
+    /// The active suspension, if any; new tasks and sessions are rejected while it is set.
+    suspension: Option<Suspension>,
+    /// Suspensions whose `cancel` policy the launcher has yet to apply to existing work, with
+    /// the error to record on the failed tasks.
+    suspend_cancel_requests: Vec<(SuspendCancel, String)>,
 }
 
 impl Machine {
@@ -80,6 +86,8 @@ impl Machine {
             backend,
             task_cancel_requests: Vec::new(),
             session_cancel_requests: Vec::new(),
+            suspension: None,
+            suspend_cancel_requests: Vec::new(),
         }
     }
 
@@ -93,6 +101,25 @@ impl Machine {
 
     pub fn backend(&self) -> &Arc<dyn Backend> {
         &self.backend
+    }
+
+    pub fn suspension(&self) -> Option<&Suspension> {
+        self.suspension.as_ref()
+    }
+
+    pub(crate) fn set_suspension(&mut self, suspension: Option<Suspension>) {
+        self.suspension = suspension;
+    }
+
+    /// Fails with [`RunnerError::MachineSuspended`] if the machine is suspended.
+    pub fn check_not_suspended(&self) -> crate::Result<()> {
+        match &self.suspension {
+            Some(s) => Err(RunnerError::MachineSuspended {
+                machine: self.config.name.clone(),
+                message: s.message.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 
     pub fn queue_task(&mut self, task: &Task) -> crate::Result<()> {
@@ -160,6 +187,41 @@ impl Machine {
 
     pub(crate) fn request_session_cancel(&mut self, session_id: SessionId) {
         self.session_cancel_requests.push(session_id);
+    }
+
+    pub(crate) fn request_suspend_cancel(&mut self, cancel: SuspendCancel, error: String) {
+        self.suspend_cancel_requests.push((cancel, error));
+    }
+
+    pub(crate) fn take_suspend_cancel_requests(&mut self) -> Vec<(SuspendCancel, String)> {
+        std::mem::take(&mut self.suspend_cancel_requests)
+    }
+
+    /// Takes every task still in the main queue (never handed to the backend), leaving the
+    /// queued sessions in place.
+    pub(crate) fn take_queued_tasks(&mut self) -> Vec<TaskId> {
+        let mut tasks = Vec::new();
+        self.queue.retain(|item| match item {
+            QueueItem::Task(t) => {
+                tasks.push(*t);
+                false
+            }
+            QueueItem::Session(_) => true,
+        });
+        tasks
+    }
+
+    /// Takes every session still waiting in the main queue (never opened).
+    pub(crate) fn take_queued_sessions(&mut self) -> Vec<SessionId> {
+        let mut sessions = Vec::new();
+        self.queue.retain(|item| match item {
+            QueueItem::Session(s) => {
+                sessions.push(*s);
+                false
+            }
+            QueueItem::Task(_) => true,
+        });
+        sessions
     }
 
     pub(crate) fn take_task_cancel_requests(&mut self) -> Vec<TaskId> {

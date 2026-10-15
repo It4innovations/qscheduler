@@ -3,6 +3,7 @@ use crate::config::MachineConfiguration;
 use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionStateKind};
+use crate::suspension::{SuspendCancel, Suspension};
 use crate::task::{CompletedState, TaskConfig, TaskId, TaskInfo, TaskStateKind};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -525,6 +526,96 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
         machines.push((machine_id, config));
     }
     Ok(machines)
+}
+
+fn suspension_from_row(row: &sqlx::postgres::PgRow) -> crate::Result<Suspension> {
+    Ok(Suspension {
+        message: row.try_get("message")?,
+        cancel: SuspendCancel::from_db_str(row.try_get("cancel")?)?,
+        suspended_at: row.try_get("suspended_at")?,
+        resumed_at: row.try_get("resumed_at")?,
+    })
+}
+
+/// Records a new active suspension of a machine. Fails with
+/// [`RunnerError::MachineAlreadySuspended`] if the machine already has one.
+pub(crate) async fn insert_suspension(
+    pool: &PgPool,
+    machine_id: MachineId,
+    machine_name: &str,
+    message: &str,
+    cancel: SuspendCancel,
+) -> crate::Result<Suspension> {
+    let row = sqlx::query(
+        "INSERT INTO machine_suspensions (machine_id, message, cancel) \
+         VALUES ($1, $2, $3::suspension_cancel) \
+         RETURNING message, cancel::text AS cancel, suspended_at, resumed_at",
+    )
+    .bind(machine_id.as_u32() as i32)
+    .bind(message)
+    .bind(cancel.as_db_str())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        if is_already_exists_error(&e) {
+            RunnerError::MachineAlreadySuspended(machine_name.to_string())
+        } else {
+            RunnerError::Sqlx(e)
+        }
+    })?;
+    suspension_from_row(&row)
+}
+
+/// Ends the machine's active suspension. Returns it, or `None` if the machine wasn't suspended.
+pub(crate) async fn end_suspension(
+    pool: &PgPool,
+    machine_id: MachineId,
+) -> crate::Result<Option<Suspension>> {
+    let row = sqlx::query(
+        "UPDATE machine_suspensions SET resumed_at = GREATEST(NOW(), suspended_at) \
+         WHERE machine_id = $1 AND resumed_at IS NULL \
+         RETURNING message, cancel::text AS cancel, suspended_at, resumed_at",
+    )
+    .bind(machine_id.as_u32() as i32)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(suspension_from_row).transpose()
+}
+
+/// All suspensions of a machine, newest first.
+pub(crate) async fn list_suspensions(
+    pool: &PgPool,
+    machine_id: MachineId,
+) -> crate::Result<Vec<Suspension>> {
+    let rows = sqlx::query(
+        "SELECT message, cancel::text AS cancel, suspended_at, resumed_at \
+         FROM machine_suspensions WHERE machine_id = $1 ORDER BY suspended_at DESC, id DESC",
+    )
+    .bind(machine_id.as_u32() as i32)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(suspension_from_row).collect()
+}
+
+/// The active suspension of every suspended machine.
+pub(crate) async fn load_active_suspensions(
+    pool: &PgPool,
+) -> crate::Result<Vec<(MachineId, Suspension)>> {
+    let rows = sqlx::query(
+        "SELECT machine_id, message, cancel::text AS cancel, suspended_at, resumed_at \
+         FROM machine_suspensions WHERE resumed_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let machine_id: i32 = row.try_get("machine_id")?;
+            Ok((
+                MachineId::from(machine_id as u32),
+                suspension_from_row(row)?,
+            ))
+        })
+        .collect()
 }
 
 /// Load all tasks that are still in a non-terminal state (stored as `waiting`).

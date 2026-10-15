@@ -2,6 +2,9 @@ use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionState};
+use crate::suspension::{
+    MAX_SUSPENSION_MESSAGE_LEN, SuspendCancel, Suspension, suspension_task_error,
+};
 use crate::task::{TaskConfig, TaskId, TaskInfo};
 use crate::{MachineId, db};
 use std::time::Duration;
@@ -279,4 +282,91 @@ pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Re
             Ok(id)
         }
     }
+}
+
+/// Suspends a machine: from now on it rejects new tasks and sessions with `message`. The
+/// `cancel` policy is applied to its existing work asynchronously, by the machine's launcher.
+#[tracing::instrument(skip(core_ref, message))]
+pub async fn suspend_machine(
+    core_ref: &CoreRef,
+    machine_id: MachineId,
+    message: String,
+    cancel: SuspendCancel,
+) -> crate::Result<Suspension> {
+    if message.trim().is_empty() {
+        return Err(RunnerError::InvalidSuspensionMessage(
+            "message must not be empty".to_string(),
+        ));
+    }
+    let len = message.chars().count();
+    if len > MAX_SUSPENSION_MESSAGE_LEN {
+        return Err(RunnerError::InvalidSuspensionMessage(format!(
+            "message has {len} characters, at most {MAX_SUSPENSION_MESSAGE_LEN} are allowed"
+        )));
+    }
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.suspension_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    let name = {
+        let core = core_ref.lock().unwrap();
+        let machine = core.split().machine_map.find_machine(machine_id)?;
+        if machine.suspension().is_some() {
+            return Err(RunnerError::MachineAlreadySuspended(
+                machine.config().name.clone(),
+            ));
+        }
+        machine.config().name.clone()
+    };
+    let suspension = db::insert_suspension(&pool, machine_id, &name, &message, cancel).await?;
+    tracing::info!(machine = name, ?cancel, message, "Machine suspended");
+    let mut core = core_ref.lock().unwrap();
+    let machine = core.split_mut().machine_map.get_machine_mut(machine_id);
+    machine.set_suspension(Some(suspension.clone()));
+    if cancel != SuspendCancel::None {
+        machine.request_suspend_cancel(cancel, suspension_task_error(&message));
+        machine.wake_launcher();
+    }
+    Ok(suspension)
+}
+
+/// Ends a machine's active suspension, so it accepts new tasks and sessions again. Returns the
+/// ended suspension.
+#[tracing::instrument(skip(core_ref))]
+pub async fn resume_machine(
+    core_ref: &CoreRef,
+    machine_id: MachineId,
+) -> crate::Result<Suspension> {
+    let (lock, pool, name) = {
+        let core = core_ref.lock().unwrap();
+        let machine = core.split().machine_map.find_machine(machine_id)?;
+        (
+            core.suspension_lock(),
+            core.pool().clone(),
+            machine.config().name.clone(),
+        )
+    };
+    let _guard = lock.lock().await;
+    let suspension = db::end_suspension(&pool, machine_id)
+        .await?
+        .ok_or_else(|| RunnerError::MachineNotSuspended(name.clone()))?;
+    tracing::info!(machine = name, "Machine suspension ended");
+    core_ref
+        .lock()
+        .unwrap()
+        .split_mut()
+        .machine_map
+        .get_machine_mut(machine_id)
+        .set_suspension(None);
+    Ok(suspension)
+}
+
+/// The machine's suspension history (including the active suspension, if any), newest first.
+pub async fn list_machine_suspensions(
+    core_ref: &CoreRef,
+    machine_id: MachineId,
+) -> crate::Result<Vec<Suspension>> {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    db::list_suspensions(&pool, machine_id).await
 }
