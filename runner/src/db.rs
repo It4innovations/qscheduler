@@ -117,6 +117,70 @@ pub async fn update_machine(
     Ok(result.rows_affected() > 0)
 }
 
+pub enum RemoveMachineOutcome {
+    NotFound,
+    /// The machine still has tasks or sessions and `force` was not set; nothing was removed.
+    HasDependents {
+        tasks: i64,
+        sessions: i64,
+    },
+    /// The machine was removed together with the given number of tasks and sessions.
+    Removed {
+        tasks: i64,
+        sessions: i64,
+    },
+}
+
+/// Removes a machine. Without `force`, the machine is removed only if it has no tasks and no
+/// sessions. With `force`, its tasks and sessions are deleted as well. Project `consumed_ms`
+/// totals are left untouched (deleting rows does not fire the consumption triggers).
+pub async fn remove_machine(
+    pool: &PgPool,
+    name: &str,
+    force: bool,
+) -> crate::Result<RemoveMachineOutcome> {
+    let mut tx = pool.begin().await?;
+    let Some(row) = sqlx::query("SELECT id FROM machines WHERE name = $1 FOR UPDATE")
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(RemoveMachineOutcome::NotFound);
+    };
+    let machine_id: i32 = row.get("id");
+    let counts = sqlx::query(
+        "SELECT \
+           (SELECT COUNT(*) FROM tasks WHERE machine_id = $1 \
+              OR session_id IN (SELECT id FROM sessions WHERE machine_id = $1)) AS tasks, \
+           (SELECT COUNT(*) FROM sessions WHERE machine_id = $1) AS sessions",
+    )
+    .bind(machine_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let tasks: i64 = counts.get("tasks");
+    let sessions: i64 = counts.get("sessions");
+    if (tasks > 0 || sessions > 0) && !force {
+        return Ok(RemoveMachineOutcome::HasDependents { tasks, sessions });
+    }
+    sqlx::query(
+        "DELETE FROM tasks WHERE machine_id = $1 \
+         OR session_id IN (SELECT id FROM sessions WHERE machine_id = $1)",
+    )
+    .bind(machine_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM sessions WHERE machine_id = $1")
+        .bind(machine_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM machines WHERE id = $1")
+        .bind(machine_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RemoveMachineOutcome::Removed { tasks, sessions })
+}
+
 /// A non-terminal task loaded from the database during startup restoration.
 #[derive(sqlx::FromRow)]
 pub struct RestoredTask {
