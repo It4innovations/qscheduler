@@ -11,6 +11,19 @@ pub async fn check_db_health(core_ref: &CoreRef) -> bool {
     db::ping(&pool).await
 }
 
+/// Stops all launchers and waits until each has written its pending DB updates.
+///
+/// Call after the HTTP server has stopped accepting requests, so no new work arrives meanwhile.
+/// Cancel requests already accepted are still applied; no new tasks are submitted to backends.
+pub async fn shutdown(core_ref: &CoreRef) {
+    let handles = core_ref.lock().unwrap().begin_shutdown();
+    for handle in handles {
+        if let Err(e) = handle.await {
+            tracing::error!(error = %e, "launcher task failed during shutdown");
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, fields(task_id = tracing::field::Empty))]
 pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Result<TaskId> {
     tracing::debug!("Submitting task");

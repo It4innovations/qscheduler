@@ -40,16 +40,6 @@ def _count(cur, table):
     return cur.fetchone()[0]
 
 
-def _wait_db_session_closed(cur, session_id, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        cur.execute("SELECT closed_at FROM sessions WHERE id = %s", [session_id])
-        if cur.fetchone()[0] is not None:
-            return
-        time.sleep(0.1)
-    raise TimeoutError(f"Session {session_id} not closed in DB after {timeout}s")
-
-
 def test_machine_remove_empty(qscheduler_test, db_connect):
     qscheduler_test.start()
     qscheduler_test.stop()
@@ -78,8 +68,6 @@ def test_machine_remove_with_dependents(qscheduler_test, db_connect):
     time.sleep(0.3)
     qscheduler_test.cancel_session(session_id)
     qscheduler_test.wait_for_session_state(session_id, "closed")
-    with db_connect.cursor() as cur:
-        _wait_db_session_closed(cur, session_id)
     qscheduler_test.stop(kill=False)
 
     with db_connect.cursor() as cur:

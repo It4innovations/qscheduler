@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tracing::{debug, warn};
 
@@ -25,7 +27,8 @@ pub fn start_launcher(
     backend: Arc<dyn Backend>,
     backend_receiver: UnboundedReceiver<FromBackendMessage>,
     restore_tasks: Vec<ResumeTask>,
-) {
+    shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     let core_ref = core_ref.clone();
     let notify_sender = machine_config.notify.as_ref().map(|nc| {
         let notify_config = nc.clone();
@@ -47,9 +50,10 @@ pub fn start_launcher(
             backend_receiver,
             notify_sender,
             restore_tasks,
+            shutdown,
         )
         .await
-    });
+    })
 }
 
 struct RunningSession {
@@ -383,6 +387,8 @@ enum LauncherEvent {
     /// Periodic session quota checkpoint, task time limit and project limit check.
     PeriodicCheck,
     BackendMessage(FromBackendMessage),
+    /// Service shutdown: run one last iteration that persists pending state, then exit.
+    Shutdown,
 }
 
 #[tracing::instrument(skip_all, fields(%machine_id))]
@@ -393,6 +399,7 @@ async fn launcher_main(
     mut backend_receiver: UnboundedReceiver<FromBackendMessage>,
     notify_sender: Option<UnboundedSender<NotifyEvent>>,
     resume_tasks: Vec<ResumeTask>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     debug!(%machine_id, "Starting launcher");
     let (notifier, queue_size, max_clock_skew, mut limit_check_interval) = {
@@ -447,9 +454,13 @@ async fn launcher_main(
     }
 
     let mut running_session: Option<RunningSession> = None;
+    let mut shutting_down = false;
 
     loop {
         let event = select! {
+            // An error means the sender was dropped, which is a shutdown as well.
+            _ = shutdown.changed(), if !shutting_down =>
+                LauncherEvent::Shutdown,
             _ = notifier.notified() =>
                 LauncherEvent::Notified,
             _ = async {
@@ -488,6 +499,25 @@ async fn launcher_main(
             } = core.split_mut();
             match event {
                 LauncherEvent::Notified => { /* Do nothing */ }
+                LauncherEvent::Shutdown => {
+                    debug!(%machine_id, "Launcher shutting down");
+                    shutting_down = true;
+                    // Checkpoint the running session so its time since the last periodic
+                    // checkpoint is not lost; restore closes it at this checkpoint.
+                    if let Some(s) = running_session.as_mut() {
+                        let exec_time = Instant::now() - s.opened_at;
+                        let delta = exec_time - s.exec_time;
+                        s.exec_time = exec_time;
+                        project_map
+                            .get_project_mut(s.project_id)
+                            .update_consumed(delta);
+                        session_map.get_session_mut(s.session_id).consumed = exec_time;
+                        db_updates.push(DbUpdate::SessionExecTime {
+                            session_id: s.session_id,
+                            exec_time_ms: exec_time.as_millis() as i64,
+                        });
+                    }
+                }
                 LauncherEvent::SessionEnd | LauncherEvent::PeriodicCheck => {
                     if let Some(s) = running_session.as_mut() {
                         let exec_time = Instant::now() - s.opened_at;
@@ -780,7 +810,10 @@ async fn launcher_main(
                 }
             }
 
-            while submitted_tasks.len() < queue_size
+            // No new submissions while shutting down: the backend id of a task submitted now
+            // would not be recorded before exit.
+            while !shutting_down
+                && submitted_tasks.len() < queue_size
                 && let Some((task_id, payload)) = pick_task(
                     &mut core,
                     machine_id,
@@ -883,6 +916,11 @@ async fn launcher_main(
                     exec_time_ms,
                 } => db::update_session_exec_time(&pool, session_id, exec_time_ms).await,
             }
+        }
+
+        if shutting_down {
+            debug!(%machine_id, "Launcher stopped, pending DB updates flushed");
+            break;
         }
     }
 }

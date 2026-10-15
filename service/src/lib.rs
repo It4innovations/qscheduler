@@ -98,9 +98,10 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         }
     }
     let runner_conf = RunnerConfiguration { machines };
+    let core_ref = Core::new(runner_conf, pool).await?;
     let state = Arc::new(AppState {
         version,
-        core_ref: Core::new(runner_conf, pool).await?,
+        core_ref: core_ref.clone(),
     });
 
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -136,6 +137,34 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
 
     tracing::info!("listening on {}", listener.local_addr().unwrap());
 
-    axum::serve(listener, app).await.expect("server error");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+    tracing::info!("HTTP server stopped, flushing pending DB updates");
+    runner::reactor::shutdown(&core_ref).await;
     Ok(())
+}
+
+/// Resolves on SIGINT (ctrl-c) or, on Unix, SIGTERM (e.g. `docker stop`, systemd).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl-c handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
 }
