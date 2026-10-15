@@ -5,7 +5,7 @@ from utils import TestTask as TT
 
 
 def _parse_ts(ts: str) -> datetime:
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return datetime.fromisoformat(ts)
 
 
 def test_task_info_fields_project(qscheduler):

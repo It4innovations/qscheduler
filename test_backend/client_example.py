@@ -1,17 +1,19 @@
-import requests
-import uuid
 import json
+import uuid
+
+import requests
+from iqm.qiskit_iqm.fake_backends.fake_deneb import IQMFakeDeneb
+from iqm.qiskit_iqm.fake_backends.iqm_fake_backend import (
+    IQMErrorProfile,
+    IQMFakeBackend,
+)
 
 # Use for production
 # from iqm.qiskit_iqm.iqm_backend import IQMBackendBase
 from iqm.station_control.interface.models import StaticQuantumArchitecture
-from iqm.qiskit_iqm.fake_backends.fake_deneb import IQMFakeDeneb
-from iqm.qiskit_iqm.fake_backends.iqm_fake_backend import (
-    IQMFakeBackend,
-    IQMErrorProfile,
-)
 from qiskit import QuantumCircuit
-from qiskit.providers import Options, JobV1 as Job
+from qiskit.providers import JobV1 as Job
+from qiskit.providers import Options
 from qiskit.qasm3 import dumps as qasm3dumps
 from qiskit.result import Result
 
