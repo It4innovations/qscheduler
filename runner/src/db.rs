@@ -31,19 +31,25 @@ pub fn is_already_exists_error(err: &sqlx::Error) -> bool {
     }
 }
 
-pub async fn insert_machine(pool: &PgPool, config: &MachineConfiguration) -> crate::Result<i32> {
-    let machine_type = match config.backend {
+fn machine_type(config: &MachineConfiguration) -> &'static str {
+    match config.backend {
         crate::backend::BackendConfig::Iqm(_) => "iqm",
         crate::backend::BackendConfig::Test => "test",
-    };
-    let config_str = serde_json::to_string(config)
-        .map_err(|e| crate::error::RunnerError::GenericError(e.to_string()))?;
+    }
+}
+
+fn serialize_machine_config(config: &MachineConfiguration) -> crate::Result<String> {
+    serde_json::to_string(config).map_err(|e| RunnerError::GenericError(e.to_string()))
+}
+
+pub async fn insert_machine(pool: &PgPool, config: &MachineConfiguration) -> crate::Result<i32> {
+    let config_str = serialize_machine_config(config)?;
     let row = sqlx::query(
         "INSERT INTO machines (name, type, config) \
          VALUES ($1, $2::machine_type, $3::json) RETURNING id",
     )
     .bind(&config.name)
-    .bind(machine_type)
+    .bind(machine_type(config))
     .bind(&config_str)
     .fetch_one(pool)
     .await
@@ -58,60 +64,16 @@ pub async fn insert_machine(pool: &PgPool, config: &MachineConfiguration) -> cra
     Ok(row.get("id"))
 }
 
-pub struct MachineRow {
-    pub queue_size: i32,
-    pub config: crate::backend::BackendConfig,
-    pub notify_url: Option<String>,
-    pub notify_token: Option<String>,
-}
-
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for MachineRow {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
-        use sqlx::Row;
-        let config_str: String = row.try_get("config")?;
-        let config = serde_json::from_str(&config_str).map_err(|e| sqlx::Error::ColumnDecode {
-            index: "config".to_string(),
-            source: e.into(),
-        })?;
-        Ok(MachineRow {
-            queue_size: row.try_get("queue_size")?,
-            config,
-            notify_url: row.try_get("notify_url")?,
-            notify_token: row.try_get("notify_token")?,
-        })
-    }
-}
-
-pub async fn get_machine_by_name(pool: &PgPool, name: &str) -> crate::Result<Option<MachineRow>> {
-    sqlx::query_as::<_, MachineRow>(
-        "SELECT queue_size, config::text AS config, notify_url, notify_token \
-         FROM machines WHERE name = $1",
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await
-    .map_err(crate::error::RunnerError::Sqlx)
-}
-
-pub async fn update_machine(
-    pool: &PgPool,
-    name: &str,
-    queue_size: i32,
-    config: &crate::backend::BackendConfig,
-    notify_url: Option<&str>,
-    notify_token: Option<&str>,
-) -> crate::Result<bool> {
-    let config_str = serde_json::to_string(config)
-        .map_err(|e| crate::error::RunnerError::GenericError(e.to_string()))?;
+/// Replaces the stored configuration (and backend type) of the machine named `config.name`.
+/// Returns `false` if no such machine exists.
+pub async fn update_machine(pool: &PgPool, config: &MachineConfiguration) -> crate::Result<bool> {
+    let config_str = serialize_machine_config(config)?;
     let result = sqlx::query(
-        "UPDATE machines SET config = $2::json, queue_size = $3, \
-         notify_url = $4, notify_token = $5 WHERE name = $1",
+        "UPDATE machines SET type = $2::machine_type, config = $3::json WHERE name = $1",
     )
-    .bind(name)
+    .bind(&config.name)
+    .bind(machine_type(config))
     .bind(&config_str)
-    .bind(queue_size)
-    .bind(notify_url)
-    .bind(notify_token)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
