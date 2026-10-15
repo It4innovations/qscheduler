@@ -1,5 +1,7 @@
+import json
 import time
 
+from utils import TEST_MACHINE_NAME
 from utils import TestTask as TT
 from utils_iqm import ABOUT
 
@@ -97,3 +99,76 @@ def test_machine_remove_with_dependents(qscheduler_test, db_connect):
         # Consumed time is not returned to the project
         cur.execute("SELECT consumed_ms FROM projects")
         assert cur.fetchone()[0] == consumed_before
+
+
+def _machine_row(cur, name=TEST_MACHINE_NAME):
+    cur.execute("SELECT type::text, config::text FROM machines WHERE name = %s", [name])
+    machine_type, config = cur.fetchone()
+    return machine_type, json.loads(config)
+
+
+def test_machine_update(qscheduler_test, db_connect):
+    qscheduler_test.max_session_time = 60
+    qscheduler_test.start()
+    qscheduler_test.new_session(time_limit=30)
+    qscheduler_test.stop(kill=False)
+
+    r = qscheduler_test.update_machine(
+        "--queue-size=7",
+        "--max-session-time=10s",
+        "--notify-url=http://127.0.0.1:1/notify",
+        "--notify-token=secret",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "updated" in r.stdout
+
+    with db_connect.cursor() as cur:
+        machine_type, config = _machine_row(cur)
+    assert machine_type == "test"
+    assert config["name"] == TEST_MACHINE_NAME
+    assert config["queue_size"] == 7
+    assert config["max_session_time_ms"] == 10_000
+    assert config["notify"] == {
+        "url": "http://127.0.0.1:1/notify",
+        "token": "secret",
+    }
+
+    # The service loads the updated configuration on restart
+    qscheduler_test.restart()
+    qscheduler_test.new_session(time_limit=10)
+    qscheduler_test.new_session(time_limit=30, expect_error=422)
+
+
+def test_machine_update_backend_type(qscheduler_test, db_connect):
+    qscheduler_test.start()
+    qscheduler_test.stop(kill=False)
+
+    r = qscheduler_test.update_machine(
+        backend_args=[
+            "iqm",
+            "--url=http://127.0.0.1:1",
+            "--token=tok",
+            "--machine-name=garnet",
+            "--poll-interval=1s",
+        ]
+    )
+    assert r.returncode == 0, r.stderr
+
+    with db_connect.cursor() as cur:
+        machine_type, config = _machine_row(cur)
+    assert machine_type == "iqm"
+    assert config["backend"]["type"] == "iqm"
+    assert config["backend"]["machine_name"] == "garnet"
+
+
+def test_machine_update_unknown(qscheduler_test, db_connect):
+    qscheduler_test.start()
+    qscheduler_test.stop(kill=False)
+    with db_connect.cursor() as cur:
+        before = _machine_row(cur)
+
+    r = qscheduler_test.update_machine("--queue-size=7", name="no-such-machine")
+    assert r.returncode == 1
+    assert "not found" in r.stderr
+    with db_connect.cursor() as cur:
+        assert _machine_row(cur) == before

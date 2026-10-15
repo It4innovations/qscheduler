@@ -119,6 +119,19 @@ class QScheduler:
             env={**os.environ, "DATABASE_URL": self.database_url},
         )
 
+    def update_machine(
+        self, *args: str, name: str = TEST_MACHINE_NAME, backend_args=None
+    ) -> subprocess.CompletedProcess:
+        if backend_args is None:
+            backend_args = self.backend.machine_args()
+        return subprocess.run(
+            [self._binary, "machine", "update", name, *args, *backend_args],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "DATABASE_URL": self.database_url},
+        )
+
     def remove_machine(
         self, name: str = TEST_MACHINE_NAME, force: bool = False
     ) -> subprocess.CompletedProcess:

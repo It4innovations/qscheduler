@@ -249,42 +249,20 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
 
 async fn cmd_machine_update(args: MachineConfigArgs) {
     let pool = connect_db().await;
-    match runner::db::get_machine_by_name(&pool, &args.name).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            tracing::error!(name = %args.name, "machine not found");
-            eprintln!("Error: machine '{}' not found.", args.name);
-            std::process::exit(1);
-        }
-        Err(e) => {
-            tracing::error!(name = %args.name, error = %e, "failed to fetch machine");
-            eprintln!("Error: failed to fetch machine '{}': {e}", args.name);
-            std::process::exit(1);
-        }
-    };
-    let new_backend = args.backend.into_config();
-    match runner::db::update_machine(
-        &pool,
-        &args.name,
-        args.queue_size as i32,
-        &new_backend,
-        args.notify_url.as_deref(),
-        args.notify_token.as_deref(),
-    )
-    .await
-    {
+    let config = args.into_machine_configuration();
+    match runner::db::update_machine(&pool, &config).await {
         Ok(true) => {
-            println!("Machine '{}' updated successfully.", args.name);
+            println!("Machine '{}' updated successfully.", config.name);
             println!("Restart the service for the change to take effect.");
         }
         Ok(false) => {
-            tracing::error!(name = %args.name, "machine not found");
-            eprintln!("Error: machine '{}' not found.", args.name);
+            tracing::error!(name = %config.name, "machine not found");
+            eprintln!("Error: machine '{}' not found.", config.name);
             std::process::exit(1);
         }
         Err(e) => {
-            tracing::error!(name = %args.name, error = %e, "failed to update machine");
-            eprintln!("Error: failed to update machine '{}': {e}", args.name);
+            tracing::error!(name = %config.name, error = %e, "failed to update machine");
+            eprintln!("Error: failed to update machine '{}': {e}", config.name);
             std::process::exit(1);
         }
     }
