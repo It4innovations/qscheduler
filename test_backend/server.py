@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """Mock backend server: spawns per-task worker servers on demand using MIME for tasking."""
 
+import json
 import logging
+import socket
 import threading
 import uuid
-import json
-import socket
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
-
-from qiskit import QuantumCircuit
-from qiskit.qasm3 import loads as qasm3loads
-
 from iqm.qiskit_iqm.fake_backends.fake_deneb import IQMFakeDeneb
 from iqm.station_control.interface.models import StaticQuantumArchitecture
+from qiskit import QuantumCircuit
+from qiskit.qasm3 import loads as qasm3loads
 
 logging.getLogger("uvicorn").setLevel(logging.ERROR)
 
@@ -80,17 +78,17 @@ class IQMWorker:
             circuit = qasm3loads(qasm_content)
             self.prepared_circuits[task_id] = QTask([circuit], execution_args)
         except Exception as e:
-            return {"error_msg": f"Failed to load OpenQASM: {str(e)}"}, 400
+            return {"error_msg": f"Failed to load OpenQASM: {e!s}"}, 400
 
-        print(f"[worker] task '{str(task_id)}' assigned and compiled")
+        print(f"[worker] task '{task_id!s}' assigned and compiled")
         return {"qtask_id": str(task_id)}, 200
 
     def start_task(self, task_uuid: uuid.UUID):
         qtask = self.prepared_circuits.get(task_uuid)
         if qtask is None:
-            return {"error_msg": f"Task {str(task_uuid)} not found!"}, 404
+            return {"error_msg": f"Task {task_uuid!s} not found!"}, 404
 
-        print(f"[worker] task '{str(task_uuid)}' started")
+        print(f"[worker] task '{task_uuid!s}' started")
         qjob = self.iqm_backend.run(qtask.circuits, **qtask.execution_kwargs)
         qresult = qjob.result()
 
@@ -101,7 +99,7 @@ class IQMWorker:
 
     def delete_task(self, task_uuid: uuid.UUID):
         if task_uuid not in self.prepared_circuits:
-            return {"error_msg": f"Task {str(task_uuid)} not found!"}, 404
+            return {"error_msg": f"Task {task_uuid!s} not found!"}, 404
 
         del self.prepared_circuits[task_uuid]
         return {"qtask_id": str(task_uuid), "status": "deleted"}, 200
@@ -136,7 +134,7 @@ def make_worker_app(worker: IQMWorker) -> FastAPI:
             qasm_str = qasm_bytes.decode("utf-8")
         except Exception as e:
             return JSONResponse(
-                {"error_msg": f"MIME parsing failed: {str(e)}"}, status_code=400
+                {"error_msg": f"MIME parsing failed: {e!s}"}, status_code=400
             )
 
         content, status = worker.set_task(cal_uuid, exec_dict, qasm_str)

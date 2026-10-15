@@ -1,8 +1,9 @@
 import time
+
 import requests
+from iqm.qiskit_iqm.fake_backends.fake_deneb import IQMFakeDeneb
 from qiskit import QuantumCircuit, transpile
 from qiskit.qasm3 import dumps as qasm3dumps
-from iqm.qiskit_iqm.fake_backends.fake_deneb import IQMFakeDeneb
 
 QSCHEDULER = "http://localhost:3000"
 
