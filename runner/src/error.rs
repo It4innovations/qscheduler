@@ -44,6 +44,14 @@ pub enum RunnerError {
         limit: Duration,
         requested: Duration,
     },
+    #[error("Machine '{machine}' is suspended: {message}")]
+    MachineSuspended { machine: String, message: String },
+    #[error("Machine '{0}' is already suspended")]
+    MachineAlreadySuspended(String),
+    #[error("Machine '{0}' is not suspended")]
+    MachineNotSuspended(String),
+    #[error("Invalid suspension message: {0}")]
+    InvalidSuspensionMessage(String),
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 

@@ -18,6 +18,22 @@
 - Project time limit is enforced on running project tasks (not only before submit)
 - Machine option `--max-clock-skew` (default `4s`): running-time estimates never exceed the
   true time despite backend clock skew, so tasks are never stopped early
+- Machine suspension: `POST /machine/{machine}/suspension` (with a message of up to 512
+  characters) and `DELETE /machine/{machine}/suspension`. A suspended machine rejects new tasks
+  and sessions, including tasks submitted into an open session, with HTTP 409 and the message.
+  The `cancel` option sets what happens to existing work: `none` (it continues), `waiting`
+  (tasks not yet submitted to the backend fail and all sessions close) or `all` (running tasks
+  fail too, and their cancellation on the backend is requested).
+- `GET /machine/{machine}/suspensions`: a machine's suspension history
+- `machine remove` CLI command (`--force` also deletes the machine's tasks and sessions)
+- Graceful shutdown on `SIGTERM`/`Ctrl+C`: pending state, including running session time, is
+  written to the database before exit
+
+### Fixed
+
+- `machine update` failed with a database error (`column "queue_size" does not exist`). It now
+  replaces the machine's whole configuration (options left out are reset to their defaults) and
+  its backend type.
 
 
 ## v0.1.0

@@ -45,6 +45,8 @@ pub struct Core {
     core_ref: Option<CoreRef>,
     shutdown_sender: watch::Sender<bool>,
     launcher_handles: Vec<JoinHandle<()>>,
+    /// Serializes suspend/resume, which update the DB and then the in-memory state.
+    suspension_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub type CoreRef = Arc<Mutex<Core>>;
@@ -80,6 +82,7 @@ impl Core {
             core_ref: None,
             shutdown_sender: watch::Sender::new(false),
             launcher_handles: Vec::new(),
+            suspension_lock: Default::default(),
         }));
         core_ref.lock().unwrap().core_ref = Some(core_ref.clone());
 
@@ -140,6 +143,13 @@ impl Core {
                 return Err(RunnerError::GenericError("Restoration failed".into()));
             }
         };
+        let suspensions = match db::load_active_suspensions(&pool).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load machine suspensions for restoration");
+                return Err(RunnerError::GenericError("Restoration failed".into()));
+            }
+        };
 
         // Cancelled tasks whose session is no longer active (data anomaly): cancel directly.
         let mut orphan_cancels: Vec<TaskId> = Vec::new();
@@ -160,6 +170,18 @@ impl Core {
 
             for project in projects {
                 project_map.add_project(project);
+            }
+
+            // Only the "rejects new work" part of a suspension is restored: its `cancel` policy
+            // was applied to existing work when the suspension started.
+            for (machine_id, suspension) in suspensions {
+                match machine_map.find_machine_mut(machine_id) {
+                    Ok(machine) => machine.set_suspension(Some(suspension)),
+                    Err(_) => tracing::warn!(
+                        %machine_id,
+                        "suspension references unknown machine on restore"
+                    ),
+                }
             }
 
             for s in &sessions {
@@ -363,6 +385,10 @@ impl Core {
         &self.pool
     }
 
+    pub(crate) fn suspension_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.suspension_lock.clone()
+    }
+
     pub(crate) fn start_launchers(
         &mut self,
         mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>,
@@ -418,6 +444,7 @@ impl Core {
 
     pub(crate) fn validate_session_config(&self, config: &SessionConfig) -> crate::Result<()> {
         let machine = self.machine_map.find_machine(config.machine_id)?;
+        machine.check_not_suspended()?;
         let limit = machine.config().max_session_time;
         if config.time_limit > limit {
             return Err(RunnerError::SessionDurationExceedsLimit {
@@ -441,6 +468,7 @@ impl Core {
 
     pub(crate) fn validate_task_config(&self, config: &TaskConfig) -> crate::Result<()> {
         let machine = self.machine_map.find_machine(config.machine_id)?;
+        machine.check_not_suspended()?;
         if let Some(s_id) = config.parent.session_id() {
             match machine.running_session_id() {
                 Some(id) if id == s_id => {}
@@ -472,6 +500,8 @@ impl Core {
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
+        // Re-checked: the machine may have been suspended while the task row was inserted.
+        machine.check_not_suspended()?;
         let task = Task::new(task_id, created_at, config);
         machine.queue_task(&task)?;
         task_map.insert(task);
@@ -491,6 +521,8 @@ impl Core {
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
+        // Re-checked: the machine may have been suspended while the session row was inserted.
+        machine.check_not_suspended()?;
         let session = Session::new(session_id, created_at, config);
         machine.queue_session(&session)?;
         session_map.insert(session);

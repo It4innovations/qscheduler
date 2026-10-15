@@ -11,6 +11,8 @@ A task scheduling service that dispatches work to remote quantum computing backe
   is deactivated.
 - **Sessions** — an exclusive, time-limited reservation of a machine for a single project, so a
   sequence of tasks can run back-to-back without interleaving with other projects' work.
+- **Machine suspension** — take a machine out of service with a message: new tasks and sessions
+  are rejected, and existing work is optionally failed. Every suspension is kept in a history.
 - **Notifications** — optional HTTP callbacks on task completion and session open/close.
 - **REST API** — a JSON HTTP API for submitting and monitoring tasks, sessions, and projects,
   with an OpenAPI spec served at runtime.
@@ -92,10 +94,11 @@ off exponentially (starting at `--poll-interval`, capped at 60s) and return to t
 interval after the first successful poll. A cancel that can't be delivered is retried on the
 job's later polls. Each poll/cancel request times out after 10s.
 
-`qscheduler machine update <NAME> ...` is intended to change an existing machine's configuration
-using the same arguments as `add`.
+`qscheduler machine update <NAME> ...` changes an existing machine's configuration using the
+same arguments as `add`. It replaces the whole configuration: an option left out is reset to its
+default, not kept at its current value.
 Machines are only loaded once at service startup, so **the service must be restarted** after
-`machine add` for the change to take effect.
+`machine add` or `machine update` for the change to take effect.
 
 ### Remove a machine
 
@@ -329,6 +332,10 @@ Submit a task for execution.
 
 **Response `402`** — the project has exceeded its time limit, or the project is not active.
 
+**Response `409`** — the machine is suspended (also for a task submitted into an open session).
+The body is the error text with the suspension message, e.g.
+`Machine 'garnet' is suspended: Calibration in progress`.
+
 **Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.
 
 ---
@@ -436,6 +443,8 @@ in the session are cancelled when the session closes.
 **Response `402`** — the project has exceeded its time limit, or the project is not active.
 
 **Response `404`** — unknown `machine`.
+
+**Response `409`** — the machine is suspended; the body contains the suspension message.
 
 **Response `422`** — unknown `project`, or `time_limit_ms` exceeds the machine's `--max-session-time`.
 
@@ -631,3 +640,84 @@ Fetch a calibration data set from the backend.
 **Response `404`** — unknown machine.
 
 **Response `500`** — backend error.
+
+---
+
+### `POST /machine/{machine}/suspension`
+
+Suspend a machine. While it is suspended, every new task and session for it is rejected with
+`409` and the suspension message, including tasks submitted into a session that is already
+open. A machine has at most one active suspension.
+
+**Request body** — `application/json`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `message` | string | yes | Why the machine is suspended; 1–512 characters. |
+| `cancel` | string | no | What happens to existing work (default `"none"`, see below). |
+
+| `cancel` | Effect on existing work |
+|---|---|
+| `"none"` | Nothing: queued and running tasks and queued and open sessions continue as normal. |
+| `"waiting"` | Every task not yet submitted to the backend ends `"failed"`, and every session is closed: queued sessions never open, and the tasks of an open session fail, including the ones already submitted to the backend. Other submitted tasks are computed as normal. |
+| `"all"` | Like `"waiting"`, and every task already submitted to the backend ends `"failed"` as well. |
+
+A task failed by a suspension has the error `"Machine suspended: <message>"`. A submitted task is
+failed right away, without waiting for the backend: its cancellation on the backend is requested
+(and retried while the backend is unreachable), and whatever the backend reports about it
+afterwards is ignored. A project task is charged its estimated running time so far, which never
+exceeds the true time.
+
+The `cancel` policy is applied once, when the suspension starts. After a restart, a suspended
+machine is still suspended.
+
+**Response `201`** — the new suspension:
+
+```json
+{
+  "message": "Calibration in progress",
+  "cancel": "waiting",
+  "suspended_at": "2026-10-15T12:00:00.000000Z"
+}
+```
+
+**Response `404`** — unknown machine.
+
+**Response `409`** — the machine is already suspended.
+
+**Response `422`** — `message` is empty or longer than 512 characters, or `cancel` is invalid.
+
+---
+
+### `DELETE /machine/{machine}/suspension`
+
+End the machine's suspension, so it accepts new tasks and sessions again. Work failed or closed
+by the suspension stays failed or closed.
+
+**Response `200`** — the ended suspension, now with `resumed_at` set.
+
+**Response `404`** — unknown machine.
+
+**Response `409`** — the machine is not suspended.
+
+---
+
+### `GET /machine/{machine}/suspensions`
+
+List the machine's suspensions, newest first. The active suspension, if any, comes first and
+has no `resumed_at`.
+
+**Response `200`**
+
+```json
+[
+  {
+    "message": "Calibration in progress",
+    "cancel": "waiting",
+    "suspended_at": "2026-10-15T12:00:00.000000Z",
+    "resumed_at": "2026-10-15T13:30:00.000000Z"
+  }
+]
+```
+
+**Response `404`** — unknown machine.

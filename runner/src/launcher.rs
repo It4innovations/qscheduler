@@ -2,9 +2,10 @@ use crate::backend::{Backend, FromBackendMessage};
 use crate::callback::{NotifyEvent, notify_worker};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
-use crate::machine::{MachineConfig, MachineMap, QueueItem, ResumeTask};
+use crate::machine::{Machine, MachineConfig, MachineMap, QueueItem, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{SessionInfo, SessionMap, SessionState};
+use crate::suspension::SuspendCancel;
 use crate::task::{CompletedState, TaskInfo, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
@@ -381,6 +382,107 @@ fn close_running_session(
     });
 }
 
+/// Closes a session that never opened, already removed from the machine's queue.
+fn close_queued_session(
+    session_id: SessionId,
+    session_map: &mut SessionMap,
+    machine: &Machine,
+    project_map: &ProjectMap,
+    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
+    db_updates: &mut Vec<DbUpdate>,
+) {
+    let session = session_map.get_session_mut(session_id);
+    let now = Utc::now();
+    session.state.close(now);
+    if let Some(sender) = notify_sender {
+        let proj = project_name(project_map, session.config.project_id).unwrap_or_default();
+        let info = SessionInfo::build(session, machine.config().name.clone(), proj);
+        send_notify(sender, NotifyEvent::Session { session: info });
+    }
+    db_updates.push(DbUpdate::SessionClosed {
+        session_id,
+        exec_time: Duration::ZERO,
+        timestamp: now,
+        cancelled_tasks: Vec::new(),
+    });
+}
+
+/// Everything needed to fail tasks with one error (a machine suspension's).
+struct FailContext<'a> {
+    task_map: &'a mut TaskMap,
+    project_map: &'a mut ProjectMap,
+    machine_name: String,
+    notify_sender: &'a Option<UnboundedSender<NotifyEvent>>,
+    db_updates: &'a mut Vec<DbUpdate>,
+    error: &'a str,
+}
+
+impl FailContext<'_> {
+    /// Fails a task that was never handed to the backend (already removed from its queue).
+    fn fail_queued_task(&mut self, task_id: TaskId) {
+        debug!(%task_id, "Failing queued task");
+        self.fail(task_id, CompletedState::new_zero_now(), Duration::ZERO);
+    }
+
+    /// Fails a task handed to the backend right away, without waiting for the backend to
+    /// confirm its cancellation (it may be unreachable), and asks the backend to cancel it. The
+    /// task stops being tracked, so the backend's later reports about it are ignored. A project
+    /// task is charged the estimated running time (a lower bound of the true time).
+    fn fail_submitted_task(
+        &mut self,
+        task_id: TaskId,
+        backend: &Arc<dyn Backend>,
+        submitted_tasks: &mut HashMap<TaskId, bool>,
+        running_tasks: &mut HashMap<TaskId, RunningTask>,
+        fail_reasons: &mut HashMap<TaskId, &'static str>,
+    ) {
+        debug!(%task_id, "Failing submitted task");
+        let Some(cancelling) = submitted_tasks.remove(&task_id) else {
+            return;
+        };
+        fail_reasons.remove(&task_id);
+        let (consumed, charged) = running_tasks
+            .remove(&task_id)
+            .map(|rt| (rt.elapsed().min(rt.time_limit), rt.charged))
+            .unwrap_or_default();
+        // Without a backend id yet, the late `TaskSubmitted` message cancels the job.
+        if !cancelling && let Some(backend_id) = self.task_map.get_task_mut(task_id).backend_id() {
+            Arc::clone(backend).cancel_task(task_id, backend_id);
+        }
+        let completed = CompletedState {
+            consumed,
+            timestamp: Utc::now(),
+        };
+        self.fail(task_id, completed, charged);
+    }
+
+    fn fail(&mut self, task_id: TaskId, completed: CompletedState, charged: Duration) {
+        let task = self.task_map.get_task_mut(task_id);
+        task.set_state(TaskState::Failed {
+            completed,
+            error: self.error.to_string(),
+        });
+        let project_id = task.config().parent.project_id();
+        if let Some(project_id) = project_id
+            && (!completed.consumed.is_zero() || !charged.is_zero())
+        {
+            self.project_map
+                .get_project_mut(project_id)
+                .settle_in_flight(charged, completed.consumed);
+        }
+        if let Some(sender) = self.notify_sender {
+            let proj = project_id.and_then(|pid| project_name(self.project_map, pid));
+            let info = TaskInfo::build(task, task.state(), self.machine_name.clone(), proj);
+            send_notify(sender, NotifyEvent::Task { task: info });
+        }
+        self.db_updates.push(DbUpdate::TaskFailed {
+            task_id,
+            completed,
+            error: self.error.to_string(),
+        });
+    }
+}
+
 enum LauncherEvent {
     Notified,
     SessionEnd,
@@ -622,6 +724,13 @@ async fn launcher_main(
                             }
                         }
                     }
+                    FromBackendMessage::TaskStateChange { task_id, .. }
+                        if !submitted_tasks.contains_key(&task_id) =>
+                    {
+                        // Already terminal on our side (failed by a machine suspension, or a
+                        // duplicate report); the backend's late view of it is irrelevant.
+                        debug!(%task_id, "Ignoring state change of no longer tracked task");
+                    }
                     FromBackendMessage::TaskStateChange { task_id, mut state } => {
                         // In-flight time charged to the project so far; replaced by the exact
                         // exec time below.
@@ -758,22 +867,14 @@ async fn launcher_main(
                     let machine = machine_map.get_machine_mut(machine_id);
                     if machine.remove_queued_session(session_id) {
                         debug!(%session_id, "Cancelling queued session on request");
-                        let session = session_map.get_session_mut(session_id);
-                        let now = Utc::now();
-                        session.state.close(now);
-                        if let Some(sender) = &notify_sender {
-                            let proj = project_name(project_map, session.config.project_id)
-                                .unwrap_or_default();
-                            let info =
-                                SessionInfo::build(session, machine.config().name.clone(), proj);
-                            send_notify(sender, NotifyEvent::Session { session: info });
-                        }
-                        db_updates.push(DbUpdate::SessionClosed {
+                        close_queued_session(
                             session_id,
-                            exec_time: Duration::ZERO,
-                            timestamp: now,
-                            cancelled_tasks: Vec::new(),
-                        });
+                            session_map,
+                            machine,
+                            project_map,
+                            &notify_sender,
+                            &mut db_updates,
+                        );
                     }
                 }
             }
@@ -806,6 +907,98 @@ async fn launcher_main(
                             task_id,
                             completed: CompletedState::new_zero_now(),
                         });
+                    }
+                }
+            }
+
+            let suspend_cancels = machine_map
+                .get_machine_mut(machine_id)
+                .take_suspend_cancel_requests();
+            for (cancel, error) in suspend_cancels {
+                debug!(?cancel, "Applying machine suspension to existing work");
+                let mut ctx = FailContext {
+                    task_map,
+                    project_map,
+                    machine_name: machine_map.get_machine(machine_id).config().name.clone(),
+                    notify_sender: &notify_sender,
+                    db_updates: &mut db_updates,
+                    error: &error,
+                };
+                match cancel {
+                    SuspendCancel::None => {}
+                    SuspendCancel::Waiting | SuspendCancel::All => {
+                        let machine = machine_map.get_machine_mut(machine_id);
+                        for task_id in machine.take_queued_tasks() {
+                            ctx.fail_queued_task(task_id);
+                        }
+                        let queued_sessions = machine.take_queued_sessions();
+                        for session_id in queued_sessions {
+                            close_queued_session(
+                                session_id,
+                                session_map,
+                                machine_map.get_machine(machine_id),
+                                ctx.project_map,
+                                &notify_sender,
+                                ctx.db_updates,
+                            );
+                        }
+                        if let Some(s) = running_session.take() {
+                            let machine = machine_map.get_machine_mut(machine_id);
+                            while let Some(task_id) = machine.pop_session_task() {
+                                ctx.fail_queued_task(task_id);
+                            }
+                            // Its submitted tasks fail as well: closing the session would cancel
+                            // them anyway.
+                            let session_tasks: Vec<TaskId> = submitted_tasks
+                                .keys()
+                                .copied()
+                                .filter(|t| {
+                                    ctx.task_map.find_task(*t).is_some_and(|t| {
+                                        t.config().parent.session_id() == Some(s.session_id)
+                                    })
+                                })
+                                .collect();
+                            for task_id in session_tasks {
+                                ctx.fail_submitted_task(
+                                    task_id,
+                                    &backend,
+                                    &mut submitted_tasks,
+                                    &mut running_tasks,
+                                    &mut fail_reasons,
+                                );
+                            }
+                            let exec_time = Instant::now() - s.opened_at;
+                            let delta = exec_time - s.exec_time;
+                            ctx.project_map
+                                .get_project_mut(s.project_id)
+                                .update_consumed(delta);
+                            debug!(session_id = %s.session_id, "Closing running session on machine suspension");
+                            close_running_session(
+                                &s,
+                                exec_time,
+                                ctx.task_map,
+                                session_map,
+                                machine_map,
+                                ctx.project_map,
+                                machine_id,
+                                &backend,
+                                &mut submitted_tasks,
+                                &notify_sender,
+                                ctx.db_updates,
+                            );
+                        }
+                        if cancel == SuspendCancel::All {
+                            let task_ids: Vec<TaskId> = submitted_tasks.keys().copied().collect();
+                            for task_id in task_ids {
+                                ctx.fail_submitted_task(
+                                    task_id,
+                                    &backend,
+                                    &mut submitted_tasks,
+                                    &mut running_tasks,
+                                    &mut fail_reasons,
+                                );
+                            }
+                        }
                     }
                 }
             }

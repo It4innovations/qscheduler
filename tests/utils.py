@@ -501,6 +501,51 @@ class QScheduler:
         r.raise_for_status()
         return r.json()
 
+    def suspend_machine(
+        self,
+        message: str,
+        cancel: str | None = None,
+        machine: str = TEST_MACHINE_NAME,
+        expect_error: int | None = None,
+    ):
+        body = {"message": message}
+        if cancel is not None:
+            body["cancel"] = cancel
+        r = requests.post(
+            self.url(f"machine/{machine}/suspension"), json=body, timeout=5
+        )
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    def resume_machine(
+        self, machine: str = TEST_MACHINE_NAME, expect_error: int | None = None
+    ):
+        r = requests.delete(self.url(f"machine/{machine}/suspension"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
+    def list_suspensions(
+        self, machine: str = TEST_MACHINE_NAME, expect_error: int | None = None
+    ):
+        r = requests.get(self.url(f"machine/{machine}/suspensions"), timeout=5)
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
     def version(self) -> str:
         r = requests.get(self.url("version"), timeout=5)
         r.raise_for_status()

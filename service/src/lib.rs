@@ -118,6 +118,11 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         .routes(routes!(machines::get_machine_arch))
         .routes(routes!(machines::get_machine_about))
         .routes(routes!(machines::get_machine_calibration))
+        .routes(routes!(
+            machines::suspend_machine_handler,
+            machines::resume_machine_handler
+        ))
+        .routes(routes!(machines::list_machine_suspensions_handler))
         .routes(routes!(projects::create_project_handler))
         .routes(routes!(projects::list_projects_handler))
         .routes(routes!(projects::get_project_handler))

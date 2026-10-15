@@ -11,6 +11,7 @@ pub mod machine;
 mod project;
 pub mod reactor;
 mod session;
+pub mod suspension;
 pub mod task;
 
 use crate::error::RunnerError;
@@ -21,6 +22,7 @@ pub use callback::NotifyConfig;
 pub use machine::MachineId;
 pub use project::Project;
 pub use session::{SessionConfig, SessionId, SessionInfo, SessionState};
+pub use suspension::{SuspendCancel, Suspension};
 pub use task::TaskId;
 
 pub type Result<T> = std::result::Result<T, RunnerError>;
