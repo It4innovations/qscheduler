@@ -193,9 +193,12 @@ class QScheduler:
 
         With kill=True the process is SIGKILLed to simulate an abrupt crash, so no
         graceful shutdown logic runs and recovery happens purely from the database.
+        With kill=False it is sent SIGTERM and shuts down gracefully.
+
+        Returns the process exit code.
         """
         if self._process is None:
-            return
+            return None
         if self._process.poll() is None:
             if kill:
                 self._process.kill()
@@ -209,7 +212,9 @@ class QScheduler:
         if self._log_file:
             self._log_file.close()
             self._log_file = None
+        returncode = self._process.returncode
         self._process = None
+        return returncode
 
     def restart(self, kill=True):
         """Simulate a crash and restart: stop the process and start a fresh one

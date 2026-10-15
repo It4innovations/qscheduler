@@ -137,6 +137,13 @@ docker run -it --network host -e DATABASE_URL=postgres://user:password@host/dbna
 
 Once running, the OpenAPI spec is served at `GET /api-docs/openapi.json`.
 
+On `SIGTERM` (e.g. `docker stop`) or `Ctrl+C` the service shuts down gracefully: it stops
+accepting requests, finishes in-flight ones, applies cancel requests it has already accepted,
+writes all pending state to the database (including the time of a running session), and exits.
+No new tasks are submitted to backends during shutdown. Tasks still running on a backend are
+re-attached on the next start. A crash or `SIGKILL` skips this, so up to one
+`--limit-check-interval` of session time may go uncharged.
+
 ## Local Testing
 
 To try out the full flow locally with no external dependencies, use the in-process `test`

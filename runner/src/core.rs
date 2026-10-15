@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 #[allow(dead_code)]
 pub(crate) struct CoreSplit<'a> {
@@ -41,6 +43,8 @@ pub struct Core {
     project_map: ProjectMap,
     pool: PgPool,
     core_ref: Option<CoreRef>,
+    shutdown_sender: watch::Sender<bool>,
+    launcher_handles: Vec<JoinHandle<()>>,
 }
 
 pub type CoreRef = Arc<Mutex<Core>>;
@@ -74,13 +78,15 @@ impl Core {
             project_map: Default::default(),
             pool,
             core_ref: None,
+            shutdown_sender: watch::Sender::new(false),
+            launcher_handles: Vec::new(),
         }));
         core_ref.lock().unwrap().core_ref = Some(core_ref.clone());
 
         let resume_tasks = Core::restore(&core_ref).await?;
 
         {
-            let core = core_ref.lock().unwrap();
+            let mut core = core_ref.lock().unwrap();
             core.start_launchers(backend_receivers, resume_tasks);
         }
 
@@ -358,24 +364,34 @@ impl Core {
     }
 
     pub(crate) fn start_launchers(
-        &self,
+        &mut self,
         mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>,
         mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>,
     ) {
         let core_ref = self.core_ref.as_ref().unwrap();
+        let mut handles = Vec::new();
         for m in self.machine_map.iter() {
             let machine_id = m.id();
             let backend_receiver = backend_receivers.remove(&machine_id).unwrap();
             let resume_tasks = resume_tasks.remove(&machine_id).unwrap_or_default();
-            start_launcher(
+            handles.push(start_launcher(
                 core_ref,
                 machine_id,
                 m.config(),
                 m.backend().clone(),
                 backend_receiver,
                 resume_tasks,
-            );
+                self.shutdown_sender.subscribe(),
+            ));
         }
+        self.launcher_handles = handles;
+    }
+
+    /// Signals all launchers to stop and returns their handles so the caller can await them
+    /// (outside the core lock, which the launchers need to finish).
+    pub(crate) fn begin_shutdown(&mut self) -> Vec<JoinHandle<()>> {
+        self.shutdown_sender.send_replace(true);
+        std::mem::take(&mut self.launcher_handles)
     }
 
     #[inline]
