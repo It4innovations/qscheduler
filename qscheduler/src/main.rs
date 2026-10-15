@@ -42,6 +42,19 @@ enum MachineCommand {
     Add(MachineConfigArgs),
     /// Update an existing machine's configuration
     Update(MachineConfigArgs),
+    /// Remove a machine
+    Remove(MachineRemoveArgs),
+}
+
+#[derive(Parser)]
+struct MachineRemoveArgs {
+    /// Machine name
+    name: String,
+
+    /// Remove the machine even if it has tasks or sessions; they are deleted together with
+    /// their consumption records
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Parser)]
@@ -194,6 +207,7 @@ async fn main() {
             match machine_args.command {
                 MachineCommand::Add(args) => cmd_machine_add(args).await,
                 MachineCommand::Update(args) => cmd_machine_update(args).await,
+                MachineCommand::Remove(args) => cmd_machine_remove(args).await,
             }
         }
     }
@@ -271,6 +285,49 @@ async fn cmd_machine_update(args: MachineConfigArgs) {
         Err(e) => {
             tracing::error!(name = %args.name, error = %e, "failed to update machine");
             eprintln!("Error: failed to update machine '{}': {e}", args.name);
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn cmd_machine_remove(args: MachineRemoveArgs) {
+    use runner::db::RemoveMachineOutcome;
+    let pool = connect_db().await;
+    match runner::db::remove_machine(&pool, &args.name, args.force).await {
+        Ok(RemoveMachineOutcome::Removed { tasks, sessions }) => {
+            if tasks > 0 || sessions > 0 {
+                println!(
+                    "Machine '{}' removed together with {tasks} task(s) and {sessions} session(s).",
+                    args.name
+                );
+                println!(
+                    "Time consumed by these tasks and sessions was not returned to their projects."
+                );
+            } else {
+                println!("Machine '{}' removed successfully.", args.name);
+            }
+            println!("Restart the service for the change to take effect.");
+        }
+        Ok(RemoveMachineOutcome::HasDependents { tasks, sessions }) => {
+            eprintln!(
+                "Error: machine '{}' has {tasks} task(s) and {sessions} session(s); not removed.",
+                args.name
+            );
+            eprintln!(
+                "Use --force to remove it anyway. All these tasks and sessions \
+                 (and their consumption records) will be removed as well."
+            );
+            eprintln!("Time they consumed will not be returned to their projects.");
+            std::process::exit(1);
+        }
+        Ok(RemoveMachineOutcome::NotFound) => {
+            tracing::error!(name = %args.name, "machine not found");
+            eprintln!("Error: machine '{}' not found.", args.name);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            tracing::error!(name = %args.name, error = %e, "failed to remove machine");
+            eprintln!("Error: failed to remove machine '{}': {e}", args.name);
             std::process::exit(1);
         }
     }

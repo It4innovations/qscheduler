@@ -97,6 +97,22 @@ using the same arguments as `add`.
 Machines are only loaded once at service startup, so **the service must be restarted** after
 `machine add` for the change to take effect.
 
+### Remove a machine
+
+```bash
+qscheduler machine remove <NAME> [--force]
+```
+
+A machine with no tasks and no sessions is removed directly. If it still has tasks or
+sessions, the command prints how many and refuses to remove it. With `--force`, the machine is
+removed together with all its tasks and sessions, including their consumption records.
+
+Time already consumed by the removed tasks and sessions is **not** returned to their projects:
+each project's consumed time stays as it was before the removal.
+
+As with `add`/`update`, restart the service afterwards; do not remove a machine while the
+service is running.
+
 ### Register a project
 
 Projects are created through the HTTP API rather than the CLI — see

@@ -119,6 +119,20 @@ class QScheduler:
             env={**os.environ, "DATABASE_URL": self.database_url},
         )
 
+    def remove_machine(
+        self, name: str = TEST_MACHINE_NAME, force: bool = False
+    ) -> subprocess.CompletedProcess:
+        args = [self._binary, "machine", "remove", name]
+        if force:
+            args.append("--force")
+        return subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "DATABASE_URL": self.database_url},
+        )
+
     def _start_binary(self, log_name="qscheduler.log"):
         log_path = os.path.join(self.working_dir, log_name)
         # Handle outlives this function: it is the subprocess' stdout/stderr and
