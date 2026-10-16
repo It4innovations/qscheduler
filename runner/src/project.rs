@@ -1,37 +1,8 @@
+use crate::id::define_id;
 use std::collections::HashMap;
-use std::fmt::Display;
-use std::num::NonZeroU32;
 use std::time::Duration;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct ProjectId(NonZeroU32);
-
-impl Display for ProjectId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl TryFrom<u32> for ProjectId {
-    type Error = ();
-    fn try_from(v: u32) -> Result<Self, Self::Error> {
-        NonZeroU32::new(v).map(ProjectId).ok_or(())
-    }
-}
-
-impl TryFrom<i32> for ProjectId {
-    type Error = ();
-    fn try_from(v: i32) -> Result<Self, Self::Error> {
-        let v = u32::try_from(v).map_err(|_| ())?;
-        NonZeroU32::new(v).map(ProjectId).ok_or(())
-    }
-}
-
-impl ProjectId {
-    pub fn as_i32(self) -> i32 {
-        self.0.get() as i32
-    }
-}
+define_id!(ProjectId);
 
 #[derive(Debug, Clone)]
 pub struct Project {
