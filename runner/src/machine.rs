@@ -1,5 +1,6 @@
 use crate::backend::{Backend, BackendConfig};
 use crate::error::RunnerError;
+use crate::id::define_id;
 use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
 use crate::suspension::{SuspendCancel, Suspension};
@@ -7,19 +8,11 @@ use crate::task::{Task, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Default)]
-pub struct MachineId(u32);
-
-impl Display for MachineId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+define_id!(MachineId);
 
 #[derive(Clone, Copy)]
 pub(crate) enum QueueItem {
@@ -262,18 +255,6 @@ impl Machine {
             return true;
         }
         false
-    }
-}
-
-impl From<u32> for MachineId {
-    fn from(v: u32) -> Self {
-        MachineId(v)
-    }
-}
-
-impl MachineId {
-    pub fn as_u32(&self) -> u32 {
-        self.0
     }
 }
 

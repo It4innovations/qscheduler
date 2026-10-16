@@ -6,6 +6,7 @@ pub mod config;
 pub mod core;
 pub mod db;
 pub mod error;
+mod id;
 mod launcher;
 pub mod machine;
 mod project;

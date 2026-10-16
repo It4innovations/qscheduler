@@ -192,7 +192,7 @@ pub struct ProjectRow {
 impl From<ProjectRow> for Project {
     fn from(r: ProjectRow) -> Self {
         Project {
-            id: ProjectId::try_from(r.id).unwrap(),
+            id: ProjectId::from_db(r.id),
             name: r.name,
             consumed: Duration::from_millis(r.consumed_ms as u64),
             limit: Duration::from_millis(r.limit_ms as u64),
@@ -217,7 +217,7 @@ pub(crate) async fn insert_project(
         .map(|row| {
             use sqlx::Row;
             let id: i32 = row.get("id");
-            ProjectId::try_from(id).unwrap()
+            ProjectId::from_db(id)
         })
         .map_err(|e| {
             if is_already_exists_error(&e) {
@@ -440,7 +440,7 @@ pub async fn insert_task(
         "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload, time_limit_ms, notifier_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at",
     )
-    .bind(config.machine_id.as_u32() as i32)
+    .bind(config.machine_id.as_i32())
     .bind(config.parent.session_id().map(|s| s.as_i64()))
     .bind(config.parent.project_id().map(|p| p.as_i32()))
     .bind(&config.user)
@@ -491,7 +491,7 @@ pub async fn insert_session(
         "INSERT INTO sessions (machine_id, project_id, time_limit_ms, notifier_id) \
          VALUES ($1, $2, $3, $4) RETURNING id, created_at",
     )
-    .bind(config.machine_id.as_u32() as i32)
+    .bind(config.machine_id.as_i32())
     .bind(config.project_id.as_i32())
     .bind(config.time_limit.as_millis() as i64)
     .bind(config.notifier.map(|n| n.as_i32()))
@@ -525,7 +525,7 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
     let mut machines = Vec::with_capacity(rows.len());
     for row in rows {
         let id: i32 = row.get("id");
-        let machine_id = MachineId::from(id as u32);
+        let machine_id = MachineId::from_db(id);
         let config_str: &str = row.get("config");
         let config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
             RunnerError::GenericError("Cannot parse machine configuration from DB".into())
@@ -555,7 +555,7 @@ pub async fn insert_notifier(
                 }
             })?;
     let id: i32 = row.get("id");
-    Ok(NotifierId::from(id as u32))
+    Ok(NotifierId::from_db(id))
 }
 
 /// Removes a notifier; tasks and sessions that referenced it stop notifying (the FK is
@@ -579,7 +579,7 @@ pub async fn load_notifiers(
         .map(|row| {
             let id: i32 = row.get("id");
             (
-                NotifierId::from(id as u32),
+                NotifierId::from_db(id),
                 NotifierConfiguration {
                     name: row.get("name"),
                     url: row.get("url"),
@@ -613,7 +613,7 @@ pub(crate) async fn insert_suspension(
          VALUES ($1, $2, $3::suspension_cancel) \
          RETURNING message, cancel::text AS cancel, suspended_at, resumed_at",
     )
-    .bind(machine_id.as_u32() as i32)
+    .bind(machine_id.as_i32())
     .bind(message)
     .bind(cancel.as_db_str())
     .fetch_one(pool)
@@ -638,7 +638,7 @@ pub(crate) async fn end_suspension(
          WHERE machine_id = $1 AND resumed_at IS NULL \
          RETURNING message, cancel::text AS cancel, suspended_at, resumed_at",
     )
-    .bind(machine_id.as_u32() as i32)
+    .bind(machine_id.as_i32())
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(suspension_from_row).transpose()
@@ -653,7 +653,7 @@ pub(crate) async fn list_suspensions(
         "SELECT message, cancel::text AS cancel, suspended_at, resumed_at \
          FROM machine_suspensions WHERE machine_id = $1 ORDER BY suspended_at DESC, id DESC",
     )
-    .bind(machine_id.as_u32() as i32)
+    .bind(machine_id.as_i32())
     .fetch_all(pool)
     .await?;
     rows.iter().map(suspension_from_row).collect()
@@ -672,10 +672,7 @@ pub(crate) async fn load_active_suspensions(
     rows.iter()
         .map(|row| {
             let machine_id: i32 = row.try_get("machine_id")?;
-            Ok((
-                MachineId::from(machine_id as u32),
-                suspension_from_row(row)?,
-            ))
+            Ok((MachineId::from_db(machine_id), suspension_from_row(row)?))
         })
         .collect()
 }

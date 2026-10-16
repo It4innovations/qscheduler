@@ -113,7 +113,7 @@ impl Core {
         let pool = core_ref.lock().unwrap().pool().clone();
         // An id unknown to the loaded notifiers (one added after startup) needs no filtering:
         // `NotifierMap` treats it like no notifier.
-        let restore_notifier = |raw: Option<i32>| raw.map(|id| NotifierId::from(id as u32));
+        let restore_notifier = |raw: Option<i32>| raw.map(NotifierId::from_db);
         let tasks = match db::load_active_tasks(&pool).await {
             Ok(t) => t,
             Err(e) => {
@@ -198,7 +198,7 @@ impl Core {
                     );
                     continue;
                 };
-                let machine_id = MachineId::from(s.machine_id as u32);
+                let machine_id = MachineId::from_db(s.machine_id);
                 let project_id = match ProjectId::try_from(s.project_id as u32) {
                     Ok(id) => id,
                     Err(_) => {
@@ -267,7 +267,7 @@ impl Core {
                     );
                     continue;
                 };
-                let machine_id = MachineId::from(t.machine_id as u32);
+                let machine_id = MachineId::from_db(t.machine_id);
                 let payload = Bytes::from(t.payload.clone().unwrap_or_default());
                 let session_id = t.session_id.map(|id| {
                     SessionId::try_from(id).unwrap_or_else(|_| {

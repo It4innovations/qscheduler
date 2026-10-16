@@ -1,10 +1,10 @@
 use crate::config::NotifierConfiguration;
 use crate::error::RunnerError;
+use crate::id::define_id;
 use crate::session::SessionInfo;
 use crate::task::TaskInfo;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Instant, sleep_until};
@@ -13,27 +13,7 @@ use tracing::{debug, warn};
 /// Maximum length of a notifier's name (the key tasks and sessions refer to it by).
 pub const MAX_NOTIFIER_NAME_LEN: usize = 12;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct NotifierId(u32);
-
-impl Display for NotifierId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<u32> for NotifierId {
-    fn from(v: u32) -> Self {
-        NotifierId(v)
-    }
-}
-
-impl NotifierId {
-    #[inline]
-    pub fn as_i32(&self) -> i32 {
-        self.0 as i32
-    }
-}
+define_id!(NotifierId);
 
 /// Checks a notifier name: non-empty and at most [`MAX_NOTIFIER_NAME_LEN`] characters.
 pub(crate) fn validate_notifier_name(name: &str) -> crate::Result<()> {
