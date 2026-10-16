@@ -1,3 +1,4 @@
+use crate::callback::{NotifierId, NotifierMap};
 use crate::machine::MachineId;
 use crate::project::ProjectId;
 use chrono::{DateTime, Utc};
@@ -113,6 +114,8 @@ pub struct SessionConfig {
     pub machine_id: MachineId,
     pub project_id: ProjectId,
     pub time_limit: Duration,
+    /// Notifier that receives the session's open/close events, if any.
+    pub notifier: Option<NotifierId>,
 }
 
 pub struct Session {
@@ -160,10 +163,19 @@ pub struct SessionInfo {
     /// Milliseconds of execution time consumed by tasks run during this session, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exectime_ms: Option<i64>,
+    /// Name of the notifier that receives the session's open/close events. Absent if the
+    /// session was created without `notify`, or its notifier has since been removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
 }
 
 impl SessionInfo {
-    pub(crate) fn build(session: &Session, machine: String, project: String) -> SessionInfo {
+    pub(crate) fn build(
+        session: &Session,
+        machine: String,
+        project: String,
+        notifiers: &NotifierMap,
+    ) -> SessionInfo {
         let (opened_at, closed_at) = match session.state {
             SessionState::Waiting => (None, None),
             SessionState::Open { opened_at } => (Some(opened_at), None),
@@ -182,6 +194,7 @@ impl SessionInfo {
             opened_at,
             closed_at,
             exectime_ms: crate::task::duration_ms(session.consumed),
+            notify: notifiers.name(session.config.notifier),
         }
     }
 }

@@ -11,7 +11,7 @@ use runner::core::CoreRef;
 use runner::error::RunnerError;
 use runner::reactor::{
     cancel_task, get_machine_default_task_time_limit, get_machine_id_by_name,
-    get_project_id_by_name, get_task_info, submit_task,
+    get_project_id_by_name, get_task_info, resolve_notifier, submit_task,
 };
 use runner::task::{TaskConfig, TaskId, TaskInfo, TaskParent};
 use serde::Deserialize;
@@ -35,6 +35,9 @@ pub(crate) struct CreateTaskParams {
     /// the task. When exceeded, the task is cancelled and ends `failed`. Defaults to the
     /// machine's default task time limit.
     time_limit_ms: Option<u64>,
+    /// Name of the notifier to send the task's completion event to. No notification is sent
+    /// when omitted.
+    notify: Option<String>,
 }
 
 /// Submit a task for execution.
@@ -51,7 +54,7 @@ pub(crate) struct CreateTaskParams {
         (status = 201, description = "Task created", body = u32),
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 409, description = "The machine is suspended; the body contains the suspension message."),
-        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.")
+        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, or the session is invalid or not open.")
     )
 )]
 pub(crate) async fn create_task(
@@ -94,12 +97,13 @@ async fn create_task_config(
             "'time_limit_ms' must be positive".to_string(),
         ));
     }
-    let (machine_id, time_limit) = {
+    let (machine_id, time_limit, notifier) = {
         let core = core_ref.lock().unwrap();
         let machine_id = get_machine_id_by_name(&core, &params.machine)?;
         let default = get_machine_default_task_time_limit(&core, machine_id);
         let time_limit = params.time_limit_ms.map_or(default, Duration::from_millis);
-        (machine_id, time_limit)
+        let notifier = resolve_notifier(&core, params.notify.as_deref())?;
+        (machine_id, time_limit, notifier)
     };
     let session_id = params
         .session_id
@@ -117,6 +121,7 @@ async fn create_task_config(
         user: params.user,
         payload: body,
         time_limit,
+        notifier,
     })
 }
 

@@ -4,7 +4,9 @@ use axum::{
     http::StatusCode,
 };
 use runner::error::RunnerError;
-use runner::reactor::{cancel_session, create_session, get_project_id_by_name, get_session_info};
+use runner::reactor::{
+    cancel_session, create_session, get_project_id_by_name, get_session_info, resolve_notifier,
+};
 use runner::{SessionConfig, SessionId, SessionInfo};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -22,6 +24,9 @@ pub(crate) struct CreateSessionParams {
     project: String,
     /// Session lifetime in milliseconds.
     time_limit_ms: u64,
+    /// Name of the notifier to send the session's open/close events to. No notification is
+    /// sent when omitted.
+    notify: Option<String>,
 }
 
 /// Get a session's current info (state, timings, and its machine/project).
@@ -58,14 +63,20 @@ pub(crate) async fn get_session(
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 404, description = "Unknown `machine`."),
         (status = 409, description = "The machine is suspended; the body contains the suspension message."),
-        (status = 422, description = "Unknown `project`, or `time_limit_ms` exceeds the machine's `--max-session-time`.")
+        (status = 422, description = "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`.")
     )
 )]
 pub(crate) async fn create_session_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CreateSessionParams>,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
-    let machine_id = find_machine(&state.core_ref.lock().unwrap(), &params.machine)?;
+    let (machine_id, notifier) = {
+        let core = state.core_ref.lock().unwrap();
+        let machine_id = find_machine(&core, &params.machine)?;
+        let notifier = resolve_notifier(&core, params.notify.as_deref())
+            .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        (machine_id, notifier)
+    };
     let project_id = get_project_id_by_name(&state.core_ref, &params.project)
         .await
         .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
@@ -73,6 +84,7 @@ pub(crate) async fn create_session_handler(
         machine_id,
         project_id,
         time_limit: Duration::from_millis(params.time_limit_ms),
+        notifier,
     };
     let session_id = create_session(&state.core_ref, config)
         .await

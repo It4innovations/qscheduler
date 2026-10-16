@@ -1,6 +1,6 @@
 use crate::MachineId;
 use crate::backend::BackendConfig;
-use crate::callback::NotifyConfig;
+use crate::callback::NotifierId;
 use serde::{Deserialize, Serialize};
 
 /// Default maximum session duration (2 hours) for machines whose stored
@@ -40,13 +40,23 @@ pub struct MachineConfiguration {
     /// running-time estimate of tasks from ever exceeding the true time.
     #[serde(default = "default_max_clock_skew_ms")]
     pub max_clock_skew_ms: u64,
-    pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
+}
+
+/// An HTTP callback target. Tasks and sessions select it by `name`.
+#[derive(Debug, Clone)]
+pub struct NotifierConfiguration {
+    pub name: String,
+    /// URL to POST task/session events to.
+    pub url: String,
+    /// Included in every payload, if set.
+    pub token: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct RunnerConfiguration {
     pub machines: Vec<(MachineId, MachineConfiguration)>,
+    pub notifiers: Vec<(NotifierId, NotifierConfiguration)>,
 }
 
 #[cfg(test)]

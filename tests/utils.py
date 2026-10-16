@@ -70,8 +70,8 @@ class QScheduler:
         self.port = port
         self.backend = backend
         self.database_url = database_url
-        self.notify_url = None
-        self.notify_token = None
+        # (name, url, token) of notifiers registered by start()
+        self.notifiers: list[tuple[str, str, str | None]] = []
         self.queue_size = 2
         self.max_session_time = None
         self.limit_check_interval = None
@@ -102,10 +102,6 @@ class QScheduler:
             TEST_MACHINE_NAME,
             f"--queue-size={self.queue_size}",
         ]
-        if self.notify_url:
-            args.append(f"--notify-url={self.notify_url}")
-        if self.notify_token:
-            args.append(f"--notify-token={self.notify_token}")
         if self.max_session_time is not None:
             args.append(f"--max-session-time={self.max_session_time}s")
         if self.limit_check_interval is not None:
@@ -119,32 +115,44 @@ class QScheduler:
             env={**os.environ, "DATABASE_URL": self.database_url},
         )
 
-    def update_machine(
-        self, *args: str, name: str = TEST_MACHINE_NAME, backend_args=None
-    ) -> subprocess.CompletedProcess:
-        if backend_args is None:
-            backend_args = self.backend.machine_args()
+    def _cli(self, *args: str) -> subprocess.CompletedProcess:
+        """Runs a qscheduler management command against the test DB, capturing its output."""
         return subprocess.run(
-            [self._binary, "machine", "update", name, *args, *backend_args],
+            [self._binary, *args],
             check=False,
             capture_output=True,
             text=True,
             env={**os.environ, "DATABASE_URL": self.database_url},
         )
 
+    def update_machine(
+        self, *args: str, name: str = TEST_MACHINE_NAME, backend_args=None
+    ) -> subprocess.CompletedProcess:
+        if backend_args is None:
+            backend_args = self.backend.machine_args()
+        return self._cli("machine", "update", name, *args, *backend_args)
+
+    def add_notifier(
+        self, name: str, url: str, token: str | None = None
+    ) -> subprocess.CompletedProcess:
+        args = ["notifier", "add", name, f"--url={url}"]
+        if token is not None:
+            args.append(f"--token={token}")
+        return self._cli(*args)
+
+    def list_notifiers(self) -> subprocess.CompletedProcess:
+        return self._cli("notifier", "list")
+
+    def remove_notifier(self, name: str) -> subprocess.CompletedProcess:
+        return self._cli("notifier", "remove", name)
+
     def remove_machine(
         self, name: str = TEST_MACHINE_NAME, force: bool = False
     ) -> subprocess.CompletedProcess:
-        args = [self._binary, "machine", "remove", name]
+        args = ["machine", "remove", name]
         if force:
             args.append("--force")
-        return subprocess.run(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DATABASE_URL": self.database_url},
-        )
+        return self._cli(*args)
 
     def _start_binary(self, log_name="qscheduler.log"):
         log_path = os.path.join(self.working_dir, log_name)
@@ -178,6 +186,9 @@ class QScheduler:
     def start(self, add_test_project=True):
         self.backend.start()
         self._add_machine()
+        for name, url, token in self.notifiers:
+            r = self.add_notifier(name, url, token)
+            assert r.returncode == 0, r.stderr
         self._start_binary()
         if add_test_project:
             self.add_project(TEST_PROJECT, 100_000)
@@ -289,6 +300,7 @@ class QScheduler:
         project: str | None = None,
         user: str = TEST_USER,
         time_limit_ms: int | None = None,
+        notify: str | None = None,
         expect_error: int | None = None,
     ):
         if session_id is not None and project is not None:
@@ -307,6 +319,8 @@ class QScheduler:
             msg["session_id"] = session_id
         if time_limit_ms is not None:
             msg["time_limit_ms"] = time_limit_ms
+        if notify is not None:
+            msg["notify"] = notify
 
         r = requests.post(
             self.url("tasks"),
@@ -329,6 +343,7 @@ class QScheduler:
         time_limit: int,
         machine: str = TEST_MACHINE_NAME,
         project: str = TEST_PROJECT,
+        notify: str | None = None,
         expect_error: int | None = None,
     ):
         msg = {
@@ -336,6 +351,8 @@ class QScheduler:
             "time_limit_ms": time_limit * 1_000,
             "project": project,
         }
+        if notify is not None:
+            msg["notify"] = notify
         r = requests.post(self.url("sessions"), params=msg, timeout=5)
         if expect_error is not None:
             assert r.status_code == expect_error, (

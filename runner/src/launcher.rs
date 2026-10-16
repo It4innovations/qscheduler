@@ -1,12 +1,12 @@
 use crate::backend::{Backend, FromBackendMessage};
-use crate::callback::{NotifyEvent, notify_worker};
+use crate::callback::{Notifier, NotifierMap, NotifyEvent};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::db;
-use crate::machine::{Machine, MachineConfig, MachineMap, QueueItem, ResumeTask};
+use crate::machine::{Machine, MachineMap, QueueItem, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
-use crate::session::{SessionInfo, SessionMap, SessionState};
+use crate::session::{Session, SessionInfo, SessionMap, SessionState};
 use crate::suspension::SuspendCancel;
-use crate::task::{CompletedState, TaskInfo, TaskMap, TaskState};
+use crate::task::{CompletedState, Task, TaskInfo, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -15,7 +15,7 @@ use std::future::pending;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
@@ -24,32 +24,20 @@ use tracing::{debug, warn};
 pub fn start_launcher(
     core_ref: &CoreRef,
     machine_id: MachineId,
-    machine_config: &MachineConfig,
     backend: Arc<dyn Backend>,
     backend_receiver: UnboundedReceiver<FromBackendMessage>,
     restore_tasks: Vec<ResumeTask>,
+    notifiers: Arc<NotifierMap>,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let core_ref = core_ref.clone();
-    let notify_sender = machine_config.notify.as_ref().map(|nc| {
-        let notify_config = nc.clone();
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<NotifyEvent>();
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create tokio runtime for notifier")
-                .block_on(notify_worker(receiver, notify_config));
-        });
-        sender
-    });
     tokio::spawn(async move {
         launcher_main(
             core_ref,
             machine_id,
             backend,
             backend_receiver,
-            notify_sender,
+            notifiers,
             restore_tasks,
             shutdown,
         )
@@ -170,10 +158,46 @@ fn project_name(project_map: &ProjectMap, project_id: ProjectId) -> Option<Strin
 
 /// Sends a notify event, warning if the notify worker's channel has already closed instead of
 /// silently dropping the event.
-fn send_notify(sender: &UnboundedSender<NotifyEvent>, event: NotifyEvent) {
-    if sender.send(event).is_err() {
-        warn!("failed to send notify event, notify worker channel closed");
+fn send_notify(notifier: &Notifier, event: NotifyEvent) {
+    if notifier.sender.send(event).is_err() {
+        warn!(notifier = %notifier.name, "failed to send notify event, notify worker channel closed");
     }
+}
+
+/// Sends the completion event of `task` (in `state`, which may be about to be applied) to the
+/// task's notifier, if it has one.
+fn notify_task(
+    notifiers: &NotifierMap,
+    task: &Task,
+    state: &TaskState,
+    machine_name: &str,
+    project_map: &ProjectMap,
+) {
+    let Some(notifier) = notifiers.get(task.config().notifier) else {
+        return;
+    };
+    let project = task
+        .config()
+        .parent
+        .project_id()
+        .and_then(|pid| project_name(project_map, pid));
+    let info = TaskInfo::build(task, state, machine_name.to_string(), project, notifiers);
+    send_notify(notifier, NotifyEvent::Task { task: info });
+}
+
+/// Sends the current state of `session` to the session's notifier, if it has one.
+fn notify_session(
+    notifiers: &NotifierMap,
+    session: &Session,
+    machine_name: &str,
+    project_map: &ProjectMap,
+) {
+    let Some(notifier) = notifiers.get(session.config.notifier) else {
+        return;
+    };
+    let project = project_name(project_map, session.config.project_id).unwrap_or_default();
+    let info = SessionInfo::build(session, machine_name.to_string(), project, notifiers);
+    send_notify(notifier, NotifyEvent::Session { session: info });
 }
 
 fn pick_task(
@@ -181,7 +205,7 @@ fn pick_task(
     machine_id: MachineId,
     running_session: &mut Option<RunningSession>,
     no_assignments: bool,
-    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
+    notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) -> Option<(TaskId, Bytes)> {
     let CoreSplitMut {
@@ -230,14 +254,7 @@ fn pick_task(
                         opened_at: now,
                         exec_time: Duration::ZERO,
                     });
-                    if let Some(sender) = notify_sender {
-                        let info = SessionInfo::build(
-                            session,
-                            machine.config().name.clone(),
-                            project_name(project_map, project_id).unwrap_or_default(),
-                        );
-                        send_notify(sender, NotifyEvent::Session { session: info });
-                    }
+                    notify_session(notifiers, session, &machine.config().name, project_map);
                     db_updates.push(DbUpdate::SessionOpened {
                         session_id,
                         timestamp: Utc::now(),
@@ -335,7 +352,7 @@ fn close_running_session(
     machine_id: MachineId,
     backend: &Arc<dyn Backend>,
     submitted_tasks: &mut HashMap<TaskId, bool>,
-    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
+    notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) {
     for (task_id, cancelling) in submitted_tasks.iter_mut() {
@@ -357,23 +374,17 @@ fn close_running_session(
                 timestamp: now,
             },
         });
-        if let Some(sender) = notify_sender {
-            let proj = task
-                .config()
-                .parent
-                .project_id()
-                .and_then(|pid| project_name(project_map, pid));
-            let info = TaskInfo::build(task, task.state(), machine.config().name.clone(), proj);
-            send_notify(sender, NotifyEvent::Task { task: info });
-        }
+        notify_task(
+            notifiers,
+            task,
+            task.state(),
+            &machine.config().name,
+            project_map,
+        );
         cancelled_tasks.push(task_id);
     }
     machine.close_session();
-    if let Some(sender) = notify_sender {
-        let proj = project_name(project_map, session.config.project_id).unwrap_or_default();
-        let info = SessionInfo::build(session, machine.config().name.clone(), proj);
-        send_notify(sender, NotifyEvent::Session { session: info });
-    }
+    notify_session(notifiers, session, &machine.config().name, project_map);
     db_updates.push(DbUpdate::SessionClosed {
         session_id: s.session_id,
         exec_time,
@@ -388,17 +399,13 @@ fn close_queued_session(
     session_map: &mut SessionMap,
     machine: &Machine,
     project_map: &ProjectMap,
-    notify_sender: &Option<UnboundedSender<NotifyEvent>>,
+    notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) {
     let session = session_map.get_session_mut(session_id);
     let now = Utc::now();
     session.state.close(now);
-    if let Some(sender) = notify_sender {
-        let proj = project_name(project_map, session.config.project_id).unwrap_or_default();
-        let info = SessionInfo::build(session, machine.config().name.clone(), proj);
-        send_notify(sender, NotifyEvent::Session { session: info });
-    }
+    notify_session(notifiers, session, &machine.config().name, project_map);
     db_updates.push(DbUpdate::SessionClosed {
         session_id,
         exec_time: Duration::ZERO,
@@ -412,7 +419,7 @@ struct FailContext<'a> {
     task_map: &'a mut TaskMap,
     project_map: &'a mut ProjectMap,
     machine_name: String,
-    notify_sender: &'a Option<UnboundedSender<NotifyEvent>>,
+    notifiers: &'a NotifierMap,
     db_updates: &'a mut Vec<DbUpdate>,
     error: &'a str,
 }
@@ -470,11 +477,13 @@ impl FailContext<'_> {
                 .get_project_mut(project_id)
                 .settle_in_flight(charged, completed.consumed);
         }
-        if let Some(sender) = self.notify_sender {
-            let proj = project_id.and_then(|pid| project_name(self.project_map, pid));
-            let info = TaskInfo::build(task, task.state(), self.machine_name.clone(), proj);
-            send_notify(sender, NotifyEvent::Task { task: info });
-        }
+        notify_task(
+            self.notifiers,
+            task,
+            task.state(),
+            &self.machine_name,
+            self.project_map,
+        );
         self.db_updates.push(DbUpdate::TaskFailed {
             task_id,
             completed,
@@ -499,7 +508,7 @@ async fn launcher_main(
     machine_id: MachineId,
     backend: Arc<dyn Backend>,
     mut backend_receiver: UnboundedReceiver<FromBackendMessage>,
-    notify_sender: Option<UnboundedSender<NotifyEvent>>,
+    notifiers: Arc<NotifierMap>,
     resume_tasks: Vec<ResumeTask>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -647,7 +656,7 @@ async fn launcher_main(
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
-                                &notify_sender,
+                                &notifiers,
                                 &mut db_updates,
                             );
                             running_session = None;
@@ -754,18 +763,13 @@ async fn launcher_main(
                             TaskState::Running => Duration::ZERO,
                             TaskState::Finished { completed } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
-                                if let Some(sender) = &notify_sender {
-                                    let task = task_map.find_task(task_id).unwrap();
-                                    let machine_name =
-                                        machine_map.get_machine(machine_id).config().name.clone();
-                                    let proj = task
-                                        .config()
-                                        .parent
-                                        .project_id()
-                                        .and_then(|pid| project_name(project_map, pid));
-                                    let info = TaskInfo::build(task, &state, machine_name, proj);
-                                    send_notify(sender, NotifyEvent::Task { task: info });
-                                }
+                                notify_task(
+                                    &notifiers,
+                                    task_map.find_task(task_id).unwrap(),
+                                    &state,
+                                    &machine_map.get_machine(machine_id).config().name,
+                                    project_map,
+                                );
                                 db_updates.push(DbUpdate::TaskFinished {
                                     task_id,
                                     completed: *completed,
@@ -774,18 +778,13 @@ async fn launcher_main(
                             }
                             TaskState::Failed { completed, error } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
-                                if let Some(sender) = &notify_sender {
-                                    let task = task_map.find_task(task_id).unwrap();
-                                    let machine_name =
-                                        machine_map.get_machine(machine_id).config().name.clone();
-                                    let proj = task
-                                        .config()
-                                        .parent
-                                        .project_id()
-                                        .and_then(|pid| project_name(project_map, pid));
-                                    let info = TaskInfo::build(task, &state, machine_name, proj);
-                                    send_notify(sender, NotifyEvent::Task { task: info });
-                                }
+                                notify_task(
+                                    &notifiers,
+                                    task_map.find_task(task_id).unwrap(),
+                                    &state,
+                                    &machine_map.get_machine(machine_id).config().name,
+                                    project_map,
+                                );
                                 db_updates.push(DbUpdate::TaskFailed {
                                     task_id,
                                     completed: *completed,
@@ -798,22 +797,13 @@ async fn launcher_main(
                                     debug!(%task_id, "Ignoring cancel of already-finished task");
                                     update_state = false;
                                 } else {
-                                    if let Some(sender) = &notify_sender {
-                                        let task = task_map.find_task(task_id).unwrap();
-                                        let machine_name = machine_map
-                                            .get_machine(machine_id)
-                                            .config()
-                                            .name
-                                            .clone();
-                                        let proj = task
-                                            .config()
-                                            .parent
-                                            .project_id()
-                                            .and_then(|pid| project_name(project_map, pid));
-                                        let info =
-                                            TaskInfo::build(task, &state, machine_name, proj);
-                                        send_notify(sender, NotifyEvent::Task { task: info });
-                                    }
+                                    notify_task(
+                                        &notifiers,
+                                        task_map.find_task(task_id).unwrap(),
+                                        &state,
+                                        &machine_map.get_machine(machine_id).config().name,
+                                        project_map,
+                                    );
                                     db_updates.push(DbUpdate::TaskCancelled {
                                         task_id,
                                         completed: *completed,
@@ -860,7 +850,7 @@ async fn launcher_main(
                         machine_id,
                         &backend,
                         &mut submitted_tasks,
-                        &notify_sender,
+                        &notifiers,
                         &mut db_updates,
                     );
                 } else {
@@ -872,7 +862,7 @@ async fn launcher_main(
                             session_map,
                             machine,
                             project_map,
-                            &notify_sender,
+                            &notifiers,
                             &mut db_updates,
                         );
                     }
@@ -889,20 +879,13 @@ async fn launcher_main(
                         debug!(%task_id, "Cancelling queued task on request");
                         let task = task_map.get_task_mut(task_id);
                         task.set_state(TaskState::simple_cancelled());
-                        if let Some(sender) = &notify_sender {
-                            let proj = task
-                                .config()
-                                .parent
-                                .project_id()
-                                .and_then(|pid| project_name(project_map, pid));
-                            let info = TaskInfo::build(
-                                task,
-                                task.state(),
-                                machine.config().name.clone(),
-                                proj,
-                            );
-                            send_notify(sender, NotifyEvent::Task { task: info });
-                        }
+                        notify_task(
+                            &notifiers,
+                            task,
+                            task.state(),
+                            &machine.config().name,
+                            project_map,
+                        );
                         db_updates.push(DbUpdate::TaskCancelled {
                             task_id,
                             completed: CompletedState::new_zero_now(),
@@ -920,7 +903,7 @@ async fn launcher_main(
                     task_map,
                     project_map,
                     machine_name: machine_map.get_machine(machine_id).config().name.clone(),
-                    notify_sender: &notify_sender,
+                    notifiers: &notifiers,
                     db_updates: &mut db_updates,
                     error: &error,
                 };
@@ -938,7 +921,7 @@ async fn launcher_main(
                                 session_map,
                                 machine_map.get_machine(machine_id),
                                 ctx.project_map,
-                                &notify_sender,
+                                &notifiers,
                                 ctx.db_updates,
                             );
                         }
@@ -983,7 +966,7 @@ async fn launcher_main(
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
-                                &notify_sender,
+                                &notifiers,
                                 ctx.db_updates,
                             );
                         }
@@ -1012,7 +995,7 @@ async fn launcher_main(
                     machine_id,
                     &mut running_session,
                     submitted_tasks.is_empty(),
-                    &notify_sender,
+                    &notifiers,
                     &mut db_updates,
                 )
             {
@@ -1030,23 +1013,14 @@ async fn launcher_main(
                     let error = PROJECT_LIMIT_ERROR.to_string();
                     let state = TaskState::simple_error(error.clone());
                     let completed = *state.completed().unwrap();
-                    if let Some(sender) = &notify_sender {
-                        let split = core.split();
-                        let task = split.task_map.find_task(task_id).unwrap();
-                        let machine_name = split
-                            .machine_map
-                            .get_machine(machine_id)
-                            .config()
-                            .name
-                            .clone();
-                        let proj = task
-                            .config()
-                            .parent
-                            .project_id()
-                            .and_then(|pid| project_name(split.project_map, pid));
-                        let info = TaskInfo::build(task, &state, machine_name, proj);
-                        send_notify(sender, NotifyEvent::Task { task: info });
-                    }
+                    let split = core.split();
+                    notify_task(
+                        &notifiers,
+                        split.task_map.find_task(task_id).unwrap(),
+                        &state,
+                        &split.machine_map.get_machine(machine_id).config().name,
+                        split.project_map,
+                    );
                     core.split_mut()
                         .task_map
                         .get_task_mut(task_id)

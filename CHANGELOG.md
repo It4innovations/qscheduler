@@ -10,6 +10,12 @@
 - Existing machine configurations stored under the old names are still read.
 - IQM: job polling never gives up (previously failed after 120 failed polls); unreachable
   jobs are polled with exponential backoff, and failed cancels are retried instead of dropped.
+- **Breaking:** notifications are no longer configured per machine. The machine options
+  `--notify-url`/`--notify-token` are removed, and a `notify` block in an existing machine
+  configuration is ignored. Instead, register notifiers (see Added) and select one per task or
+  session; without `notify`, nothing is sent.
+- Notification delivery logs name the notifier and a short failure reason (e.g. `HTTP 500`,
+  `cannot connect`), including the "discarding notification after max failures" warning.
 
 ### Added
 
@@ -28,6 +34,14 @@
 - `machine remove` CLI command (`--force` also deletes the machine's tasks and sessions)
 - Graceful shutdown on `SIGTERM`/`Ctrl+C`: pending state, including running session time, is
   written to the database before exit
+- Notifiers: named HTTP callback targets independent of machines, managed with the
+  `notifier add <NAME> --url <URL> [--token <TOKEN>]`, `notifier remove <NAME>` and
+  `notifier list` CLI commands (names up to 12 characters; changes take effect after a restart).
+  Removing a notifier turns off notifications for the tasks and sessions that used it.
+- Optional `notify` parameter on `POST /tasks` and `POST /sessions` selecting the notifier for
+  the task's completion event or the session's open/close events; an unknown notifier is
+  rejected with HTTP 422
+- `notify` field in `GET /tasks/{id}`, `GET /sessions/{id}` and the callback payloads
 
 ### Fixed
 
