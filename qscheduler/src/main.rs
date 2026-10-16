@@ -1,7 +1,7 @@
 use clap::Parser;
-use runner::config::MachineConfiguration;
+use runner::config::{MachineConfiguration, NotifierConfiguration};
 use runner::error::RunnerError;
-use runner::{BackendConfig, IqmBackendConfig, NotifyConfig};
+use runner::{BackendConfig, IqmBackendConfig};
 use service::config::ServiceConfiguration;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +22,42 @@ enum CliCommand {
     Serve(ServeOpts),
     /// Manage machines
     Machine(Box<MachineArgs>),
+    /// Manage notifiers (HTTP callback targets selected by tasks and sessions)
+    Notifier(NotifierArgs),
+}
+
+#[derive(Parser)]
+struct NotifierArgs {
+    #[clap(subcommand)]
+    command: NotifierCommand,
+}
+
+#[derive(Parser)]
+enum NotifierCommand {
+    /// Add a new notifier
+    Add(NotifierAddArgs),
+    /// Remove a notifier; tasks and sessions that use it stop sending notifications
+    Remove(NotifierRemoveArgs),
+    /// List registered notifiers (tokens are not shown)
+    List,
+}
+
+#[derive(Parser)]
+struct NotifierAddArgs {
+    /// Notifier name (at most 12 characters); tasks and sessions select the notifier by it
+    name: String,
+    /// URL to POST task completion and session open/close events to
+    #[arg(long)]
+    url: String,
+    /// Token included in event payloads
+    #[arg(long)]
+    token: Option<String>,
+}
+
+#[derive(Parser)]
+struct NotifierRemoveArgs {
+    /// Notifier name
+    name: String,
 }
 
 #[derive(Parser)]
@@ -65,13 +101,6 @@ struct MachineConfigArgs {
     /// Maximum number of queued tasks
     #[arg(long, default_value = "4")]
     queue_size: usize,
-    /// URL to POST task completion callbacks to
-    #[arg(long)]
-    notify_url: Option<String>,
-    /// Token included in callback payloads
-    #[arg(long)]
-    notify_token: Option<String>,
-
     /// How often session consumption is stored into DB and task time limits are checked.
     #[arg(long, value_parser = parse_human_time, default_value = "2s")]
     limit_check_interval: Duration,
@@ -98,10 +127,6 @@ struct MachineConfigArgs {
 
 impl MachineConfigArgs {
     pub fn into_machine_configuration(self) -> MachineConfiguration {
-        let notify = self.notify_url.map(|url| NotifyConfig {
-            url,
-            token: self.notify_token,
-        });
         MachineConfiguration {
             name: self.name,
             queue_size: self.queue_size,
@@ -109,7 +134,6 @@ impl MachineConfigArgs {
             max_session_time_ms: self.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
-            notify,
             backend: self.backend.into_config(),
         }
     }
@@ -185,9 +209,15 @@ async fn main() {
             .with_writer(std::sync::Mutex::new(file))
             .with_env_filter(env_filter)
             .init();
-    } else {
+    } else if matches!(args.command, CliCommand::Serve(_)) {
         tracing_subscriber::fmt()
             .with_writer(std::io::stdout)
+            .with_env_filter(env_filter)
+            .init();
+    } else {
+        // Management commands keep stdout for their own output, so it stays parseable.
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(env_filter)
             .init();
     }
@@ -210,13 +240,28 @@ async fn main() {
                 MachineCommand::Remove(args) => cmd_machine_remove(args).await,
             }
         }
+        CliCommand::Notifier(notifier_args) => {
+            dotenvy::dotenv().ok();
+            match notifier_args.command {
+                NotifierCommand::Add(args) => cmd_notifier_add(args).await,
+                NotifierCommand::Remove(args) => cmd_notifier_remove(args).await,
+                NotifierCommand::List => cmd_notifier_list().await,
+            }
+        }
     }
+}
+
+const RESTART_HINT: &str = "Restart the service for the change to take effect.";
+
+/// Prints `Error: {msg}` to stderr and exits with status 1.
+fn die(msg: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {msg}");
+    std::process::exit(1)
 }
 
 async fn connect_db() -> sqlx::postgres::PgPool {
     runner::db::create_pool().await.unwrap_or_else(|e| {
-        eprintln!("Error: failed to connect to database: {e}");
-        std::process::exit(1);
+        die(format!("failed to connect to database: {e}"));
     })
 }
 
@@ -229,20 +274,18 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
                 "Machine '{name}' added successfully (id={id}).",
                 name = config.name
             );
-            println!("Restart the service for the change to take effect.");
+            println!("{RESTART_HINT}");
         }
         Err(RunnerError::MachineAlreadyExists(_)) => {
             tracing::error!(name = %config.name, "machine already exists");
-            eprintln!(
-                "Error: a machine named '{name}' already exists.",
+            die(format!(
+                "a machine named '{name}' already exists.",
                 name = config.name
-            );
-            std::process::exit(1);
+            ));
         }
         Err(e) => {
             tracing::error!(name = %config.name, error = %e, "failed to add machine");
-            eprintln!("Error: failed to add machine: {e}");
-            std::process::exit(1);
+            die(format!("failed to add machine: {e}"));
         }
     }
 }
@@ -253,17 +296,15 @@ async fn cmd_machine_update(args: MachineConfigArgs) {
     match runner::db::update_machine(&pool, &config).await {
         Ok(true) => {
             println!("Machine '{}' updated successfully.", config.name);
-            println!("Restart the service for the change to take effect.");
+            println!("{RESTART_HINT}");
         }
         Ok(false) => {
             tracing::error!(name = %config.name, "machine not found");
-            eprintln!("Error: machine '{}' not found.", config.name);
-            std::process::exit(1);
+            die(format!("machine '{}' not found.", config.name));
         }
         Err(e) => {
             tracing::error!(name = %config.name, error = %e, "failed to update machine");
-            eprintln!("Error: failed to update machine '{}': {e}", config.name);
-            std::process::exit(1);
+            die(format!("failed to update machine '{}': {e}", config.name));
         }
     }
 }
@@ -284,7 +325,7 @@ async fn cmd_machine_remove(args: MachineRemoveArgs) {
             } else {
                 println!("Machine '{}' removed successfully.", args.name);
             }
-            println!("Restart the service for the change to take effect.");
+            println!("{RESTART_HINT}");
         }
         Ok(RemoveMachineOutcome::HasDependents { tasks, sessions }) => {
             eprintln!(
@@ -300,13 +341,80 @@ async fn cmd_machine_remove(args: MachineRemoveArgs) {
         }
         Ok(RemoveMachineOutcome::NotFound) => {
             tracing::error!(name = %args.name, "machine not found");
-            eprintln!("Error: machine '{}' not found.", args.name);
-            std::process::exit(1);
+            die(format!("machine '{}' not found.", args.name));
         }
         Err(e) => {
             tracing::error!(name = %args.name, error = %e, "failed to remove machine");
-            eprintln!("Error: failed to remove machine '{}': {e}", args.name);
-            std::process::exit(1);
+            die(format!("failed to remove machine '{}': {e}", args.name));
+        }
+    }
+}
+
+async fn cmd_notifier_add(args: NotifierAddArgs) {
+    let pool = connect_db().await;
+    let config = NotifierConfiguration {
+        name: args.name,
+        url: args.url,
+        token: args.token,
+    };
+    match runner::db::insert_notifier(&pool, &config).await {
+        Ok(id) => {
+            println!(
+                "Notifier '{name}' added successfully (id={id}).",
+                name = config.name
+            );
+            println!("{RESTART_HINT}");
+        }
+        Err(RunnerError::NotifierAlreadyExists(_)) => {
+            tracing::error!(name = %config.name, "notifier already exists");
+            die(format!(
+                "a notifier named '{name}' already exists.",
+                name = config.name
+            ));
+        }
+        Err(e @ RunnerError::InvalidNotifierName(_)) => {
+            die(e);
+        }
+        Err(e) => {
+            tracing::error!(name = %config.name, error = %e, "failed to add notifier");
+            die(format!("failed to add notifier: {e}"));
+        }
+    }
+}
+
+async fn cmd_notifier_list() {
+    let pool = connect_db().await;
+    let notifiers = runner::db::load_notifiers(&pool).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to list notifiers");
+        die(format!("failed to list notifiers: {e}"));
+    });
+    if notifiers.is_empty() {
+        println!("No notifiers registered.");
+        return;
+    }
+    let width = runner::MAX_NOTIFIER_NAME_LEN;
+    println!("{:<width$}  {:<5}  URL", "NAME", "TOKEN");
+    for (_, n) in notifiers {
+        let token = if n.token.is_some() { "yes" } else { "no" };
+        println!("{:<width$}  {token:<5}  {}", n.name, n.url);
+    }
+}
+
+async fn cmd_notifier_remove(args: NotifierRemoveArgs) {
+    let pool = connect_db().await;
+    match runner::db::remove_notifier(&pool, &args.name).await {
+        Ok(true) => {
+            println!("Notifier '{}' removed successfully.", args.name);
+            println!("Tasks and sessions that used it no longer send notifications.");
+            println!("{RESTART_HINT}");
+        }
+        Ok(false) => {
+            tracing::error!(name = %args.name, "notifier not found");
+            die(format!("notifier '{}' not found.", args.name));
+        }
+        Err(e) => {
+            tracing::error!(name = %args.name, error = %e, "failed to remove notifier");
+            die(format!("failed to remove notifier '{}': {e}", args.name));
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::MachineId;
-use crate::config::MachineConfiguration;
+use crate::callback::NotifierId;
+use crate::config::{MachineConfiguration, NotifierConfiguration};
 use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionStateKind};
@@ -157,6 +158,7 @@ pub struct RestoredTask {
     pub created_at: DateTime<Utc>,
     pub time_limit_ms: Option<i64>,
     pub started_at: Option<DateTime<Utc>>,
+    pub notifier_id: Option<i32>,
 }
 
 /// A non-terminal session loaded from the database during startup restoration.
@@ -171,6 +173,7 @@ pub struct RestoredSession {
     pub closed_at: Option<DateTime<Utc>>,
     pub exec_time_ms: Option<i64>,
     pub created_at: DateTime<Utc>,
+    pub notifier_id: Option<i32>,
 }
 
 fn exec_time_ms(exec_time: Duration) -> Option<i64> {
@@ -434,7 +437,8 @@ pub async fn insert_task(
     config: &TaskConfig,
 ) -> crate::Result<(TaskId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload, time_limit_ms) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at",
+        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload, time_limit_ms, notifier_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_u32() as i32)
     .bind(config.parent.session_id().map(|s| s.as_i64()))
@@ -442,6 +446,7 @@ pub async fn insert_task(
     .bind(&config.user)
     .bind(config.payload.as_ref())
     .bind(config.time_limit.as_millis() as i64)
+    .bind(config.notifier.map(|n| n.as_i32()))
     .fetch_one(pool)
     .await?;
 
@@ -483,11 +488,13 @@ pub async fn insert_session(
     config: &SessionConfig,
 ) -> crate::Result<(SessionId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO sessions (machine_id, project_id, time_limit_ms) VALUES ($1, $2, $3) RETURNING id, created_at",
+        "INSERT INTO sessions (machine_id, project_id, time_limit_ms, notifier_id) \
+         VALUES ($1, $2, $3, $4) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_u32() as i32)
     .bind(config.project_id.as_i32())
     .bind(config.time_limit.as_millis() as i64)
+    .bind(config.notifier.map(|n| n.as_i32()))
     .fetch_one(pool)
     .await?;
 
@@ -526,6 +533,61 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
         machines.push((machine_id, config));
     }
     Ok(machines)
+}
+
+pub async fn insert_notifier(
+    pool: &PgPool,
+    config: &NotifierConfiguration,
+) -> crate::Result<NotifierId> {
+    crate::callback::validate_notifier_name(&config.name)?;
+    let row =
+        sqlx::query("INSERT INTO notifiers (name, url, token) VALUES ($1, $2, $3) RETURNING id")
+            .bind(&config.name)
+            .bind(&config.url)
+            .bind(&config.token)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                if is_already_exists_error(&e) {
+                    RunnerError::NotifierAlreadyExists(config.name.clone())
+                } else {
+                    RunnerError::Sqlx(e)
+                }
+            })?;
+    let id: i32 = row.get("id");
+    Ok(NotifierId::from(id as u32))
+}
+
+/// Removes a notifier; tasks and sessions that referenced it stop notifying (the FK is
+/// `ON DELETE SET NULL`). Returns `false` if no such notifier exists.
+pub async fn remove_notifier(pool: &PgPool, name: &str) -> crate::Result<bool> {
+    let result = sqlx::query("DELETE FROM notifiers WHERE name = $1")
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn load_notifiers(
+    pool: &PgPool,
+) -> crate::Result<Vec<(NotifierId, NotifierConfiguration)>> {
+    let rows = sqlx::query("SELECT id, name, url, token FROM notifiers ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let id: i32 = row.get("id");
+            (
+                NotifierId::from(id as u32),
+                NotifierConfiguration {
+                    name: row.get("name"),
+                    url: row.get("url"),
+                    token: row.get("token"),
+                },
+            )
+        })
+        .collect())
 }
 
 fn suspension_from_row(row: &sqlx::postgres::PgRow) -> crate::Result<Suspension> {
@@ -622,7 +684,7 @@ pub(crate) async fn load_active_suspensions(
 pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>> {
     sqlx::query_as::<_, RestoredTask>(
         "SELECT id, machine_id, session_id, project_id, backend_id, \"user\", payload, created_at, \
-                time_limit_ms, started_at \
+                time_limit_ms, started_at, notifier_id \
          FROM tasks WHERE state = 'waiting'",
     )
     .fetch_all(pool)
@@ -641,7 +703,7 @@ pub async fn load_active_sessions(
     let task_session_ids: Vec<i64> = active_tasks.iter().filter_map(|t| t.session_id).collect();
     sqlx::query_as::<_, RestoredSession>(
         "SELECT id, machine_id, project_id, time_limit_ms, opened_at, updated_at, closed_at, \
-                exec_time_ms, created_at \
+                exec_time_ms, created_at, notifier_id \
          FROM sessions WHERE closed_at IS NULL OR id = ANY($1)",
     )
     .bind(&task_session_ids)
@@ -664,6 +726,7 @@ struct TaskInfoRow {
     created_at: DateTime<Utc>,
     time_limit_ms: Option<i64>,
     started_at: Option<DateTime<Utc>>,
+    notify: Option<String>,
 }
 
 impl TaskInfoRow {
@@ -689,6 +752,7 @@ impl TaskInfoRow {
             finished_at: self.finished_at,
             exectime_ms: self.exec_time_ms,
             error: self.error,
+            notify: self.notify,
         }
     }
 }
@@ -703,10 +767,11 @@ pub(crate) async fn find_task_info(
     sqlx::query_as::<_, TaskInfoRow>(
         "SELECT t.id, m.name AS machine, t.session_id, p.name AS project, t.backend_id, \
                 t.\"user\", t.state::text AS state, t.error, t.finished_at, t.exec_time_ms, \
-                t.created_at, t.time_limit_ms, t.started_at \
+                t.created_at, t.time_limit_ms, t.started_at, n.name AS notify \
          FROM tasks t \
          JOIN machines m ON m.id = t.machine_id \
          LEFT JOIN projects p ON p.id = t.project_id \
+         LEFT JOIN notifiers n ON n.id = t.notifier_id \
          WHERE t.id = $1",
     )
     .bind(task_id.as_i64())
@@ -726,6 +791,7 @@ struct SessionInfoRow {
     closed_at: Option<DateTime<Utc>>,
     exec_time_ms: Option<i64>,
     created_at: DateTime<Utc>,
+    notify: Option<String>,
 }
 
 impl SessionInfoRow {
@@ -750,6 +816,7 @@ impl SessionInfoRow {
             // always written through the zero-omitting duration_ms helper) — normalize here to
             // match TaskInfo.exectime_ms's omit-when-zero convention.
             exectime_ms: self.exec_time_ms.filter(|&ms| ms != 0),
+            notify: self.notify,
         }
     }
 }
@@ -762,10 +829,11 @@ pub(crate) async fn find_session_info(
 ) -> crate::Result<Option<SessionInfo>> {
     sqlx::query_as::<_, SessionInfoRow>(
         "SELECT s.id, m.name AS machine, p.name AS project, s.time_limit_ms, s.opened_at, \
-                s.closed_at, s.exec_time_ms, s.created_at \
+                s.closed_at, s.exec_time_ms, s.created_at, n.name AS notify \
          FROM sessions s \
          JOIN machines m ON m.id = s.machine_id \
          JOIN projects p ON p.id = s.project_id \
+         LEFT JOIN notifiers n ON n.id = s.notifier_id \
          WHERE s.id = $1",
     )
     .bind(session_id.as_i64())

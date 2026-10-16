@@ -116,8 +116,6 @@ def test_machine_update(qscheduler_test, db_connect):
     r = qscheduler_test.update_machine(
         "--queue-size=7",
         "--max-session-time=10s",
-        "--notify-url=http://127.0.0.1:1/notify",
-        "--notify-token=secret",
     )
     assert r.returncode == 0, r.stderr
     assert "updated" in r.stdout
@@ -128,10 +126,6 @@ def test_machine_update(qscheduler_test, db_connect):
     assert config["name"] == TEST_MACHINE_NAME
     assert config["queue_size"] == 7
     assert config["max_session_time_ms"] == 10_000
-    assert config["notify"] == {
-        "url": "http://127.0.0.1:1/notify",
-        "token": "secret",
-    }
 
     # The service loads the updated configuration on restart
     qscheduler_test.restart()

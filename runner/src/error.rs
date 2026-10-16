@@ -52,6 +52,12 @@ pub enum RunnerError {
     MachineNotSuspended(String),
     #[error("Invalid suspension message: {0}")]
     InvalidSuspensionMessage(String),
+    #[error("Unknown notifier {0:?}")]
+    UnknownNotifier(String),
+    #[error("Notifier '{0}' already exists")]
+    NotifierAlreadyExists(String),
+    #[error("Invalid notifier name: {0}")]
+    InvalidNotifierName(String),
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 

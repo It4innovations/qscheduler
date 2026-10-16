@@ -1,3 +1,4 @@
+use crate::callback::{NotifierId, NotifierMap};
 use crate::machine::MachineId;
 use crate::project::ProjectId;
 use crate::session::SessionId;
@@ -200,6 +201,8 @@ pub struct TaskConfig {
     /// Effective execution time limit, counted from when the backend first reports the task
     /// as running. Resolved at submit time (explicit value or the machine's default).
     pub time_limit: Duration,
+    /// Notifier that receives the task's completion event, if any.
+    pub notifier: Option<NotifierId>,
 }
 
 impl Debug for TaskConfig {
@@ -212,6 +215,7 @@ impl Debug for TaskConfig {
         };
         f.field("user", &self.user);
         f.field("time_limit", &self.time_limit);
+        f.field("notifier", &self.notifier);
         f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
         f.finish()
     }
@@ -308,6 +312,10 @@ pub struct TaskInfo {
     /// Present only when `state` is `"failed"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Name of the notifier that receives the task's completion event. Absent if the task was
+    /// submitted without `notify`, or its notifier has since been removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
 }
 
 impl TaskInfo {
@@ -319,6 +327,7 @@ impl TaskInfo {
         state: &TaskState,
         machine: String,
         project: Option<String>,
+        notifiers: &NotifierMap,
     ) -> TaskInfo {
         let (finished_at, exectime_ms, error) = match state {
             TaskState::Waiting | TaskState::Running => (None, None, None),
@@ -348,6 +357,7 @@ impl TaskInfo {
             finished_at,
             exectime_ms,
             error,
+            notify: notifiers.name(task.config().notifier),
         }
     }
 }

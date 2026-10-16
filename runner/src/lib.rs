@@ -18,7 +18,7 @@ use crate::error::RunnerError;
 
 pub use backend::{BackendConfig, BackendVersion};
 pub use backend_iqm::{IqmBackendConfig, IqmVersion};
-pub use callback::NotifyConfig;
+pub use callback::{MAX_NOTIFIER_NAME_LEN, NotifierId};
 pub use machine::MachineId;
 pub use project::Project;
 pub use session::{SessionConfig, SessionId, SessionInfo, SessionState};

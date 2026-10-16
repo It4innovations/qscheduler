@@ -1,5 +1,4 @@
 use crate::backend::{Backend, BackendConfig};
-use crate::callback::NotifyConfig;
 use crate::error::RunnerError;
 use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
@@ -35,7 +34,6 @@ pub struct MachineConfig {
     pub max_session_time: Duration,
     pub default_task_time_limit: Duration,
     pub max_clock_skew: Duration,
-    pub notify: Option<NotifyConfig>,
     pub backend: BackendConfig,
 }
 

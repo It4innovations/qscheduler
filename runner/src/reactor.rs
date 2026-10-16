@@ -1,3 +1,4 @@
+use crate::callback::NotifierId;
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::error::RunnerError;
 use crate::project::{Project, ProjectId};
@@ -245,6 +246,13 @@ pub async fn get_project_by_name(core_ref: &CoreRef, name: &str) -> crate::Resul
 
 pub fn get_machine_id_by_name(core: &Core, name: &str) -> crate::Result<MachineId> {
     core.split().machine_map.find_machine_by_name(name)
+}
+
+/// Translates the optional notifier name of a task or session into its id; `None` means no
+/// notification. An unknown name is an error.
+pub fn resolve_notifier(core: &Core, name: Option<&str>) -> crate::Result<Option<NotifierId>> {
+    name.map(|name| core.notifiers().find_notifier_by_name(name))
+        .transpose()
 }
 
 pub fn get_machine_default_task_time_limit(core: &Core, machine_id: MachineId) -> Duration {

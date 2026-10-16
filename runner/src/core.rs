@@ -1,4 +1,5 @@
 use crate::backend::{BackendFuture, ByteStream, FromBackendMessage, create_backend};
+use crate::callback::{NotifierId, NotifierMap};
 use crate::config::RunnerConfiguration;
 use crate::db::close_dead_session;
 use crate::error::RunnerError;
@@ -41,6 +42,8 @@ pub struct Core {
     task_map: TaskMap,
     session_map: SessionMap,
     project_map: ProjectMap,
+    /// Fixed after startup, shared with the launchers.
+    notifiers: Arc<NotifierMap>,
     pool: PgPool,
     core_ref: Option<CoreRef>,
     shutdown_sender: watch::Sender<bool>,
@@ -66,7 +69,6 @@ impl Core {
                     max_session_time: Duration::from_millis(m.max_session_time_ms),
                     default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
                     max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
-                    notify: m.notify,
                     backend: m.backend,
                 },
                 backend,
@@ -78,6 +80,7 @@ impl Core {
             task_map: Default::default(),
             session_map: Default::default(),
             project_map: Default::default(),
+            notifiers: Arc::new(NotifierMap::start(config.notifiers)),
             pool,
             core_ref: None,
             shutdown_sender: watch::Sender::new(false),
@@ -108,6 +111,9 @@ impl Core {
     /// Must run before [`Core::start_launchers`] so queues are populated first.
     async fn restore(core_ref: &CoreRef) -> crate::Result<HashMap<MachineId, Vec<ResumeTask>>> {
         let pool = core_ref.lock().unwrap().pool().clone();
+        // An id unknown to the loaded notifiers (one added after startup) needs no filtering:
+        // `NotifierMap` treats it like no notifier.
+        let restore_notifier = |raw: Option<i32>| raw.map(|id| NotifierId::from(id as u32));
         let tasks = match db::load_active_tasks(&pool).await {
             Ok(t) => t,
             Err(e) => {
@@ -208,6 +214,7 @@ impl Core {
                     machine_id,
                     project_id,
                     time_limit: Duration::from_millis(s.time_limit_ms as u64),
+                    notifier: restore_notifier(s.notifier_id),
                 };
                 let mut session = Session::new(session_id, s.created_at, config);
                 session.consumed = Duration::from_millis(s.exec_time_ms.unwrap_or(0) as u64);
@@ -296,6 +303,7 @@ impl Core {
                     user: t.user,
                     payload: payload.clone(),
                     time_limit,
+                    notifier: restore_notifier(t.notifier_id),
                 };
 
                 if let Some(backend_id) = t.backend_id {
@@ -385,6 +393,10 @@ impl Core {
         &self.pool
     }
 
+    pub(crate) fn notifiers(&self) -> &NotifierMap {
+        &self.notifiers
+    }
+
     pub(crate) fn suspension_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.suspension_lock.clone()
     }
@@ -403,10 +415,10 @@ impl Core {
             handles.push(start_launcher(
                 core_ref,
                 machine_id,
-                m.config(),
                 m.backend().clone(),
                 backend_receiver,
                 resume_tasks,
+                self.notifiers.clone(),
                 self.shutdown_sender.subscribe(),
             ));
         }
@@ -544,7 +556,13 @@ impl Core {
             .project_id()
             .and_then(|pid| self.project_map.find_project(pid))
             .map(|p| p.name.clone());
-        Some(TaskInfo::build(task, task.state(), machine, project))
+        Some(TaskInfo::build(
+            task,
+            task.state(),
+            machine,
+            project,
+            &self.notifiers,
+        ))
     }
 
     pub fn session_info(&self, session_id: SessionId) -> Option<SessionInfo> {
@@ -560,7 +578,12 @@ impl Core {
             .find_project(session.config.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        Some(SessionInfo::build(session, machine, project))
+        Some(SessionInfo::build(
+            session,
+            machine,
+            project,
+            &self.notifiers,
+        ))
     }
 
     pub fn get_arch(&self, machine_id: MachineId) -> crate::Result<BackendFuture<String>> {

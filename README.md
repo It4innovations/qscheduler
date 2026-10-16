@@ -60,8 +60,6 @@ qscheduler machine add <NAME> [OPTIONS] <BACKEND> [BACKEND OPTIONS]
 |---|---|
 | `<NAME>` | Unique machine name, referenced when submitting tasks and creating sessions. |
 | `--queue-size <N>` | Maximum number of tasks that can be queued on this machine (default: `4`). |
-| `--notify-url <URL>` | If set, POST a callback here whenever a task on this machine reaches a terminal state, or a session on this machine opens or closes. See [Notifications](#notifications). |
-| `--notify-token <TOKEN>` | Arbitrary token included in notification payloads. |
 | `--limit-check-interval <DURATION>` | How often session time-consumption is persisted to the database and task and project time limits are checked for running work, e.g. `5s` (default: `2s`). |
 | `--max-session-time <DURATION>` | Maximum duration a session on this machine may request, e.g. `2h`. Sessions requesting longer are rejected at submit time (default: `2h`). |
 | `--default-task-time-limit <DURATION>` | Execution time limit for tasks submitted without `time_limit_ms`, e.g. `30m` (default: `1h`). |
@@ -219,12 +217,31 @@ by running with `--network host` — no custom Docker network needed.
 
 ### Notifications
 
-When `--notify-url` is configured on a machine, the service sends an HTTP `POST` request to
-that URL:
+Notifiers are named HTTP callback targets, independent of machines. They are registered in the
+database with the `qscheduler notifier` subcommand and loaded by the service at startup, so
+adding or removing one takes effect after a restart:
 
-- after every task on the machine reaches a terminal state (`finished`, `failed`, or
-  `cancelled`);
-- whenever a session on the machine opens or closes.
+```bash
+qscheduler notifier add <NAME> --url <URL> [--token <TOKEN>]
+qscheduler notifier remove <NAME>
+qscheduler notifier list
+```
+
+| Argument / option | Description |
+|---|---|
+| `<NAME>` | Unique notifier name, at most 12 characters; tasks and sessions select the notifier by it. |
+| `--url <URL>` | URL to `POST` events to. |
+| `--token <TOKEN>` | Arbitrary token included in event payloads. |
+
+Removing a notifier turns off notifications for every task and session that used it. `notifier list` prints each notifier's name, URL and whether it has a token (the token itself is
+not shown).
+
+A task or session opts in with the `notify` parameter of [`POST /tasks`](#post-tasks) or
+[`POST /sessions`](#post-sessions); without it, no notification is sent. An unknown notifier name
+is rejected with `422`. The service then sends an HTTP `POST` request to that notifier's URL:
+
+- after the task reaches a terminal state (`finished`, `failed`, or `cancelled`);
+- whenever the session opens or closes.
 
 Delivery is retried with exponential backoff up to 16 times.
 
@@ -274,7 +291,7 @@ The session fires once when it opens (`session.state` is `"open"`) and once when
 (`session.state` is `"closed"`). A session that is cancelled before ever opening only fires the
 `"closed"` event.
 
-The `token` field is omitted when `--notify-token` was not configured.
+The `token` field is omitted when the notifier has no `--token`.
 
 ## API
 
@@ -325,6 +342,7 @@ Submit a task for execution.
 | `session_id` | integer | exactly one of `project` / `session_id` | Session to associate the task with. The session must be in the `"open"` state or the task is rejected. |
 | `user` | string | yes | Free-form identifier of the user submitting the task, stored alongside the task. |
 | `time_limit_ms` | integer | no | Maximum execution time in milliseconds, counted from when the backend starts running the task (queue time doesn't count). When exceeded, the task is cancelled on the backend and ends `"failed"` with error `"Task time limit exceeded"`. Enforced with a running-time estimate that never exceeds the true time (see `--max-clock-skew`) and checked every machine `--limit-check-interval`, so a task is never stopped early but may overrun slightly. Defaults to the machine's `--default-task-time-limit`. |
+| `notify` | string | no | Name of the notifier to send the task's completion event to (see [Notifications](#notifications)). No notification is sent when omitted. |
 
 **Request body** — `application/octet-stream` — raw task payload forwarded to the backend.
 
@@ -336,7 +354,7 @@ Submit a task for execution.
 The body is the error text with the suspension message, e.g.
 `Machine 'garnet' is suspended: Calibration in progress`.
 
-**Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`, `time_limit_ms` is zero, or the session is invalid or not open.
+**Response `422`** — neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, or the session is invalid or not open.
 
 ---
 
@@ -358,6 +376,7 @@ restart) — the service falls back to the database for terminal tasks.
 | `state` | string | always | One of `"waiting"`, `"running"`, `"finished"`, `"failed"`, `"cancelled"`. |
 | `created_at` | timestamp | always | When the task was submitted. |
 | `time_limit_ms` | integer | always (except tasks created before time limits existed) | Execution time limit in milliseconds, counted from `started_at`. |
+| `notify` | string | if the task was submitted with `notify` | Name of the notifier that receives the task's completion event. Absent once the notifier is removed (after a restart). |
 | `started_at` | timestamp | once the backend started running the task | When the backend started executing the task, on the **backend's clock**. |
 | `finished_at` | timestamp | once in a terminal state | When the task reached its final state. For a task that ran on the backend this is the backend's timestamp (**backend's clock**; `finished_at − started_at` equals `exectime_ms`); for a task ended by the scheduler itself (e.g. cancelled while queued) it's the scheduler's time. |
 | `exectime_ms` | integer | if any execution time was consumed | Milliseconds of execution time. |
@@ -437,6 +456,7 @@ in the session are cancelled when the session closes.
 | `machine` | string | yes | Name of the target machine. |
 | `project` | string | yes | Name of the project the session's time is charged to. |
 | `time_limit_ms` | integer | yes | Session lifetime in milliseconds. |
+| `notify` | string | no | Name of the notifier to send the session's open/close events to (see [Notifications](#notifications)). No notification is sent when omitted. |
 
 **Response `201`** — session ID as a JSON integer.
 
@@ -446,7 +466,7 @@ in the session are cancelled when the session closes.
 
 **Response `409`** — the machine is suspended; the body contains the suspension message.
 
-**Response `422`** — unknown `project`, or `time_limit_ms` exceeds the machine's `--max-session-time`.
+**Response `422`** — unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`.
 
 ---
 
@@ -464,6 +484,7 @@ after a service restart) — the service falls back to the database.
 | `machine` | string | always | Name of the reserved machine. |
 | `project` | string | always | Name of the project the session's time is charged to. |
 | `time_limit_ms` | integer | always | Session lifetime in milliseconds. |
+| `notify` | string | if the session was created with `notify` | Name of the notifier that receives the session's open/close events. Absent once the notifier is removed (after a restart). |
 | `created_at` | timestamp | always | When the session was created. |
 | `opened_at` | timestamp | once opened | When the session became active. |
 | `closed_at` | timestamp | once closed | When the session ended. |

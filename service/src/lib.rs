@@ -97,7 +97,14 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
             tracing::info!(id = %machine_id, name = %m.name, backend = ?m.backend, "machine loaded");
         }
     }
-    let runner_conf = RunnerConfiguration { machines };
+    let notifiers = runner::db::load_notifiers(&pool).await?;
+    for (notifier_id, n) in &notifiers {
+        tracing::info!(id = %notifier_id, name = %n.name, url = %n.url, "notifier loaded");
+    }
+    let runner_conf = RunnerConfiguration {
+        machines,
+        notifiers,
+    };
     let core_ref = Core::new(runner_conf, pool).await?;
     let state = Arc::new(AppState {
         version,
