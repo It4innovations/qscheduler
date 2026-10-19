@@ -299,21 +299,21 @@ def test_notifier_cli(qscheduler_test, callback_server, db_connect):
     r = qs.add_notifier(NOTIFIER, url)
     assert r.returncode != 0
     assert "already exists" in r.stderr
-    r = qs.add_notifier("x" * 13, url)
+    r = qs.add_notifier("x" * 513, url)
     assert r.returncode != 0
-    assert "at most" in r.stderr or "1 to 12" in r.stderr
-    assert qs.add_notifier("x" * 12, url).returncode == 0
+    assert "at most" in r.stderr or "1 to 512" in r.stderr
+    assert qs.add_notifier("x" * 512, url).returncode == 0
     assert notifier_rows(qs.list_notifiers()) == [
         ["NAME", "TOKEN", "URL"],
         [NOTIFIER, "no", url],
-        ["x" * 12, "no", url],
+        ["x" * 512, "no", url],
     ]
     r = qs.remove_notifier("missing")
     assert r.returncode != 0
     assert "not found" in r.stderr
 
     # A notifier added while running is unknown until a restart
-    qs.submit(TT(), notify="x" * 12, expect_error=422)
+    qs.submit(TT(), notify="x" * 512, expect_error=422)
 
     task_id = qs.submit(TT(), notify=NOTIFIER)
     qs.wait_for_finished(task_id)
@@ -323,13 +323,13 @@ def test_notifier_cli(qscheduler_test, callback_server, db_connect):
         cur.execute("SELECT notifier_id FROM tasks WHERE id = %s", [task_id])
         assert cur.fetchone()[0] is None
 
-    assert [row[0] for row in notifier_rows(qs.list_notifiers())] == ["NAME", "x" * 12]
+    assert [row[0] for row in notifier_rows(qs.list_notifiers())] == ["NAME", "x" * 512]
 
     qs.restart()
     # The removed notifier is no longer reported for the task
     assert "notify" not in qs.get_task(task_id)
     qs.submit(TT(), notify=NOTIFIER, expect_error=422)
-    t2 = qs.submit(TT(), notify="x" * 12)
+    t2 = qs.submit(TT(), notify="x" * 512)
     qs.wait_for_finished(t2)
 
 

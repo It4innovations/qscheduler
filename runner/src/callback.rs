@@ -11,7 +11,7 @@ use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 
 /// Maximum length of a notifier's name (the key tasks and sessions refer to it by).
-pub const MAX_NOTIFIER_NAME_LEN: usize = 12;
+pub const MAX_NOTIFIER_NAME_LEN: usize = 512;
 
 define_id!(NotifierId);
 
