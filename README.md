@@ -229,7 +229,7 @@ qscheduler notifier list
 
 | Argument / option | Description |
 |---|---|
-| `<NAME>` | Unique notifier name, at most 12 characters; tasks and sessions select the notifier by it. |
+| `<NAME>` | Unique notifier name, at most 512 characters; tasks and sessions select the notifier by it. |
 | `--url <URL>` | URL to `POST` events to. |
 | `--token <TOKEN>` | Arbitrary token included in event payloads. |
 

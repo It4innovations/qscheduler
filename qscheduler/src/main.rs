@@ -44,7 +44,7 @@ enum NotifierCommand {
 
 #[derive(Parser)]
 struct NotifierAddArgs {
-    /// Notifier name (at most 12 characters); tasks and sessions select the notifier by it
+    /// Notifier name (at most 512 characters); tasks and sessions select the notifier by it
     name: String,
     /// URL to POST task completion and session open/close events to
     #[arg(long)]
@@ -392,7 +392,12 @@ async fn cmd_notifier_list() {
         println!("No notifiers registered.");
         return;
     }
-    let width = runner::MAX_NOTIFIER_NAME_LEN;
+    let width = notifiers
+        .iter()
+        .map(|(_, n)| n.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("NAME".len());
     println!("{:<width$}  {:<5}  URL", "NAME", "TOKEN");
     for (_, n) in notifiers {
         let token = if n.token.is_some() { "yes" } else { "no" };
