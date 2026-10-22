@@ -24,6 +24,15 @@ enum CliCommand {
     Machine(Box<MachineArgs>),
     /// Manage notifiers (HTTP callback targets selected by tasks and sessions)
     Notifier(NotifierArgs),
+    /// Print the OpenAPI spec of the REST API (no database needed)
+    Openapi(OpenapiOpts),
+}
+
+#[derive(Parser)]
+struct OpenapiOpts {
+    /// Write the spec to this file instead of stdout
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -248,6 +257,18 @@ async fn main() {
                 NotifierCommand::List => cmd_notifier_list().await,
             }
         }
+        CliCommand::Openapi(opts) => cmd_openapi(opts),
+    }
+}
+
+fn cmd_openapi(opts: OpenapiOpts) {
+    let spec = service::openapi()
+        .to_pretty_json()
+        .unwrap_or_else(|e| die(format!("failed to serialize OpenAPI spec: {e}")));
+    match opts.output {
+        Some(path) => std::fs::write(&path, spec + "\n")
+            .unwrap_or_else(|e| die(format!("failed to write {}: {e}", path.display()))),
+        None => println!("{spec}"),
     }
 }
 

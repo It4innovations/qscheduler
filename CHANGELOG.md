@@ -19,6 +19,11 @@
 
 ### Added
 
+- Semantic versioning of the API: one workspace version is reported in the OpenAPI spec
+  (`info.version`, title `qscheduler`); a CI check fails when the version is not bumped enough
+  for API changes since the last release (see "Versioning" in the README)
+- `qscheduler openapi [--output FILE]` prints the OpenAPI spec without needing a database
+
 - `GET /machine/{machine}/about` endpoint describing a machine's backend
 - Task time limit: optional `time_limit_ms` on `POST /tasks`
 - Project time limit is enforced on running project tasks (not only before submit)
