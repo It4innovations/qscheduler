@@ -1,4 +1,4 @@
-use crate::backend::{BackendFuture, ByteStream, FromBackendMessage, create_backend};
+use crate::backend::{BackendFuture, BackendStream, FromBackendMessage, create_backend};
 use crate::callback::{NotifierId, NotifierMap};
 use crate::config::RunnerConfiguration;
 use crate::db::close_dead_session;
@@ -7,7 +7,7 @@ use crate::launcher::start_launcher;
 use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionInfo, SessionMap, SessionState};
-use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskMap, TaskParent, TaskState};
+use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskKind, TaskMap, TaskParent, TaskState};
 use crate::{BackendVersion, db};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -54,6 +54,15 @@ pub struct Core {
 
 pub type CoreRef = Arc<Mutex<Core>>;
 
+/// Quantum-computer artifacts served by `Core::get_qc_artifact`: the data a client needs to
+/// compile pulse-level jobs (e.g. with IQM Pulla).
+pub const QC_ARTIFACTS: &[&str] = &[
+    "settings",
+    "chip-design-records",
+    "channel-properties",
+    "static-quantum-architectures",
+];
+
 impl Core {
     pub async fn new(config: RunnerConfiguration, pool: PgPool) -> crate::Result<CoreRef> {
         let mut machine_map: MachineMap = Default::default();
@@ -69,6 +78,7 @@ impl Core {
                     max_session_time: Duration::from_millis(m.max_session_time_ms),
                     default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
                     max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
+                    pulse_access: m.pulse_access,
                     backend: m.backend,
                 },
                 backend,
@@ -301,6 +311,7 @@ impl Core {
                     machine_id,
                     parent: TaskParent::new(session_id, project_id),
                     user: t.user,
+                    kind: TaskKind::from_db(&t.kind),
                     payload: payload.clone(),
                     time_limit,
                     notifier: restore_notifier(t.notifier_id),
@@ -481,6 +492,11 @@ impl Core {
     pub(crate) fn validate_task_config(&self, config: &TaskConfig) -> crate::Result<()> {
         let machine = self.machine_map.find_machine(config.machine_id)?;
         machine.check_not_suspended()?;
+        if config.kind == TaskKind::Pulse && !machine.config().pulse_access {
+            return Err(RunnerError::PulseAccessDenied(
+                machine.config().name.clone(),
+            ));
+        }
         if let Some(s_id) = config.parent.session_id() {
             match machine.running_session_id() {
                 Some(id) if id == s_id => {}
@@ -606,13 +622,28 @@ impl Core {
         &self,
         machine_id: MachineId,
         calibration_id: &str,
-        endpoint: &str,
+        endpoint: Option<&str>,
     ) -> crate::Result<BackendFuture<String>> {
         let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_calibration(calibration_id, endpoint))
     }
 
-    pub fn get_task_result(&self, task_id: TaskId) -> crate::Result<BackendFuture<ByteStream>> {
+    /// Fetches one of [`QC_ARTIFACTS`] from the machine's backend; other names fail with
+    /// [`RunnerError::UnknownArtifact`], so the proxy can't reach arbitrary backend resources.
+    pub fn get_qc_artifact(
+        &self,
+        machine_id: MachineId,
+        name: &str,
+        accept: Option<&str>,
+    ) -> crate::Result<BackendFuture<BackendStream>> {
+        let machine = self.machine_map.find_machine(machine_id)?;
+        if !QC_ARTIFACTS.contains(&name) {
+            return Err(RunnerError::UnknownArtifact(name.to_string()));
+        }
+        Ok(Arc::clone(machine.backend()).get_qc_artifact(name, accept))
+    }
+
+    pub fn get_task_result(&self, task_id: TaskId) -> crate::Result<BackendFuture<BackendStream>> {
         let task = self
             .task_map
             .find_task(task_id)
@@ -628,7 +659,8 @@ impl Core {
         &self,
         task_id: TaskId,
         name: &str,
-    ) -> crate::Result<BackendFuture<ByteStream>> {
+        accept: Option<&str>,
+    ) -> crate::Result<BackendFuture<BackendStream>> {
         let task = self
             .task_map
             .find_task(task_id)
@@ -637,6 +669,6 @@ impl Core {
             .backend_id()
             .ok_or(RunnerError::TaskNotSubmitted(task_id))?;
         let machine = self.machine_map.get_machine(task.config().machine_id);
-        Ok(Arc::clone(machine.backend()).get_task_artifact(backend_id, name))
+        Ok(Arc::clone(machine.backend()).get_task_artifact(backend_id, name, accept))
     }
 }

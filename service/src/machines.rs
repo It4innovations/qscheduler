@@ -1,8 +1,10 @@
+use crate::tasks::{accept_header, stream_response};
 use crate::{AppState, client_error, internal_error};
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    response::Response,
 };
 use runner::core::Core;
 use runner::error::RunnerError;
@@ -101,10 +103,75 @@ pub(crate) async fn get_machine_calibration(
     let future = {
         let core = state.core_ref.lock().unwrap();
         let machine_id = find_machine(&core, &machine)?;
-        core.get_calibration(machine_id, &calibration, &endpoint)
+        core.get_calibration(machine_id, &calibration, Some(&endpoint))
             .map_err(internal_error)?
     };
     future.await.map_err(internal_error)
+}
+
+/// Fetch a whole calibration set from the backend (as used by IQM Pulla's compiler).
+#[utoipa::path(
+    get,
+    path = "/machine/{machine}/calibration/{calibration}",
+    params(
+        ("machine" = String, Path, description = "Machine name"),
+        ("calibration" = String, Path, description = "Calibration set ID, or `default`")
+    ),
+    responses(
+        (status = 200, description = "Calibration set JSON", body = String),
+        (status = 404, description = "Machine not found"),
+        (status = 500, description = "Backend error")
+    )
+)]
+pub(crate) async fn get_machine_calibration_set(
+    State(state): State<Arc<AppState>>,
+    Path((machine, calibration)): Path<(String, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let future = {
+        let core = state.core_ref.lock().unwrap();
+        let machine_id = find_machine(&core, &machine)?;
+        core.get_calibration(machine_id, &calibration, None)
+            .map_err(internal_error)?
+    };
+    future.await.map_err(internal_error)
+}
+
+/// Fetch a quantum-computer artifact from the backend, forwarded verbatim with the backend's
+/// `Content-Type`. These are the inputs for compiling pulse-level tasks on the client (e.g.
+/// with IQM Pulla). The request's `Accept` header is forwarded: IQM serves `settings` and
+/// `channel-properties` as protobuf (`Accept: application/protobuf`).
+#[utoipa::path(
+    get,
+    path = "/machine/{machine}/artifacts/{name}",
+    params(
+        ("machine" = String, Path, description = "Machine name"),
+        ("name" = String, Path, description = "One of `settings`, `chip-design-records`, `channel-properties`, `static-quantum-architectures`")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact as returned by the backend", body = String),
+        (status = 404, description = "Machine not found, or unknown artifact name"),
+        (status = 500, description = "Backend error")
+    )
+)]
+pub(crate) async fn get_machine_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((machine, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let future = {
+        let core = state.core_ref.lock().unwrap();
+        let machine_id = find_machine(&core, &machine)?;
+        core.get_qc_artifact(machine_id, &name, accept_header(&headers))
+            .map_err(|e| match &e {
+                RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
+                _ => internal_error(&e),
+            })?
+    };
+    let stream = future.await.map_err(|e| match &e {
+        RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
+        _ => internal_error(&e),
+    })?;
+    Ok(stream_response(stream))
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]

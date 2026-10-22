@@ -18,12 +18,18 @@ pub enum BackendConfig {
 use crate::TaskId;
 use crate::backend_iqm::start_iqm_backend;
 use crate::backend_test::start_test_backend;
-use crate::task::TaskState;
+use crate::task::{TaskKind, TaskState};
 
 /// A boxed future standing in for an `async fn` return on a dyn-compatible trait.
 pub(crate) type BackendFuture<T> = Pin<Box<dyn Future<Output = crate::Result<T>> + Send>>;
 /// A boxed stream of raw result/artifact bytes as they arrive from the backend.
 pub(crate) type ByteStream = Pin<Box<dyn futures_util::Stream<Item = crate::Result<Bytes>> + Send>>;
+
+/// Raw bytes forwarded from the backend, with the backend's `Content-Type` if it sent one.
+pub struct BackendStream {
+    pub content_type: Option<String>,
+    pub stream: ByteStream,
+}
 
 /// Backend-specific version info.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -36,7 +42,7 @@ pub enum BackendVersion {
 }
 
 pub(crate) trait Backend: Send + Sync {
-    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes);
+    fn submit_task(self: Arc<Self>, task_id: TaskId, kind: TaskKind, payload: Bytes);
     /// Re-attach to a task that was already submitted before a restart, using the
     /// backend job id persisted in the database. The backend resumes monitoring it
     /// and reports its current state via [`FromBackendMessage`].
@@ -51,17 +57,26 @@ pub(crate) trait Backend: Send + Sync {
     fn get_arch(self: Arc<Self>) -> BackendFuture<String>;
     fn get_version(self: Arc<Self>) -> BackendFuture<BackendVersion>;
     fn get_name(&self) -> &'static str;
+    /// Fetches a calibration set (`endpoint` = `None`) or one of its sub-resources.
     fn get_calibration(
         self: Arc<Self>,
         calibration_id: &str,
-        endpoint: &str,
+        endpoint: Option<&str>,
     ) -> BackendFuture<String>;
-    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<ByteStream>;
+    /// Fetches a quantum-computer artifact (e.g. `settings`) needed to compile pulse-level
+    /// jobs on the client; `accept` overrides the default `application/json`.
+    fn get_qc_artifact(
+        self: Arc<Self>,
+        name: &str,
+        accept: Option<&str>,
+    ) -> BackendFuture<BackendStream>;
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<BackendStream>;
     fn get_task_artifact(
         self: Arc<Self>,
         backend_id: &str,
         name: &str,
-    ) -> BackendFuture<ByteStream>;
+        accept: Option<&str>,
+    ) -> BackendFuture<BackendStream>;
 }
 
 pub(crate) enum FromBackendMessage {

@@ -1,7 +1,9 @@
 use crate::TaskId;
-use crate::backend::{Backend, BackendFuture, BackendVersion, ByteStream, FromBackendMessage};
+use crate::backend::{
+    Backend, BackendFuture, BackendStream, BackendVersion, ByteStream, FromBackendMessage,
+};
 use crate::error::RunnerError;
-use crate::task::{CompletedState, TaskState};
+use crate::task::{CompletedState, TaskKind, TaskState};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::stream;
@@ -13,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 struct TestTask {
+    kind: TaskKind,
     started: Option<Instant>,
     state: TaskState,
     result: String,
@@ -86,14 +89,19 @@ impl Backend for TestBackend {
         cancel: bool,
     ) {
         // The test backend keeps no state across restarts, so re-run the task from
-        // its stored payload; it progresses to finished/failed as a fresh submission.
-        self.clone().submit_task(task_id, payload);
+        // its stored payload; it progresses to finished/failed as a fresh submission. The
+        // kind isn't passed to `resume_task` (IQM polls by backend id), so it's reported as
+        // `circuit` here.
+        self.clone()
+            .submit_task(task_id, TaskKind::Circuit, payload);
         if cancel {
             self.cancel_task(task_id, &backend_id);
         }
     }
 
-    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
+    /// Both kinds run the same JSON-described simulation; the kind is recorded and served as
+    /// the `kind` artifact so tests can check how the task was routed.
+    fn submit_task(self: Arc<Self>, task_id: TaskId, kind: TaskKind, payload: Bytes) {
         let sender = self.backend_sender.clone();
         let tasks = self.tasks.clone();
         let backend_id = format!("test-{task_id}");
@@ -102,6 +110,7 @@ impl Backend for TestBackend {
             tasks.insert(
                 backend_id.clone(),
                 TestTask {
+                    kind,
                     started: None,
                     state: TaskState::Waiting,
                     result: String::new(),
@@ -165,6 +174,8 @@ impl Backend for TestBackend {
                 };
                 task.result = body.result;
                 task.artifacts = body.artifacts;
+                task.artifacts
+                    .insert("kind".to_string(), task.kind.as_str().to_string());
                 task.state = new_state.clone();
                 new_state
             };
@@ -186,14 +197,27 @@ impl Backend for TestBackend {
     fn get_calibration(
         self: Arc<Self>,
         _calibration_id: &str,
-        _endpoint: &str,
+        _endpoint: Option<&str>,
     ) -> BackendFuture<String> {
         Box::pin(std::future::ready(Err(RunnerError::GenericError(
             "get_calibration not supported by test backend".to_string(),
         ))))
     }
 
-    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<ByteStream> {
+    fn get_qc_artifact(
+        self: Arc<Self>,
+        name: &str,
+        accept: Option<&str>,
+    ) -> BackendFuture<BackendStream> {
+        // Echoes the request so tests can check what was forwarded.
+        let body = serde_json::json!({ "artifact": name, "accept": accept }).to_string();
+        Box::pin(std::future::ready(Ok(BackendStream {
+            content_type: Some("application/json".to_string()),
+            stream: bytes_to_stream(body),
+        })))
+    }
+
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<BackendStream> {
         let result = {
             let tasks = self.tasks.lock().unwrap();
             match tasks.get(backend_id) {
@@ -210,14 +234,15 @@ impl Backend for TestBackend {
                 },
             }
         };
-        Box::pin(std::future::ready(result.map(string_to_stream)))
+        Box::pin(std::future::ready(result.map(text_stream)))
     }
 
     fn get_task_artifact(
         self: Arc<Self>,
         backend_id: &str,
         name: &str,
-    ) -> BackendFuture<ByteStream> {
+        _accept: Option<&str>,
+    ) -> BackendFuture<BackendStream> {
         let result = {
             let tasks = self.tasks.lock().unwrap();
             match tasks.get(backend_id) {
@@ -236,12 +261,19 @@ impl Backend for TestBackend {
                 },
             }
         };
-        Box::pin(std::future::ready(result.map(string_to_stream)))
+        Box::pin(std::future::ready(result.map(text_stream)))
     }
 }
 
-fn string_to_stream(s: String) -> ByteStream {
+fn bytes_to_stream(s: String) -> ByteStream {
     Box::pin(stream::once(async move { Ok(Bytes::from(s)) }))
+}
+
+fn text_stream(s: String) -> BackendStream {
+    BackendStream {
+        content_type: Some("text/plain; charset=utf-8".to_string()),
+        stream: bytes_to_stream(s),
+    }
 }
 
 pub fn start_test_backend() -> (Arc<dyn Backend>, UnboundedReceiver<FromBackendMessage>) {

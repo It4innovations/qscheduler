@@ -40,6 +40,9 @@ pub struct MachineConfiguration {
     /// running-time estimate of tasks from ever exceeding the true time.
     #[serde(default = "default_max_clock_skew_ms")]
     pub max_clock_skew_ms: u64,
+    /// Whether pulse-level tasks (`kind=pulse`) may be submitted to this machine.
+    #[serde(default)]
+    pub pulse_access: bool,
     pub backend: BackendConfig,
 }
 

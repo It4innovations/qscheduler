@@ -17,7 +17,7 @@ pub mod task;
 
 use crate::error::RunnerError;
 
-pub use backend::{BackendConfig, BackendVersion};
+pub use backend::{BackendConfig, BackendStream, BackendVersion};
 pub use backend_iqm::{IqmBackendConfig, IqmVersion};
 pub use callback::{MAX_NOTIFIER_NAME_LEN, NotifierId};
 pub use machine::MachineId;

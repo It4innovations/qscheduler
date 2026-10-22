@@ -206,6 +206,8 @@ class IqmFakeBackend:
         self.token = "test-token-1234"
         # When set, job status and cancel requests fail with 503 (simulated outage).
         self.unavailable = False
+        # Bodies of pulse-level (`/run`) submissions, in arrival order.
+        self.run_bodies: list[bytes] = []
 
     def _check_auth(self, request):
         expected = f"Bearer {self.token}"
@@ -229,11 +231,69 @@ class IqmFakeBackend:
             f"/api/v1/jobs/{self.machine_name}/circuit",
             method="POST",
         ).respond_with_handler(self._handle_submit)
+        self.httpserver.expect_request(
+            f"/api/v1/jobs/{self.machine_name}/run",
+            method="POST",
+        ).respond_with_handler(self._handle_run)
+        for name in ("settings", "channel-properties"):
+            self.httpserver.expect_request(
+                f"/api/v1/quantum-computers/{self.machine_name}/artifacts/{name}",
+                method="GET",
+            ).respond_with_handler(
+                lambda request, name=name: self._handle_protobuf_artifact(request, name)
+            )
+        self.httpserver.expect_request(
+            f"/api/v1/quantum-computers/{self.machine_name}/artifacts/chip-design-records",
+            method="GET",
+        ).respond_with_handler(
+            lambda request: (
+                self._auth_error()
+                if not self._check_auth(request)
+                else make_result([{"cheddar": {"chip_label": "Q5"}}])
+            )
+        )
+        self.httpserver.expect_request(
+            f"/api/v1/calibration-sets/{self.machine_name}/default",
+            method="GET",
+        ).respond_with_handler(
+            lambda request: (
+                self._auth_error()
+                if not self._check_auth(request)
+                else make_result(
+                    {"calibration_set_id": _CALIBRATION_SET_ID, "observations": []}
+                )
+            )
+        )
+
+    def _handle_protobuf_artifact(self, request, name):
+        """Like IQM, serves `settings`/`channel-properties` only as protobuf."""
+        if not self._check_auth(request):
+            return self._auth_error()
+        if request.headers.get("Accept") != "application/protobuf":
+            return Response("Not Acceptable", status=406)
+        return Response(f"\x0a{name}".encode(), content_type="application/protobuf")
+
+    def _handle_run(self, request):
+        """Pulse-level job: an opaque protobuf `RunDefinition`. It always succeeds; its
+        `sweep_results` artifact echoes the submitted body."""
+        if not self._check_auth(request):
+            return self._auth_error()
+        if request.content_type != "application/protobuf":
+            return Response("Unsupported Media Type", status=415)
+        body = request.get_data()
+        self.run_bodies.append(body)
+        return self._register_job(
+            {"outcome": {"type": "Ok"}},
+            binary_artifacts={"sweep_results": (body, "application/protobuf")},
+        )
 
     def _handle_submit(self, request):
         if not self._check_auth(request):
             return self._auth_error()
-        config = request.json
+        return self._register_job(request.json)
+
+    def _register_job(self, config, binary_artifacts=None):
+        binary_artifacts = binary_artifacts or {}
         task_id = str(uuid.uuid4())
         # Record created_at before the submit delay so the compilation window
         # is anchored to when the job arrived, not when it was accepted.
@@ -254,11 +314,14 @@ class IqmFakeBackend:
         artifacts = config.get("artifacts", {})
         # "measurements" has a default payload so tests that don't set custom
         # artifacts still get a fetchable one.
-        for name in {"measurements", *artifacts}:
+        for name in {"measurements", *artifacts, *binary_artifacts}:
 
             def handle_artifact(request, name=name):
                 if not self._check_auth(request):
                     return self._auth_error()
+                if name in binary_artifacts:
+                    data, content_type = binary_artifacts[name]
+                    return Response(data, content_type=content_type)
                 if name in artifacts:
                     return Response(artifacts[name], content_type="text/plain")
                 return make_result({"artifact": "measurements", "values": [0, 1, 0, 1]})

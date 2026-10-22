@@ -6,7 +6,7 @@ use crate::machine::{Machine, MachineMap, QueueItem, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionInfo, SessionMap, SessionState};
 use crate::suspension::SuspendCancel;
-use crate::task::{CompletedState, Task, TaskInfo, TaskMap, TaskState};
+use crate::task::{CompletedState, Task, TaskInfo, TaskKind, TaskMap, TaskState};
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -207,7 +207,7 @@ fn pick_task(
     no_assignments: bool,
     notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
-) -> Option<(TaskId, Bytes)> {
+) -> Option<(TaskId, TaskKind, Bytes)> {
     let CoreSplitMut {
         machine_map,
         task_map,
@@ -222,7 +222,7 @@ fn pick_task(
                 let Some(task) = task_map.find_task_mut(task_id) else {
                     continue;
                 };
-                return Some((task_id, task.config().payload.clone()));
+                return Some((task_id, task.config().kind, task.config().payload.clone()));
             } else {
                 break None;
             }
@@ -233,7 +233,7 @@ fn pick_task(
                     let Some(task) = task_map.find_task_mut(task_id) else {
                         continue;
                     };
-                    return Some((task_id, task.config().payload.clone()));
+                    return Some((task_id, task.config().kind, task.config().payload.clone()));
                 }
                 Some(QueueItem::Session(session_id)) => {
                     let Some(session) = session_map.find_session_mut(session_id) else {
@@ -990,7 +990,7 @@ async fn launcher_main(
             // would not be recorded before exit.
             while !shutting_down
                 && submitted_tasks.len() < queue_size
-                && let Some((task_id, payload)) = pick_task(
+                && let Some((task_id, kind, payload)) = pick_task(
                     &mut core,
                     machine_id,
                     &mut running_session,
@@ -1031,7 +1031,7 @@ async fn launcher_main(
                         error,
                     });
                 } else {
-                    backend.clone().submit_task(task_id, payload);
+                    backend.clone().submit_task(task_id, kind, payload);
                     submitted_tasks.insert(task_id, false);
                 }
             }

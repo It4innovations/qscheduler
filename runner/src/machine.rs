@@ -27,6 +27,7 @@ pub struct MachineConfig {
     pub max_session_time: Duration,
     pub default_task_time_limit: Duration,
     pub max_clock_skew: Duration,
+    pub pulse_access: bool,
     pub backend: BackendConfig,
 }
 

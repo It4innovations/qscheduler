@@ -125,6 +125,8 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         .routes(routes!(machines::get_machine_arch))
         .routes(routes!(machines::get_machine_about))
         .routes(routes!(machines::get_machine_calibration))
+        .routes(routes!(machines::get_machine_calibration_set))
+        .routes(routes!(machines::get_machine_artifact))
         .routes(routes!(
             machines::suspend_machine_handler,
             machines::resume_machine_handler
