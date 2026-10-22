@@ -180,6 +180,7 @@ def test_api_add_machine(qscheduler_test, db_connect):
         "max_session_time_ms": 5_000,
         "default_task_time_limit_ms": 3_600_000,
         "max_clock_skew_ms": 4_000,
+        "pulse_access": False,
         "backend": {"type": "test"},
         "suspension": None,
     }

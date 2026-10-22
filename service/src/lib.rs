@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::config::ServiceConfiguration;
 use axum::{
     Json,
-    extract::{FromRequestParts, State},
+    extract::{DefaultBodyLimit, FromRequestParts, State},
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
     routing::get,
 };
@@ -171,6 +171,8 @@ fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(machines::get_machine_arch))
         .routes(routes!(machines::get_machine_about))
         .routes(routes!(machines::get_machine_calibration))
+        .routes(routes!(machines::get_machine_calibration_set))
+        .routes(routes!(machines::get_machine_artifact))
         .routes(routes!(
             machines::suspend_machine_handler,
             machines::resume_machine_handler
@@ -235,10 +237,14 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
 
     let (router, api) = api_router().with_state(state).split_for_parts();
 
-    let app = router.route(
-        "/api-docs/openapi.json",
-        get(move || async move { Json(api) }),
-    );
+    let app = router
+        .route(
+            "/api-docs/openapi.json",
+            get(move || async move { Json(api) }),
+        )
+        .layer(DefaultBodyLimit::max(
+            service_conf.max_payload_mb * 1024 * 1024,
+        ));
 
     let port = service_conf.port;
     let listener = TcpListener::bind(format!("0.0.0.0:{port}"))

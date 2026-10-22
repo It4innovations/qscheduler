@@ -1,8 +1,10 @@
+use crate::tasks::{accept_header, stream_response};
 use crate::{AdminAuth, AppState, client_error, internal_error};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    response::Response,
 };
 use runner::config::{
     DEFAULT_LIMIT_CHECK_INTERVAL_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_SESSION_TIME_MS,
@@ -112,10 +114,75 @@ pub(crate) async fn get_machine_calibration(
     let future = {
         let core = state.core_ref.lock().unwrap();
         let machine_id = find_machine(&core, &machine)?;
-        core.get_calibration(machine_id, &calibration, &endpoint)
+        core.get_calibration(machine_id, &calibration, Some(&endpoint))
             .map_err(internal_error)?
     };
     future.await.map_err(internal_error)
+}
+
+/// Fetch a whole calibration set from the backend (as used by IQM Pulla's compiler).
+#[utoipa::path(
+    get,
+    path = "/machine/{machine}/calibration/{calibration}",
+    params(
+        ("machine" = String, Path, description = "Machine name"),
+        ("calibration" = String, Path, description = "Calibration set ID, or `default`")
+    ),
+    responses(
+        (status = 200, description = "Calibration set JSON", body = String),
+        (status = 404, description = "Machine not found"),
+        (status = 500, description = "Backend error")
+    )
+)]
+pub(crate) async fn get_machine_calibration_set(
+    State(state): State<Arc<AppState>>,
+    Path((machine, calibration)): Path<(String, String)>,
+) -> Result<String, (StatusCode, String)> {
+    let future = {
+        let core = state.core_ref.lock().unwrap();
+        let machine_id = find_machine(&core, &machine)?;
+        core.get_calibration(machine_id, &calibration, None)
+            .map_err(internal_error)?
+    };
+    future.await.map_err(internal_error)
+}
+
+/// Fetch a quantum-computer artifact from the backend, forwarded verbatim with the backend's
+/// `Content-Type`. These are the inputs for compiling pulse-level tasks on the client (e.g.
+/// with IQM Pulla). The request's `Accept` header is forwarded: IQM serves `settings` and
+/// `channel-properties` as protobuf (`Accept: application/protobuf`).
+#[utoipa::path(
+    get,
+    path = "/machine/{machine}/artifacts/{name}",
+    params(
+        ("machine" = String, Path, description = "Machine name"),
+        ("name" = String, Path, description = "One of `settings`, `chip-design-records`, `channel-properties`, `static-quantum-architectures`, `duts`")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact as returned by the backend", body = String),
+        (status = 404, description = "Machine not found, or unknown artifact name"),
+        (status = 500, description = "Backend error")
+    )
+)]
+pub(crate) async fn get_machine_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((machine, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let future = {
+        let core = state.core_ref.lock().unwrap();
+        let machine_id = find_machine(&core, &machine)?;
+        core.get_qc_artifact(machine_id, &name, accept_header(&headers))
+            .map_err(|e| match &e {
+                RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
+                _ => internal_error(&e),
+            })?
+    };
+    let stream = future.await.map_err(|e| match &e {
+        RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
+        _ => internal_error(&e),
+    })?;
+    Ok(stream_response(stream))
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -248,7 +315,8 @@ fn default_max_clock_skew_ms() -> u64 {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(crate) enum BackendRequest {
     /// An IQM server. Task payloads must be JSON circuit descriptions accepted by the IQM API
-    /// (`POST /api/v1/jobs/{machine_name}/circuit`). A job is never given up on while the server
+    /// (`POST /api/v1/jobs/{machine_name}/circuit`), or, for `kind=pulse` tasks, protobuf
+    /// `RunDefinition`s (`POST /api/v1/jobs/{machine_name}/run`). A job is never given up on while the server
     /// is unreachable or returns errors: its polls back off exponentially (from
     /// `poll_interval_ms` up to 60 s) and return to the normal interval after the first
     /// successful poll, and a cancel that cannot be delivered is retried on later polls. Each
@@ -297,6 +365,10 @@ pub(crate) struct MachineSettings {
     #[serde(default = "default_max_clock_skew_ms")]
     #[schema(default = 4000)]
     max_clock_skew_ms: u64,
+    /// Whether pulse-level tasks (`kind=pulse`) may be submitted to this machine.
+    #[serde(default)]
+    #[schema(default = false)]
+    pulse_access: bool,
     backend: BackendRequest,
 }
 
@@ -309,6 +381,7 @@ impl MachineSettings {
             max_session_time_ms: self.max_session_time_ms,
             default_task_time_limit_ms: self.default_task_time_limit_ms,
             max_clock_skew_ms: self.max_clock_skew_ms,
+            pulse_access: self.pulse_access,
             backend: match self.backend {
                 BackendRequest::Test => BackendConfig::Test,
                 BackendRequest::Iqm {
@@ -356,6 +429,7 @@ pub(crate) struct MachineResponse {
     max_session_time_ms: u64,
     default_task_time_limit_ms: u64,
     max_clock_skew_ms: u64,
+    pulse_access: bool,
     backend: BackendResponse,
     /// The active suspension, if the machine is suspended.
     suspension: Option<Suspension>,
@@ -371,6 +445,7 @@ impl MachineResponse {
             max_session_time_ms: config.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: config.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: config.max_clock_skew.as_millis() as u64,
+            pulse_access: config.pulse_access,
             backend: match config.backend {
                 BackendConfig::Test => BackendResponse::Test,
                 BackendConfig::Iqm(iqm) => BackendResponse::Iqm {

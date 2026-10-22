@@ -58,6 +58,8 @@ pub enum RunnerError {
     },
     #[error("Machine '{machine}' is suspended: {message}")]
     MachineSuspended { machine: String, message: String },
+    #[error("Machine '{0}' does not allow pulse-level tasks")]
+    PulseAccessDenied(String),
     #[error("Machine '{0}' is already suspended")]
     MachineAlreadySuspended(String),
     #[error("Machine '{0}' is not suspended")]

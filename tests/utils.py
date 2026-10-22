@@ -77,6 +77,9 @@ class QScheduler:
         self.max_session_time = None
         self.limit_check_interval = None
         self.default_task_time_limit = None
+        # Request body limit in MiB (`--max-payload-mb`); None keeps the service default.
+        self.max_payload_mb: int | None = None
+        self.pulse_access = False
         # Bearer token of the admin endpoints; None starts the service without it.
         self.admin_token: str | None = ADMIN_TOKEN
         self._process = None
@@ -111,6 +114,8 @@ class QScheduler:
             args.append(f"--limit-check-interval={self.limit_check_interval}s")
         if self.default_task_time_limit is not None:
             args.append(f"--default-task-time-limit={self.default_task_time_limit}s")
+        if self.pulse_access:
+            args.append("--pulse-access")
         args += self.backend.machine_args()
         subprocess.run(
             args,
@@ -157,6 +162,11 @@ class QScheduler:
             args.append("--force")
         return self._cli(*args)
 
+    def _serve_args(self) -> list[str]:
+        if self.max_payload_mb is None:
+            return []
+        return [f"--max-payload-mb={self.max_payload_mb}"]
+
     def _start_binary(self, log_name="qscheduler.log"):
         log_path = os.path.join(self.working_dir, log_name)
         # Handle outlives this function: it is the subprocess' stdout/stderr and
@@ -166,7 +176,7 @@ class QScheduler:
         if self.admin_token is not None:
             env["ADMIN_TOKEN"] = self.admin_token
         self._process = subprocess.Popen(
-            [self._binary, "serve", "--port", str(self.port)],
+            [self._binary, "serve", "--port", str(self.port), *self._serve_args()],
             stdout=self._log_file,
             stderr=self._log_file,
             env=env,
@@ -307,14 +317,19 @@ class QScheduler:
         user: str = TEST_USER,
         time_limit_ms: int | None = None,
         notify: str | None = None,
+        kind: str | None = None,
+        payload: bytes | None = None,
+        content_type: str = "application/octet-stream",
         expect_error: int | None = None,
     ):
+        """Submits `task` (or a raw `payload`, e.g. a protobuf for a pulse task on IQM)."""
         if session_id is not None and project is not None:
             raise ValueError("Cannot set both session_id and project")
         if session_id is None and project is None:
             # Attach to default project
             project = TEST_PROJECT
-        payload = task.create_payload()
+        if payload is None:
+            payload = task.create_payload()
         msg = {
             "session_id": session_id,
             "machine": machine,
@@ -327,12 +342,14 @@ class QScheduler:
             msg["time_limit_ms"] = time_limit_ms
         if notify is not None:
             msg["notify"] = notify
+        if kind is not None:
+            msg["kind"] = kind
 
         r = requests.post(
             self.url("tasks"),
             params=msg,
             data=payload,
-            headers={"Content-Type": "application/octet-stream"},
+            headers={"Content-Type": content_type},
             timeout=5,
         )
         if expect_error is not None:
@@ -511,6 +528,46 @@ class QScheduler:
             return r
         r.raise_for_status()
         return r.text
+
+    def get_task_artifact_response(
+        self, task_id: int, name: str, accept: str | None = None
+    ) -> requests.Response:
+        """Raw response of GET /tasks/{id}/artifacts/{name}, for checking headers or
+        binary bodies."""
+        headers = {"Accept": accept} if accept is not None else {}
+        r = requests.get(
+            self.url(f"tasks/{task_id}/artifacts/{name}"), headers=headers, timeout=5
+        )
+        r.raise_for_status()
+        return r
+
+    def get_machine_artifact(
+        self,
+        name: str,
+        machine: str = TEST_MACHINE_NAME,
+        accept: str | None = None,
+        expect_error: int | None = None,
+    ) -> requests.Response:
+        headers = {"Accept": accept} if accept is not None else {}
+        r = requests.get(
+            self.url(f"machine/{machine}/artifacts/{name}"), headers=headers, timeout=5
+        )
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r
+
+    def get_machine_calibration_set(
+        self, calibration: str = "default", machine: str = TEST_MACHINE_NAME
+    ) -> dict:
+        r = requests.get(
+            self.url(f"machine/{machine}/calibration/{calibration}"), timeout=5
+        )
+        r.raise_for_status()
+        return r.json()
 
     def get_machine_about(
         self, machine: str = TEST_MACHINE_NAME, expect_error: int | None = None

@@ -73,6 +73,11 @@ struct NotifierRemoveArgs {
 struct ServeOpts {
     #[arg(long, default_value = "4300")]
     pub port: u16,
+
+    /// Maximum size of a request body, e.g. a task payload, in MiB. Compiled pulse-level jobs
+    /// (IQM `RunDefinition`s) carry the full settings tree and are typically several MiB.
+    #[arg(long, default_value = "32", value_parser = clap::value_parser!(u32).range(1..=4096))]
+    pub max_payload_mb: u32,
 }
 
 #[derive(Parser)]
@@ -130,6 +135,10 @@ struct MachineConfigArgs {
     #[arg(long, value_parser = parse_human_time, default_value = "4s")]
     max_clock_skew: Duration,
 
+    /// Allow pulse-level tasks (`kind=pulse`, e.g. IQM Pulla `RunDefinition`s) on this machine
+    #[arg(long)]
+    pulse_access: bool,
+
     #[clap(subcommand)]
     backend: MachineBackendArgs,
 }
@@ -143,6 +152,7 @@ impl MachineConfigArgs {
             max_session_time_ms: self.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
+            pulse_access: self.pulse_access,
             backend: self.backend.into_config(),
         }
     }
@@ -234,7 +244,10 @@ async fn main() {
     match args.command {
         CliCommand::Serve(opts) => {
             dotenvy::dotenv().ok();
-            let config = ServiceConfiguration { port: opts.port };
+            let config = ServiceConfiguration {
+                port: opts.port,
+                max_payload_mb: opts.max_payload_mb as usize,
+            };
             tracing::info!(config = ?config, "starting qscheduler");
             match service::run(env!("CARGO_PKG_VERSION"), config).await {
                 Ok(_) => tracing::info!("qscheduler stopped successfully"),

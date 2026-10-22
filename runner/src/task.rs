@@ -4,7 +4,7 @@ use crate::project::ProjectId;
 use crate::session::SessionId;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
@@ -159,6 +159,34 @@ impl From<&TaskState> for TaskStateKind {
     }
 }
 
+/// What kind of job a task's payload describes; selects the backend submission route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    /// A batch of quantum circuits (IQM: JSON `CircuitJobDefinition`).
+    #[default]
+    Circuit,
+    /// A compiled pulse-level job (IQM: protobuf `RunDefinition`, e.g. from IQM Pulla).
+    Pulse,
+}
+
+impl TaskKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskKind::Circuit => "circuit",
+            TaskKind::Pulse => "pulse",
+        }
+    }
+
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "circuit" => TaskKind::Circuit,
+            "pulse" => TaskKind::Pulse,
+            other => unreachable!("unknown task kind '{other}' loaded from db"),
+        }
+    }
+}
+
 pub enum TaskParent {
     Session(SessionId),
     Project(ProjectId),
@@ -197,6 +225,7 @@ pub struct TaskConfig {
     pub machine_id: MachineId,
     pub parent: TaskParent,
     pub user: String,
+    pub kind: TaskKind,
     pub payload: Bytes,
     /// Effective execution time limit, counted from when the backend first reports the task
     /// as running. Resolved at submit time (explicit value or the machine's default).
@@ -214,6 +243,7 @@ impl Debug for TaskConfig {
             TaskParent::Session(session_id) => f.field("session", &session_id),
         };
         f.field("user", &self.user);
+        f.field("kind", &self.kind);
         f.field("time_limit", &self.time_limit);
         f.field("notifier", &self.notifier);
         f.field("payload", &format_args!("<{} bytes>", self.payload.len()));
@@ -291,6 +321,8 @@ pub struct TaskInfo {
     pub project: Option<String>,
     /// Free-form identifier of the user who submitted the task.
     pub user: String,
+    /// Whether the payload is a gate-level circuit or a pulse-level program.
+    pub kind: TaskKind,
     /// Backend-assigned job ID. Absent until the task is submitted to the backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_id: Option<String>,
@@ -354,6 +386,7 @@ impl TaskInfo {
             session: task.config().parent.session_id().map(|s| s.as_u64()),
             project,
             user: task.config().user.clone(),
+            kind: task.config().kind,
             backend_id: task.backend_id().map(String::from),
             machine,
             state: TaskStateKind::from(state),
