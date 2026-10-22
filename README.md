@@ -10,7 +10,9 @@ backends (currently IQM, plus an in-process `test` backend for development).
 - **Projects** are named, time-limited budgets. Work is charged against a project, and new work
   is rejected once its budget is exhausted or it is deactivated.
 - **Tasks** are payloads forwarded to a machine's backend. A task belongs either to a project
-  (charged its execution time) or to an open session.
+  (charged its execution time) or to an open session. A task's `kind` is `circuit` (the
+  default; gate-level circuits as JSON) or `pulse` (a compiled pulse-level job as protobuf, see
+  [Pulse-level tasks](#pulse-level-tasks)).
 - **Sessions** are exclusive, time-limited reservations of a machine for one project; the
   project is charged the time the session is open.
 - **Suspensions** take a machine out of service with a message, optionally failing its existing
@@ -49,6 +51,8 @@ For local development, `docker compose up -d` starts PostgreSQL from the include
 ```bash
 ADMIN_TOKEN=my-secret qscheduler serve --port 4300
 ```
+
+Request bodies are limited to 32 MiB by default; change the limit with `--max-payload-mb <N>`.
 
 On `SIGTERM` (e.g. `docker stop`) or `Ctrl+C`, the service shuts down gracefully: it finishes
 in-flight requests, applies accepted cancel requests, writes all pending state (including the
@@ -159,3 +163,9 @@ curl http://localhost:4300/tasks/1/result
 curl http://localhost:4300/projects/hello
 # {"name":"hello","consumed_ms":2000,"limit_ms":3600000,"active":true}
 ```
+
+## Pulse-level tasks
+
+Besides gate-level circuits, a machine can run compiled pulse-level jobs, e.g. an IQM
+`RunDefinition` produced by [IQM Pulla](https://pypi.org/project/iqm-pulla/). Pulse access is
+off by default and is enabled per machine: `"pulse_access": true` in the admin API

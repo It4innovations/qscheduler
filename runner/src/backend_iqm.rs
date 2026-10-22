@@ -1,7 +1,7 @@
 use crate::TaskId;
-use crate::backend::{Backend, BackendFuture, BackendVersion, ByteStream, FromBackendMessage};
+use crate::backend::{Backend, BackendFuture, BackendStream, BackendVersion, FromBackendMessage};
 use crate::error::RunnerError;
-use crate::task::{CompletedState, TaskState};
+use crate::task::{CompletedState, TaskKind, TaskState};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -125,6 +125,14 @@ impl JobStatusResponse {
     }
 }
 
+/// IQM job route suffix and request content type for a task of the given kind.
+fn submit_route(kind: TaskKind) -> (&'static str, &'static str) {
+    match kind {
+        TaskKind::Circuit => ("circuit", "application/json; charset=UTF-8"),
+        TaskKind::Pulse => ("run", "application/protobuf"),
+    }
+}
+
 impl Backend for IqmBackend {
     fn get_name(&self) -> &'static str {
         "iqm"
@@ -175,12 +183,13 @@ impl Backend for IqmBackend {
         }
     }
 
-    fn submit_task(self: Arc<Self>, task_id: TaskId, payload: Bytes) {
-        let span = tracing::info_span!("iqm_submit_task", %task_id);
+    fn submit_task(self: Arc<Self>, task_id: TaskId, kind: TaskKind, payload: Bytes) {
+        let span = tracing::info_span!("iqm_submit_task", %task_id, kind = kind.as_str());
         tokio::spawn(
             async move {
-                let url = &format!("{}/circuit", self.config.machine_name);
-                let builder = self.setup_job_request(Method::POST, url, true);
+                let (route, content_type) = submit_route(kind);
+                let url = &format!("{}/{route}", self.config.machine_name);
+                let builder = self.setup_job_request(Method::POST, url, Some(content_type), None);
                 debug!(%url, "connecting to IQM backend");
                 let result = builder.body(payload).send().await;
                 match result {
@@ -237,7 +246,8 @@ impl Backend for IqmBackend {
     }
 
     fn get_arch(self: Arc<Self>) -> BackendFuture<String> {
-        let request = self.setup_qc_request(Method::GET, "artifacts/static-quantum-architectures");
+        let request =
+            self.setup_qc_request(Method::GET, "artifacts/static-quantum-architectures", None);
         Box::pin(fetch_text(request))
     }
 
@@ -261,14 +271,27 @@ impl Backend for IqmBackend {
     fn get_calibration(
         self: Arc<Self>,
         calibration_id: &str,
-        end_point: &str,
+        end_point: Option<&str>,
     ) -> BackendFuture<String> {
         let request = self.setup_calibration_request(Method::GET, calibration_id, end_point);
         Box::pin(fetch_text(request))
     }
 
-    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<ByteStream> {
-        let request = self.setup_job_request(Method::GET, backend_id, false);
+    fn get_qc_artifact(
+        self: Arc<Self>,
+        name: &str,
+        accept: Option<&str>,
+    ) -> BackendFuture<BackendStream> {
+        let request = self.setup_qc_request(Method::GET, &format!("artifacts/{name}"), accept);
+        let name = name.to_string();
+        Box::pin(fetch_stream(
+            request,
+            Some(move || RunnerError::UnknownArtifact(name)),
+        ))
+    }
+
+    fn get_task_result(self: Arc<Self>, backend_id: &str) -> BackendFuture<BackendStream> {
+        let request = self.setup_job_request(Method::GET, backend_id, None, None);
         Box::pin(fetch_stream(request, None::<fn() -> RunnerError>))
     }
 
@@ -276,9 +299,10 @@ impl Backend for IqmBackend {
         self: Arc<Self>,
         backend_id: &str,
         name: &str,
-    ) -> BackendFuture<ByteStream> {
+        accept: Option<&str>,
+    ) -> BackendFuture<BackendStream> {
         let end_point = format!("{backend_id}/artifacts/{name}");
-        let request = self.setup_job_request(Method::GET, &end_point, false);
+        let request = self.setup_job_request(Method::GET, &end_point, None, accept);
         let name = name.to_string();
         Box::pin(fetch_stream(
             request,
@@ -288,7 +312,13 @@ impl Backend for IqmBackend {
 }
 
 impl IqmBackend {
-    pub fn setup_qc_request(&self, method: Method, end_point: &str) -> RequestBuilder {
+    /// `accept` defaults to `application/json`.
+    pub fn setup_qc_request(
+        &self,
+        method: Method,
+        end_point: &str,
+        accept: Option<&str>,
+    ) -> RequestBuilder {
         let url = format!(
             "{}/api/v1/quantum-computers/{}/{}",
             self.config.url, self.config.machine_name, end_point
@@ -297,19 +327,22 @@ impl IqmBackend {
         self.client
             .request(method, &url)
             .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", "application/json")
+            .header("Accept", accept.unwrap_or("application/json"))
     }
 
     pub fn setup_calibration_request(
         &self,
         method: Method,
         calibration_id: &str,
-        end_point: &str,
+        end_point: Option<&str>,
     ) -> RequestBuilder {
-        let url = format!(
-            "{}/api/v1/calibration-sets/{}/{}/{}",
-            self.config.url, self.config.machine_name, calibration_id, end_point
+        let mut url = format!(
+            "{}/api/v1/calibration-sets/{}/{}",
+            self.config.url, self.config.machine_name, calibration_id
         );
+        if let Some(end_point) = end_point {
+            url = format!("{url}/{end_point}");
+        }
         debug!(%method, %url, "IQM calibration request");
         self.client
             .request(method, &url)
@@ -321,7 +354,8 @@ impl IqmBackend {
         &self,
         method: Method,
         end_point: &str,
-        content_type: bool,
+        content_type: Option<&str>,
+        accept: Option<&str>,
     ) -> RequestBuilder {
         let url = format!("{}/api/v1/jobs/{}", self.config.url, end_point);
         debug!(%method, %url, "IQM job request");
@@ -329,9 +363,9 @@ impl IqmBackend {
             .client
             .request(method, &url)
             .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", "application/json");
-        if content_type {
-            builder = builder.header("Content-Type", "application/json; charset=UTF-8")
+            .header("Accept", accept.unwrap_or("application/json"));
+        if let Some(content_type) = content_type {
+            builder = builder.header("Content-Type", content_type)
         }
         builder
     }
@@ -370,7 +404,7 @@ async fn fetch_text(request: RequestBuilder) -> crate::Result<String> {
 async fn fetch_stream(
     request: RequestBuilder,
     not_found: Option<impl FnOnce() -> RunnerError>,
-) -> crate::Result<ByteStream> {
+) -> crate::Result<BackendStream> {
     let resp = request
         .send()
         .await
@@ -387,10 +421,18 @@ async fn fetch_stream(
             "IQM backend HTTP {http_status}: {body}"
         )));
     }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
     let stream = resp.bytes_stream().map(|chunk| {
         chunk.map_err(|e| RunnerError::GenericError(format!("IQM stream error: {e}")))
     });
-    Ok(Box::pin(stream))
+    Ok(BackendStream {
+        content_type,
+        stream: Box::pin(stream),
+    })
 }
 
 pub fn start_iqm_backend(
@@ -462,7 +504,7 @@ fn spawn_cancel_attempt(backend: &Arc<IqmBackend>, task_id: TaskId, iqm_task_id:
     tokio::spawn(
         async move {
             let result = backend
-                .setup_job_request(Method::POST, &url, false)
+                .setup_job_request(Method::POST, &url, None, None)
                 .timeout(IQM_REQUEST_TIMEOUT)
                 .send()
                 .await;
@@ -552,7 +594,7 @@ async fn iqm_main(
                         spawn_cancel_attempt(&backend, task.task_id, &task.iqm_task_id);
                     }
                     let request = backend
-                        .setup_job_request(Method::GET, &task.iqm_task_id, false)
+                        .setup_job_request(Method::GET, &task.iqm_task_id, None, None)
                         .timeout(IQM_REQUEST_TIMEOUT);
                     let result = request.send().await;
                     // Local receive time: anything the response reports happened before it.
@@ -676,8 +718,21 @@ async fn process_result(
 
 #[cfg(test)]
 mod tests {
-    use super::JobStatusResponse;
+    use super::{JobStatusResponse, submit_route};
+    use crate::task::TaskKind;
     use std::time::Duration;
+
+    #[test]
+    fn submit_route_by_kind() {
+        assert_eq!(
+            submit_route(TaskKind::Circuit),
+            ("circuit", "application/json; charset=UTF-8")
+        );
+        assert_eq!(
+            submit_route(TaskKind::Pulse),
+            ("run", "application/protobuf")
+        );
+    }
 
     #[test]
     fn exec_time_from_timeline() {

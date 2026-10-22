@@ -29,6 +29,7 @@ pub struct MachineConfig {
     pub max_session_time: Duration,
     pub default_task_time_limit: Duration,
     pub max_clock_skew: Duration,
+    pub pulse_access: bool,
     pub backend: BackendConfig,
 }
 
@@ -42,6 +43,7 @@ impl MachineConfig {
             max_session_time_ms: self.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
+            pulse_access: self.pulse_access,
             backend: self.backend.clone(),
         }
     }

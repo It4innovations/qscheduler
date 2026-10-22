@@ -257,6 +257,94 @@
         }
       }
     },
+    "/machine/{machine}/artifacts/{name}": {
+      "get": {
+        "summary": "Fetch a quantum-computer artifact from the backend, forwarded verbatim with the backend's\n`Content-Type`. These are the inputs for compiling pulse-level tasks on the client (e.g.\nwith IQM Pulla). The request's `Accept` header is forwarded: IQM serves `settings` and\n`channel-properties` as protobuf (`Accept: application/protobuf`).",
+        "operationId": "get_machine_artifact",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "One of `settings`, `chip-design-records`, `channel-properties`, `static-quantum-architectures`, `duts`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact as returned by the backend",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found, or unknown artifact name"
+          },
+          "500": {
+            "description": "Backend error"
+          }
+        }
+      }
+    },
+    "/machine/{machine}/calibration/{calibration}": {
+      "get": {
+        "summary": "Fetch a whole calibration set from the backend (as used by IQM Pulla's compiler).",
+        "operationId": "get_machine_calibration_set",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "calibration",
+            "in": "path",
+            "description": "Calibration set ID, or `default`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration set JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "500": {
+            "description": "Backend error"
+          }
+        }
+      }
+    },
     "/machine/{machine}/calibration/{calibration}/{endpoint}": {
       "get": {
         "summary": "Fetch a calibration data set from the backend.",
@@ -866,6 +954,7 @@
     "/tasks": {
       "post": {
         "summary": "Submit a task for execution.",
+        "description": "The payload is forwarded to the backend verbatim. For IQM machines, a `circuit` task carries\na JSON `CircuitJobDefinition`; a `pulse` task carries a protobuf `RunDefinition`, e.g.\ncompiled with IQM Pulla (`IQMClient.get_standard_compiler()`, compile, then\n`serialize_run_definition(rd).SerializeToString()`). The compiler's inputs are available\nfrom `GET /machine/{machine}/artifacts/{name}` and `GET /machine/{machine}/calibration/{calibration}`.\nFetch a pulse task's results from `GET /tasks/{id}/artifacts/sweep_results` (protobuf,\ndecode with `deserialize_sweep_results`).",
         "operationId": "create_task",
         "parameters": [
           {
@@ -925,12 +1014,46 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "What the payload describes: `circuit` (default) or `pulse`. Pulse tasks are only\naccepted by machines with pulse-level access enabled.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "What kind of job a task's payload describes; selects the backend submission route.",
+              "enum": [
+                "circuit",
+                "pulse"
+              ]
+            }
           }
         ],
         "requestBody": {
-          "description": "Raw task payload forwarded to the backend. For the `iqm` backend, a JSON circuit description accepted by the IQM API. For the `test` backend, a JSON object `{\"outcome\": {\"type\": \"Ok\"}, \"result\": \"42\", \"artifacts\": {\"log\": \"...\"}, \"submit_time\": 0.5, \"compute_time\": 1.5}`: `outcome` (required) is `{\"type\": \"Ok\"}` or `{\"type\": \"Fail\", \"message\": \"...\"}`; `result` (default `\"\"`) is what `GET /tasks/{id}/result` returns; `artifacts` (default `{}`) maps names to the values `GET /tasks/{id}/artifacts/{name}` returns; `submit_time` and `compute_time` (default 0) are seconds to wait before acknowledging the submission and before reporting the result.",
+          "description": "Raw task payload forwarded to the backend: JSON for `circuit` tasks, protobuf for `pulse` tasks. A JSON content type with `kind=pulse`, or a protobuf one with `kind=circuit`, is rejected. For the `iqm` backend, a JSON circuit description or a protobuf `RunDefinition` accepted by the IQM API. For the `test` backend, a JSON object `{\"outcome\": {\"type\": \"Ok\"}, \"result\": \"42\", \"artifacts\": {\"log\": \"...\"}, \"submit_time\": 0.5, \"compute_time\": 1.5}`: `outcome` (required) is `{\"type\": \"Ok\"}` or `{\"type\": \"Fail\", \"message\": \"...\"}`; `result` (default `\"\"`) is what `GET /tasks/{id}/result` returns; `artifacts` (default `{}`) maps names to the values `GET /tasks/{id}/artifacts/{name}` returns; `submit_time` and `compute_time` (default 0) are seconds to wait before acknowledging the submission and before reporting the result.",
           "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            },
             "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            },
+            "application/protobuf": {
               "schema": {
                 "type": "array",
                 "items": {
@@ -963,7 +1086,7 @@
             "description": "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."
           },
           "422": {
-            "description": "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, or the session is invalid or not open."
+            "description": "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, the session is invalid or not open, `kind=pulse` on a machine without pulse-level access, or a `Content-Type` that doesn't match `kind`."
           }
         }
       }
@@ -1032,7 +1155,7 @@
     },
     "/tasks/{id}/artifacts/{name}": {
       "get": {
-        "summary": "Fetch a named artifact produced for a task from the backend that ran it, forwarded\nverbatim (no caching, no parsing).",
+        "summary": "Fetch a named artifact produced for a task from the backend that ran it, forwarded\nverbatim (no caching, no parsing). The request's `Accept` header is forwarded too.",
         "operationId": "get_task_artifact",
         "parameters": [
           {
@@ -1058,7 +1181,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Raw artifact JSON as returned by the backend",
+            "description": "Raw artifact as returned by the backend, with the backend's `Content-Type` (e.g. protobuf for a pulse task's `sweep_results`)",
             "content": {
               "text/plain": {
                 "schema": {
@@ -1098,7 +1221,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Raw result as returned by the backend (plain text): the full job-status JSON document for `iqm`, the payload's `result` string for `test`",
+            "description": "Raw result as returned by the backend, with the backend's `Content-Type`: the full job-status JSON document for `iqm`, the payload's `result` string for `test`",
             "content": {
               "text/plain": {
                 "schema": {
@@ -1162,7 +1285,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "An IQM server. Task payloads must be JSON circuit descriptions accepted by the IQM API\n(`POST /api/v1/jobs/{machine_name}/circuit`). A job is never given up on while the server\nis unreachable or returns errors: its polls back off exponentially (from\n`poll_interval_ms` up to 60 s) and return to the normal interval after the first\nsuccessful poll, and a cancel that cannot be delivered is retried on later polls. Each\nrequest to the server times out after 10 s.",
+            "description": "An IQM server. Task payloads must be JSON circuit descriptions accepted by the IQM API\n(`POST /api/v1/jobs/{machine_name}/circuit`), or, for `kind=pulse` tasks, protobuf\n`RunDefinition`s (`POST /api/v1/jobs/{machine_name}/run`). A job is never given up on while the server\nis unreachable or returns errors: its polls back off exponentially (from\n`poll_interval_ms` up to 60 s) and return to the normal interval after the first\nsuccessful poll, and a cancel that cannot be delivered is retried on later polls. Each\nrequest to the server times out after 10 s.",
             "required": [
               "url",
               "token",
@@ -1401,6 +1524,7 @@
           "max_session_time_ms",
           "default_task_time_limit_ms",
           "max_clock_skew_ms",
+          "pulse_access",
           "backend"
         ],
         "properties": {
@@ -1429,6 +1553,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "pulse_access": {
+            "type": "boolean"
           },
           "queue_size": {
             "type": "integer",
@@ -1484,6 +1611,11 @@
             "description": "Maximum duration a session on this machine may request, in milliseconds. Sessions\nrequesting longer are rejected.",
             "default": 7200000,
             "minimum": 0
+          },
+          "pulse_access": {
+            "type": "boolean",
+            "description": "Whether pulse-level tasks (`kind=pulse`) may be submitted to this machine.",
+            "default": false
           },
           "queue_size": {
             "type": "integer",
@@ -1685,6 +1817,7 @@
         "required": [
           "id",
           "user",
+          "kind",
           "machine",
           "state",
           "created_at"
@@ -1728,6 +1861,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TaskKind",
+            "description": "Whether the payload is a gate-level circuit or a pulse-level program."
           },
           "machine": {
             "type": "string",
@@ -1781,6 +1918,14 @@
             "description": "Free-form identifier of the user who submitted the task."
           }
         }
+      },
+      "TaskKind": {
+        "type": "string",
+        "description": "What kind of job a task's payload describes; selects the backend submission route.",
+        "enum": [
+          "circuit",
+          "pulse"
+        ]
       },
       "TaskStateKind": {
         "type": "string",
