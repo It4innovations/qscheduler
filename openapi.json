@@ -1,0 +1,1186 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "qscheduler",
+    "description": "Scheduling service dispatching tasks to quantum computing backends.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.2.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check. Reports whether the service is up and able to reach the database.",
+        "operationId": "health_handler",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service is unhealthy (database unreachable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/machine/{machine}/about": {
+      "get": {
+        "summary": "Describe the machine's backend: its type and version information.",
+        "operationId": "get_machine_about",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backend type and version, e.g. `{\"type\": \"IQM\", \"version\": {\"server_version\": \"...\"}}`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackendAbout"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "500": {
+            "description": "Backend error"
+          }
+        }
+      }
+    },
+    "/machine/{machine}/arch": {
+      "get": {
+        "summary": "Fetch the backend's architecture description.",
+        "operationId": "get_machine_arch",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Architecture JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "500": {
+            "description": "Backend error"
+          }
+        }
+      }
+    },
+    "/machine/{machine}/calibration/{calibration}/{endpoint}": {
+      "get": {
+        "summary": "Fetch a calibration data set from the backend.",
+        "operationId": "get_machine_calibration",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "calibration",
+            "in": "path",
+            "description": "Calibration name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "endpoint",
+            "in": "path",
+            "description": "Endpoint",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration JSON",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "500": {
+            "description": "Backend error"
+          }
+        }
+      }
+    },
+    "/machine/{machine}/suspension": {
+      "post": {
+        "summary": "Suspend a machine. While suspended, the machine rejects every new task and session\n(including tasks submitted into an already open session) with HTTP 409 and the suspension\nmessage. Existing work is handled according to `cancel`.",
+        "operationId": "suspend_machine_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuspendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Machine suspended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Suspension"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "409": {
+            "description": "Machine is already suspended"
+          },
+          "422": {
+            "description": "`message` is empty or longer than 512 characters"
+          }
+        }
+      },
+      "delete": {
+        "summary": "End a machine's suspension; it accepts new tasks and sessions again. Work failed or closed\nby the suspension stays so.",
+        "operationId": "resume_machine_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The ended suspension",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Suspension"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "409": {
+            "description": "Machine is not suspended"
+          }
+        }
+      }
+    },
+    "/machine/{machine}/suspensions": {
+      "get": {
+        "summary": "List a machine's suspensions, newest first. The active suspension, if any, is the first\nentry and has no `resumed_at`.",
+        "operationId": "list_machine_suspensions_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suspension history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Suspension"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Machine not found"
+          }
+        }
+      }
+    },
+    "/projects": {
+      "get": {
+        "summary": "List all projects.",
+        "operationId": "list_projects_handler",
+        "responses": {
+          "200": {
+            "description": "List of projects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register a project — a named, time-accounted budget that tasks and sessions are charged\nagainst.",
+        "operationId": "create_project_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Project created; empty body"
+          },
+          "409": {
+            "description": "A project with this name already exists"
+          }
+        }
+      }
+    },
+    "/projects/{name}": {
+      "get": {
+        "summary": "Get a single project by name.",
+        "operationId": "get_project_handler",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Project name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update a project's `active` flag and/or time `limit_ms`. Fields omitted from the request\nbody are left unchanged. Does not affect `consumed_ms`.",
+        "operationId": "update_project_handler",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Project name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found"
+          }
+        }
+      }
+    },
+    "/sessions": {
+      "post": {
+        "summary": "Create a session — a time-bounded, exclusive reservation of one machine for one project.\nTasks in the session are cancelled when the session closes.",
+        "operationId": "create_session_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "description": "Name of the target machine.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Name of the project the session's time is charged to.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "time_limit_ms",
+            "in": "query",
+            "description": "Session lifetime in milliseconds.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "description": "Name of the notifier to send the session's open/close events to. No notification is\nsent when omitted.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Session created",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The project has exceeded its time limit, or the project is not active."
+          },
+          "404": {
+            "description": "Unknown `machine`."
+          },
+          "409": {
+            "description": "The machine is suspended; the body contains the suspension message."
+          },
+          "422": {
+            "description": "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`."
+          }
+        }
+      }
+    },
+    "/sessions/{id}": {
+      "get": {
+        "summary": "Get a session's current info (state, timings, and its machine/project).",
+        "operationId": "get_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Request cancellation of a session. Cancellation is asynchronous: a queued (`\"waiting\"`)\nsession is removed from the queue, while an `\"open\"` session is closed and its tasks are\ncancelled (both those already submitted to the backend and those still queued); in both\ncases the session eventually reaches the `\"closed\"` state.",
+        "operationId": "cancel_session_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation requested"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "409": {
+            "description": "Session already closed"
+          }
+        }
+      }
+    },
+    "/tasks": {
+      "post": {
+        "summary": "Submit a task for execution.",
+        "operationId": "create_task",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "description": "Session to associate the task with. The session must be in the `\"open\"` state or the\ntask is rejected. Exactly one of `project` / `session_id` must be given.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Name of the project to charge the task's time to. Exactly one of `project` / `session_id`\nmust be given.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "machine",
+            "in": "query",
+            "description": "Name of the target machine.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "description": "Free-form identifier of the user submitting the task, stored alongside the task.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "time_limit_ms",
+            "in": "query",
+            "description": "Maximum execution time in milliseconds, counted from when the backend starts running\nthe task. When exceeded, the task is cancelled and ends `failed`. Defaults to the\nmachine's default task time limit.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "description": "Name of the notifier to send the task's completion event to. No notification is sent\nwhen omitted.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw task payload forwarded to the backend.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task created",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The project has exceeded its time limit, or the project is not active."
+          },
+          "409": {
+            "description": "The machine is suspended; the body contains the suspension message."
+          },
+          "422": {
+            "description": "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, or the session is invalid or not open."
+          }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "summary": "Get a task's current info (state, timings, and its session/project/machine/user).",
+        "operationId": "get_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Task ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Request cancellation of a task. Cancellation is asynchronous: a queued task is removed from\nthe queue, while a running task is cancelled on the backend; in both cases the task\neventually reaches the `\"cancelled\"` state (poll `GET /tasks/{id}` to observe it).",
+        "operationId": "cancel_task_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Task ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancellation requested"
+          },
+          "404": {
+            "description": "Task not found"
+          },
+          "409": {
+            "description": "Task already in a terminal state (finished, failed, or cancelled)"
+          }
+        }
+      }
+    },
+    "/tasks/{id}/artifacts/{name}": {
+      "get": {
+        "summary": "Fetch a named artifact produced for a task from the backend that ran it, forwarded\nverbatim (no caching, no parsing).",
+        "operationId": "get_task_artifact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Task ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Artifact name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact JSON as returned by the backend",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found"
+          },
+          "409": {
+            "description": "Task has not been submitted to a backend yet"
+          },
+          "500": {
+            "description": "Backend request failed"
+          }
+        }
+      }
+    },
+    "/tasks/{id}/result": {
+      "get": {
+        "summary": "Fetch a task's raw result from the backend that ran it, forwarded verbatim (no caching,\nno parsing).",
+        "operationId": "get_task_result",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Task ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw result JSON as returned by the backend",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found"
+          },
+          "409": {
+            "description": "Task has not been submitted to a backend yet"
+          },
+          "500": {
+            "description": "Backend request failed"
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "summary": "Returns the service version string.",
+        "operationId": "version_handler",
+        "responses": {
+          "200": {
+            "description": "Service version string, e.g. `qscheduler v1.0.0`.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BackendAbout": {
+        "type": "object",
+        "description": "Backend identification returned by `GET /machine/{machine}/about`.",
+        "required": [
+          "type",
+          "version"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Backend kind, e.g. `IQM` or `test`."
+          },
+          "version": {
+            "$ref": "#/components/schemas/BackendVersion"
+          }
+        }
+      },
+      "BackendVersion": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/IqmVersion",
+            "description": "Versions reported by the IQM server's `/about` endpoint."
+          },
+          {
+            "type": "string",
+            "description": "Plain version string (test backend)."
+          }
+        ],
+        "description": "Backend-specific version info."
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "limit_ms"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the project can accept new tasks/sessions.",
+            "default": true
+          },
+          "limit_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time budget, in milliseconds."
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique project name."
+          }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "IqmVersion": {
+        "type": "object",
+        "description": "Version fields of the IQM `GET /about` response; other keys are ignored.",
+        "required": [
+          "qccsw_version",
+          "server_version",
+          "station_control_version"
+        ],
+        "properties": {
+          "qccsw_version": {
+            "type": "string"
+          },
+          "server_version": {
+            "type": "string"
+          },
+          "station_control_version": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "consumed_ms",
+          "limit_ms",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the project can accept new tasks/sessions."
+          },
+          "consumed_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time consumed so far, in milliseconds."
+          },
+          "limit_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time budget, in milliseconds."
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique project name."
+          }
+        }
+      },
+      "SessionInfo": {
+        "type": "object",
+        "description": "A snapshot of a session's public-facing data, resolved names and all — the shape returned\nby `GET /sessions/{id}` and embedded in the session open/close callback.",
+        "required": [
+          "id",
+          "state",
+          "machine",
+          "project",
+          "time_limit_ms",
+          "created_at"
+        ],
+        "properties": {
+          "closed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Absent unless the session has closed."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "exectime_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds of execution time consumed by tasks run during this session, if any."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "machine": {
+            "type": "string",
+            "description": "Name of the reserved machine."
+          },
+          "notify": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the notifier that receives the session's open/close events. Absent if the\nsession was created without `notify`, or its notifier has since been removed."
+          },
+          "opened_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Absent if the session never opened (still waiting, or closed while still queued)."
+          },
+          "project": {
+            "type": "string",
+            "description": "Name of the project the session's time is charged to."
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionStateKind"
+          },
+          "time_limit_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SessionStateKind": {
+        "type": "string",
+        "description": "The current state of a session, as a plain string (no embedded data).",
+        "enum": [
+          "waiting",
+          "open",
+          "closed"
+        ]
+      },
+      "SuspendCancel": {
+        "type": "string",
+        "description": "What happens to a machine's existing work when it is suspended.",
+        "enum": [
+          "none",
+          "waiting",
+          "all"
+        ]
+      },
+      "SuspendRequest": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "cancel": {
+            "$ref": "#/components/schemas/SuspendCancel",
+            "description": "What happens to the machine's existing work:\n`none` — it is computed as normal;\n`waiting` — tasks not yet submitted to the backend fail, and all sessions are closed\n(the tasks of an open session fail);\n`all` — like `waiting`, and tasks already submitted to the backend fail too (their\ncancellation on the backend is requested).",
+            "default": "none"
+          },
+          "message": {
+            "type": "string",
+            "description": "Why the machine is suspended (at most 512 characters). Returned in the error of every\nrejected task/session submission, and in the error of every task failed by `cancel`."
+          }
+        }
+      },
+      "Suspension": {
+        "type": "object",
+        "description": "A machine suspension — the active one, or a past one from the history.",
+        "required": [
+          "message",
+          "cancel",
+          "suspended_at"
+        ],
+        "properties": {
+          "cancel": {
+            "$ref": "#/components/schemas/SuspendCancel"
+          },
+          "message": {
+            "type": "string"
+          },
+          "resumed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Absent while the suspension is still active."
+          },
+          "suspended_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TaskInfo": {
+        "type": "object",
+        "description": "A snapshot of a task's public-facing data, resolved names and all — the shape returned by\n`GET /tasks/{id}` and embedded in the task completion callback.",
+        "required": [
+          "id",
+          "user",
+          "machine",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "backend_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present only when `state` is `\"failed\"`."
+          },
+          "exectime_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Milliseconds of execution time consumed, if any."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Absent if the task is still `waiting` or `running`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "machine": {
+            "type": "string",
+            "description": "Name of the target machine."
+          },
+          "notify": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the notifier that receives the task's completion event. Absent if the task was\nsubmitted without `notify`, or its notifier has since been removed."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the project the task's time is charged to, if it was project-parented directly\n(not via a session). Mutually exclusive with `session`."
+          },
+          "session": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Session the task ran in, if it was session-parented. Mutually exclusive with `project`.",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the backend started running the task. Absent until then."
+          },
+          "state": {
+            "$ref": "#/components/schemas/TaskStateKind"
+          },
+          "time_limit_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Execution time limit in milliseconds, counted from `started_at`. When exceeded, the task\nis cancelled on the backend and ends `failed`.",
+            "minimum": 0
+          },
+          "user": {
+            "type": "string"
+          }
+        }
+      },
+      "TaskStateKind": {
+        "type": "string",
+        "description": "The current state of a task, as a plain string (no embedded data).",
+        "enum": [
+          "waiting",
+          "running",
+          "finished",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "UpdateProjectRequest": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the project can accept new tasks/sessions. Omit to leave unchanged."
+          },
+          "limit_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Time budget, in milliseconds. Omit to leave unchanged."
+          }
+        }
+      }
+    }
+  }
+}

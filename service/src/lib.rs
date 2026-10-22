@@ -84,7 +84,47 @@ pub(crate) fn client_warn(status: StatusCode, e: impl std::fmt::Display) -> (Sta
 }
 
 #[derive(OpenApi)]
+#[openapi(info(
+    title = "qscheduler",
+    description = "Scheduling service dispatching tasks to quantum computing backends.",
+    // Explicit `env!` so a version bump always recompiles the spec (utoipa's implicit
+    // defaults are read by the proc macro and not tracked by Cargo).
+    version = env!("CARGO_PKG_VERSION"),
+    license(name = "Apache-2.0", identifier = "Apache-2.0")
+))]
 struct ApiDoc;
+
+/// All API routes; the single source for both the served router and the OpenAPI spec.
+fn api_router() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(version_handler))
+        .routes(routes!(health_handler))
+        .routes(routes!(tasks::create_task))
+        .routes(routes!(tasks::get_task))
+        .routes(routes!(tasks::cancel_task_handler))
+        .routes(routes!(tasks::get_task_result))
+        .routes(routes!(tasks::get_task_artifact))
+        .routes(routes!(sessions::get_session))
+        .routes(routes!(sessions::create_session_handler))
+        .routes(routes!(sessions::cancel_session_handler))
+        .routes(routes!(machines::get_machine_arch))
+        .routes(routes!(machines::get_machine_about))
+        .routes(routes!(machines::get_machine_calibration))
+        .routes(routes!(
+            machines::suspend_machine_handler,
+            machines::resume_machine_handler
+        ))
+        .routes(routes!(machines::list_machine_suspensions_handler))
+        .routes(routes!(projects::create_project_handler))
+        .routes(routes!(projects::list_projects_handler))
+        .routes(routes!(projects::get_project_handler))
+        .routes(routes!(projects::update_project_handler))
+}
+
+/// The OpenAPI spec of the REST API, as served at `/api-docs/openapi.json`. Needs no database.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    api_router().split_for_parts().1
+}
 
 pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> runner::Result<()> {
     let pool = runner::db::create_pool().await?;
@@ -111,31 +151,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         core_ref: core_ref.clone(),
     });
 
-    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(version_handler))
-        .routes(routes!(health_handler))
-        .routes(routes!(tasks::create_task))
-        .routes(routes!(tasks::get_task))
-        .routes(routes!(tasks::cancel_task_handler))
-        .routes(routes!(tasks::get_task_result))
-        .routes(routes!(tasks::get_task_artifact))
-        .routes(routes!(sessions::get_session))
-        .routes(routes!(sessions::create_session_handler))
-        .routes(routes!(sessions::cancel_session_handler))
-        .routes(routes!(machines::get_machine_arch))
-        .routes(routes!(machines::get_machine_about))
-        .routes(routes!(machines::get_machine_calibration))
-        .routes(routes!(
-            machines::suspend_machine_handler,
-            machines::resume_machine_handler
-        ))
-        .routes(routes!(machines::list_machine_suspensions_handler))
-        .routes(routes!(projects::create_project_handler))
-        .routes(routes!(projects::list_projects_handler))
-        .routes(routes!(projects::get_project_handler))
-        .routes(routes!(projects::update_project_handler))
-        .with_state(state)
-        .split_for_parts();
+    let (router, api) = api_router().with_state(state).split_for_parts();
 
     let app = router.route(
         "/api-docs/openapi.json",

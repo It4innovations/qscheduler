@@ -298,6 +298,22 @@ The `token` field is omitted when the notifier has no `--token`.
 The service exposes a JSON REST API. All responses use `Content-Type: application/json` unless
 noted otherwise. An OpenAPI spec is available at `GET /api-docs/openapi.json`.
 
+### Versioning
+
+QScheduler follows [Semantic Versioning](https://semver.org); one version (`[workspace.package]`
+in `Cargo.toml`) covers the binary and the API (`info.version` of the OpenAPI spec). Compared
+to the last release, a breaking API change bumps the major version (the minor version while
+on `0.y.z`), any other API change bumps the minor version (the patch version on `0.y.z`).
+
+- `openapi.json` in the repository root is a snapshot of the spec (also printed by
+  `qscheduler openapi`). `cargo test` fails when it is out of date; regenerate it with
+  `UPDATE_OPENAPI=1 cargo test -p service --test openapi_snapshot`.
+- `scripts/check_api_version.py` (run in CI, needs [oasdiff](https://github.com/oasdiff/oasdiff))
+  compares the snapshot with `openapi.json` at the latest `vX.Y.Z` tag and fails when the
+  version bump is too small for the API changes.
+- Release: set the version in `Cargo.toml`, regenerate the snapshot, update `CHANGELOG.md`, and
+  tag the release commit `vX.Y.Z`.
+
 Tasks belong to either a **project** (a time-accounted budget shared across tasks) or a
 **session** (an exclusive, time-limited reservation of a machine for a project) — never both.
 
