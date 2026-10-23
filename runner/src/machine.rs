@@ -1,4 +1,5 @@
 use crate::backend::{Backend, BackendConfig};
+use crate::config::MachineConfiguration;
 use crate::error::RunnerError;
 use crate::id::define_id;
 use crate::project::ProjectId;
@@ -20,6 +21,7 @@ pub(crate) enum QueueItem {
     Session(SessionId),
 }
 
+#[derive(Clone)]
 pub struct MachineConfig {
     pub name: String,
     pub queue_size: usize,
@@ -28,6 +30,21 @@ pub struct MachineConfig {
     pub default_task_time_limit: Duration,
     pub max_clock_skew: Duration,
     pub backend: BackendConfig,
+}
+
+impl MachineConfig {
+    /// The configuration as stored in the DB.
+    pub fn to_configuration(&self) -> MachineConfiguration {
+        MachineConfiguration {
+            name: self.name.clone(),
+            queue_size: self.queue_size,
+            limit_check_interval_ms: self.limit_check_interval.as_millis() as u32,
+            max_session_time_ms: self.max_session_time.as_millis() as u64,
+            default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
+            max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
+            backend: self.backend.clone(),
+        }
+    }
 }
 
 struct RunningSession {
@@ -64,6 +81,16 @@ pub(crate) struct Machine {
     /// Suspensions whose `cancel` policy the launcher has yet to apply to existing work, with
     /// the error to record on the failed tasks.
     suspend_cancel_requests: Vec<(SuspendCancel, String)>,
+    /// Set while the machine is being reconfigured or removed; new tasks and sessions are
+    /// rejected meanwhile.
+    unavailable: bool,
+}
+
+/// A machine's configuration and state as reported by the API.
+#[derive(Clone)]
+pub struct MachineInfo {
+    pub config: MachineConfig,
+    pub suspension: Option<Suspension>,
 }
 
 impl Machine {
@@ -79,11 +106,28 @@ impl Machine {
             session_cancel_requests: Vec::new(),
             suspension: None,
             suspend_cancel_requests: Vec::new(),
+            unavailable: false,
         }
     }
 
-    pub fn id(&self) -> MachineId {
-        self.machine_id
+    pub fn info(&self) -> MachineInfo {
+        MachineInfo {
+            config: self.config.clone(),
+            suspension: self.suspension.clone(),
+        }
+    }
+
+    pub(crate) fn set_unavailable(&mut self, unavailable: bool) {
+        self.unavailable = unavailable;
+    }
+
+    /// Moves the not yet processed cancel requests of `old`, a previous incarnation of this
+    /// machine, to this one, so cancels accepted during a reconfiguration are not lost.
+    pub(crate) fn inherit_cancel_requests(&mut self, old: &mut Machine) {
+        self.task_cancel_requests
+            .append(&mut old.task_cancel_requests);
+        self.session_cancel_requests
+            .append(&mut old.session_cancel_requests);
     }
 
     pub fn config(&self) -> &MachineConfig {
@@ -102,8 +146,12 @@ impl Machine {
         self.suspension = suspension;
     }
 
-    /// Fails with [`RunnerError::MachineSuspended`] if the machine is suspended.
+    /// Fails with [`RunnerError::MachineSuspended`] if the machine is suspended, or with
+    /// [`RunnerError::MachineUnavailable`] while it is being reconfigured or removed.
     pub fn check_not_suspended(&self) -> crate::Result<()> {
+        if self.unavailable {
+            return Err(RunnerError::MachineUnavailable(self.config.name.clone()));
+        }
         match &self.suspension {
             Some(s) => Err(RunnerError::MachineSuspended {
                 machine: self.config.name.clone(),
@@ -286,6 +334,12 @@ impl MachineMap {
         self.machines_by_name
             .insert(machine.config.name.clone(), machine_id);
         self.machines.insert(machine_id, machine);
+    }
+
+    pub fn remove(&mut self, machine_id: MachineId) -> Option<Machine> {
+        let machine = self.machines.remove(&machine_id)?;
+        self.machines_by_name.remove(&machine.config.name);
+        Some(machine)
     }
 
     pub fn find_machine_by_name(&self, name: &str) -> crate::Result<MachineId> {

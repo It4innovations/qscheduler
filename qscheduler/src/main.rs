@@ -1,5 +1,5 @@
 use clap::Parser;
-use runner::config::{MachineConfiguration, NotifierConfiguration};
+use runner::config::{DEFAULT_QUEUE_SIZE, MachineConfiguration, NotifierConfiguration};
 use runner::error::RunnerError;
 use runner::{BackendConfig, IqmBackendConfig};
 use service::config::ServiceConfiguration;
@@ -108,7 +108,7 @@ struct MachineConfigArgs {
     name: String,
 
     /// Maximum number of queued tasks
-    #[arg(long, default_value = "4")]
+    #[arg(long, default_value_t = DEFAULT_QUEUE_SIZE)]
     queue_size: usize,
     /// How often session consumption is stored into DB and task time limits are checked.
     #[arg(long, value_parser = parse_human_time, default_value = "2s")]
@@ -287,8 +287,9 @@ async fn connect_db() -> sqlx::postgres::PgPool {
 }
 
 async fn cmd_machine_add(args: MachineConfigArgs) {
-    let pool = connect_db().await;
     let config = args.into_machine_configuration();
+    config.validate().unwrap_or_else(|e| die(e));
+    let pool = connect_db().await;
     match runner::db::insert_machine(&pool, &config).await {
         Ok(id) => {
             println!(
@@ -312,8 +313,9 @@ async fn cmd_machine_add(args: MachineConfigArgs) {
 }
 
 async fn cmd_machine_update(args: MachineConfigArgs) {
-    let pool = connect_db().await;
     let config = args.into_machine_configuration();
+    config.validate().unwrap_or_else(|e| die(e));
+    let pool = connect_db().await;
     match runner::db::update_machine(&pool, &config).await {
         Ok(true) => {
             println!("Machine '{}' updated successfully.", config.name);

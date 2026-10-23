@@ -1,6 +1,8 @@
-use crate::callback::NotifierId;
+use crate::callback::{NotifierId, NotifierInfo};
+use crate::config::{MachineConfiguration, NotifierConfiguration};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::error::RunnerError;
+use crate::machine::MachineInfo;
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionState};
 use crate::suspension::{
@@ -8,6 +10,7 @@ use crate::suspension::{
 };
 use crate::task::{TaskConfig, TaskId, TaskInfo};
 use crate::{MachineId, db};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn check_db_health(core_ref: &CoreRef) -> bool {
@@ -377,4 +380,265 @@ pub async fn list_machine_suspensions(
 ) -> crate::Result<Vec<Suspension>> {
     let pool = core_ref.lock().unwrap().pool().clone();
     db::list_suspensions(&pool, machine_id).await
+}
+
+/// All machines, sorted by name.
+pub fn list_machines(core: &Core) -> Vec<MachineInfo> {
+    let mut machines: Vec<MachineInfo> =
+        core.split().machine_map.iter().map(|m| m.info()).collect();
+    machines.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+    machines
+}
+
+pub fn get_machine_info(core: &Core, machine_id: MachineId) -> crate::Result<MachineInfo> {
+    Ok(core.split().machine_map.find_machine(machine_id)?.info())
+}
+
+/// Registers a new machine and starts it right away.
+#[tracing::instrument(skip_all, fields(machine = %config.name))]
+pub async fn add_machine(
+    core_ref: &CoreRef,
+    config: MachineConfiguration,
+) -> crate::Result<MachineInfo> {
+    config.validate()?;
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.admin_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    if get_machine_id_by_name(&core_ref.lock().unwrap(), &config.name).is_ok() {
+        return Err(RunnerError::MachineAlreadyExists(config.name));
+    }
+    let machine_id = MachineId::from_db(db::insert_machine(&pool, &config).await?);
+    tracing::info!(%machine_id, "Machine added");
+    let mut core = core_ref.lock().unwrap();
+    let backend_receiver = core.insert_machine(machine_id, config);
+    core.start_launcher(machine_id, backend_receiver, Vec::new());
+    get_machine_info(&core, machine_id)
+}
+
+/// Replaces the configuration of the machine named `config.name`. The machine's launcher is
+/// stopped and its state rebuilt from the DB with the new configuration, as on a service
+/// restart: queued work is kept, an open session is closed.
+#[tracing::instrument(skip_all, fields(machine = %config.name))]
+pub async fn update_machine(
+    core_ref: &CoreRef,
+    config: MachineConfiguration,
+) -> crate::Result<MachineInfo> {
+    config.validate()?;
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.admin_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    let machine_id = set_machine_unavailable(core_ref, &config.name)?;
+    match db::update_machine(&pool, &config).await {
+        Ok(true) => {}
+        Ok(false) => {
+            set_machine_available(core_ref, machine_id);
+            return Err(RunnerError::InvalidMachineName(config.name));
+        }
+        Err(e) => {
+            set_machine_available(core_ref, machine_id);
+            return Err(e);
+        }
+    }
+    tracing::info!("Machine configuration updated, restarting its launcher");
+    stop_machine_launcher(core_ref, machine_id).await;
+    restart_machine(core_ref, machine_id, config).await?;
+    get_machine_info(&core_ref.lock().unwrap(), machine_id)
+}
+
+/// Removes a machine. Without `force` only a machine without tasks and sessions is removed;
+/// with `force` its tasks and sessions are deleted as well (jobs already handed to the backend
+/// get a best-effort cancel request). Returns the number of removed `(tasks, sessions)`.
+#[tracing::instrument(skip(core_ref))]
+pub async fn remove_machine(
+    core_ref: &CoreRef,
+    name: &str,
+    force: bool,
+) -> crate::Result<(i64, i64)> {
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.admin_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    let machine_id = set_machine_unavailable(core_ref, name)?;
+    // No new tasks or sessions can be created while the machine is unavailable, so the counts
+    // stay valid until the removal.
+    let (tasks, sessions) = match db::count_machine_dependents(&pool, machine_id).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            set_machine_available(core_ref, machine_id);
+            return Err(e);
+        }
+    };
+    if (tasks > 0 || sessions > 0) && !force {
+        set_machine_available(core_ref, machine_id);
+        return Err(RunnerError::MachineHasDependents {
+            name: name.to_string(),
+            tasks,
+            sessions,
+        });
+    }
+    if force {
+        let core = core_ref.lock().unwrap();
+        let split = core.split();
+        let backend = split.machine_map.get_machine(machine_id).backend();
+        for task in split.task_map.iter() {
+            if task.config().machine_id == machine_id
+                && !task.state().is_final()
+                && let Some(backend_id) = task.backend_id()
+            {
+                Arc::clone(backend).cancel_task(task.id(), backend_id);
+            }
+        }
+    }
+    stop_machine_launcher(core_ref, machine_id).await;
+    match db::remove_machine(&pool, name, true).await {
+        Ok(_) => {
+            let machine = core_ref.lock().unwrap().purge_machine(machine_id);
+            if let Some(machine) = machine {
+                machine.backend().stop();
+            }
+            tracing::info!(tasks, sessions, "Machine removed");
+            Ok((tasks, sessions))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to remove machine, restarting it");
+            let config = core_ref
+                .lock()
+                .unwrap()
+                .split()
+                .machine_map
+                .get_machine(machine_id)
+                .config()
+                .to_configuration();
+            restart_machine(core_ref, machine_id, config).await?;
+            Err(e)
+        }
+    }
+}
+
+/// Marks a machine as unavailable (rejecting new work) and returns its id.
+fn set_machine_unavailable(core_ref: &CoreRef, name: &str) -> crate::Result<MachineId> {
+    let mut core = core_ref.lock().unwrap();
+    let machine_id = get_machine_id_by_name(&core, name)?;
+    core.split_mut()
+        .machine_map
+        .get_machine_mut(machine_id)
+        .set_unavailable(true);
+    Ok(machine_id)
+}
+
+fn set_machine_available(core_ref: &CoreRef, machine_id: MachineId) {
+    if let Ok(machine) = core_ref
+        .lock()
+        .unwrap()
+        .split_mut()
+        .machine_map
+        .find_machine_mut(machine_id)
+    {
+        machine.set_unavailable(false);
+    }
+}
+
+/// Stops a machine's launcher and waits until it has written its pending DB updates.
+async fn stop_machine_launcher(core_ref: &CoreRef, machine_id: MachineId) {
+    let handle = core_ref.lock().unwrap().stop_launcher(machine_id);
+    if let Some(handle) = handle
+        && let Err(e) = handle.await
+    {
+        tracing::error!(%machine_id, error = %e, "launcher task failed while stopping");
+    }
+}
+
+/// Replaces a machine whose launcher is stopped with a fresh one built from `config`, restores
+/// its state from the DB and starts its launcher. The machine stays unavailable until then; if
+/// the restoration fails, it stays unavailable (a service restart recovers it).
+async fn restart_machine(
+    core_ref: &CoreRef,
+    machine_id: MachineId,
+    config: MachineConfiguration,
+) -> crate::Result<()> {
+    let backend_receiver = {
+        let mut core = core_ref.lock().unwrap();
+        let old = core.purge_machine(machine_id);
+        let backend_receiver = core.insert_machine(machine_id, config);
+        let machine = core.split_mut().machine_map.get_machine_mut(machine_id);
+        machine.set_unavailable(true);
+        if let Some(mut old) = old {
+            old.backend().stop();
+            machine.inherit_cancel_requests(&mut old);
+        }
+        backend_receiver
+    };
+    let mut resume_tasks = Core::restore(core_ref, Some(machine_id)).await?;
+    let mut core = core_ref.lock().unwrap();
+    core.split_mut()
+        .machine_map
+        .get_machine_mut(machine_id)
+        .set_unavailable(false);
+    core.start_launcher(
+        machine_id,
+        backend_receiver,
+        resume_tasks.remove(&machine_id).unwrap_or_default(),
+    );
+    Ok(())
+}
+
+/// All notifiers, sorted by name.
+pub fn list_notifiers(core: &Core) -> Vec<NotifierInfo> {
+    core.notifiers().list()
+}
+
+/// Registers a new notifier; tasks and sessions can select it right away.
+#[tracing::instrument(skip_all, fields(notifier = %config.name))]
+pub async fn add_notifier(
+    core_ref: &CoreRef,
+    config: NotifierConfiguration,
+) -> crate::Result<NotifierInfo> {
+    if !(config.url.starts_with("http://") || config.url.starts_with("https://")) {
+        return Err(RunnerError::InvalidNotifierUrl(config.url));
+    }
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.admin_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    let notifier_id = db::insert_notifier(&pool, &config).await?;
+    tracing::info!(%notifier_id, url = config.url, "Notifier added");
+    let info = NotifierInfo {
+        name: config.name.clone(),
+        url: config.url.clone(),
+        has_token: config.token.is_some(),
+    };
+    let mut core = core_ref.lock().unwrap();
+    // A notifier CLI-added and CLI-removed while the service runs may still be loaded.
+    core.notifiers_mut().remove(&config.name);
+    core.notifiers_mut().add(notifier_id, config);
+    Ok(info)
+}
+
+/// Removes a notifier. Events already queued for it are still delivered; tasks and sessions
+/// that use it stop sending notifications.
+#[tracing::instrument(skip(core_ref))]
+pub async fn remove_notifier(core_ref: &CoreRef, name: &str) -> crate::Result<()> {
+    let (lock, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.admin_lock(), core.pool().clone())
+    };
+    let _guard = lock.lock().await;
+    let removed_from_db = db::remove_notifier(&pool, name).await?;
+    let removed_from_memory = core_ref
+        .lock()
+        .unwrap()
+        .notifiers_mut()
+        .remove(name)
+        .is_some();
+    if !removed_from_db && !removed_from_memory {
+        return Err(RunnerError::NotifierNotFound(name.to_string()));
+    }
+    tracing::info!("Notifier removed");
+    Ok(())
 }

@@ -10,6 +10,7 @@ OK_OUTCOME = {"type": "Ok"}
 TEST_PROJECT = "test-project"
 TEST_MACHINE_NAME = "TestMachine"
 TEST_USER = "test-user"
+ADMIN_TOKEN = "test-admin-token"
 
 
 class QSchedulerError(Exception):
@@ -76,6 +77,8 @@ class QScheduler:
         self.max_session_time = None
         self.limit_check_interval = None
         self.default_task_time_limit = None
+        # Bearer token of the admin endpoints; None starts the service without it.
+        self.admin_token: str | None = ADMIN_TOKEN
         self._process = None
         self._log_file = None
 
@@ -159,11 +162,14 @@ class QScheduler:
         # Handle outlives this function: it is the subprocess' stdout/stderr and
         # is closed in stop()/cleanup, so a context manager is not applicable.
         self._log_file = open(log_path, "w")  # noqa: SIM115
+        env = {"RUST_LOG": "debug", "DATABASE_URL": self.database_url}
+        if self.admin_token is not None:
+            env["ADMIN_TOKEN"] = self.admin_token
         self._process = subprocess.Popen(
             [self._binary, "serve", "--port", str(self.port)],
             stdout=self._log_file,
             stderr=self._log_file,
-            env={"RUST_LOG": "debug", "DATABASE_URL": self.database_url},
+            env=env,
             cwd=self.working_dir,
         )
 
@@ -571,3 +577,77 @@ class QScheduler:
     def health(self):
         r = requests.get(self.url("health"), timeout=5)
         return r
+
+    def admin_request(
+        self,
+        method: str,
+        path: str,
+        expect_status: int = 200,
+        token: str | None = None,
+        **kwargs,
+    ) -> requests.Response:
+        """Calls an admin endpoint, authorized with `token` (default: the service's admin
+        token), and checks the response status."""
+        token = self.admin_token if token is None else token
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        r = requests.request(
+            method, self.url(path), headers=headers, timeout=10, **kwargs
+        )
+        assert r.status_code == expect_status, (
+            f"Expected HTTP {expect_status}, got {r.status_code}: {r.text}"
+        )
+        return r
+
+    def api_list_machines(self) -> list[dict]:
+        return self.admin_request("GET", "machines").json()
+
+    def api_get_machine(self, name: str = TEST_MACHINE_NAME) -> dict:
+        return self.admin_request("GET", f"machine/{name}").json()
+
+    def api_add_machine(
+        self, name: str, backend: dict | None = None, expect_status=201, **settings
+    ):
+        body = {"name": name, "backend": backend or {"type": "test"}, **settings}
+        return self.admin_request(
+            "POST", "machines", expect_status=expect_status, json=body
+        )
+
+    def api_update_machine(
+        self,
+        name: str = TEST_MACHINE_NAME,
+        backend: dict | None = None,
+        expect_status=200,
+        **settings,
+    ):
+        body = {"backend": backend or {"type": "test"}, **settings}
+        return self.admin_request(
+            "PUT", f"machine/{name}", expect_status=expect_status, json=body
+        )
+
+    def api_remove_machine(
+        self, name: str = TEST_MACHINE_NAME, force: bool = False, expect_status=200
+    ):
+        return self.admin_request(
+            "DELETE",
+            f"machine/{name}",
+            expect_status=expect_status,
+            params={"force": "true"} if force else None,
+        )
+
+    def api_list_notifiers(self) -> list[dict]:
+        return self.admin_request("GET", "notifiers").json()
+
+    def api_add_notifier(
+        self, name: str, url: str, token: str | None = None, expect_status=201
+    ):
+        body = {"name": name, "url": url}
+        if token is not None:
+            body["token"] = token
+        return self.admin_request(
+            "POST", "notifiers", expect_status=expect_status, json=body
+        )
+
+    def api_remove_notifier(self, name: str, expect_status=204):
+        return self.admin_request(
+            "DELETE", f"notifiers/{name}", expect_status=expect_status
+        )

@@ -62,7 +62,7 @@ pub(crate) async fn get_session(
         (status = 201, description = "Session created", body = u64),
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 404, description = "Unknown `machine`."),
-        (status = 409, description = "The machine is suspended; the body contains the suspension message."),
+        (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
         (status = 422, description = "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`.")
     )
 )]
@@ -95,7 +95,9 @@ pub(crate) async fn create_session_handler(
             RunnerError::SessionDurationExceedsLimit { .. } => {
                 client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
             }
-            RunnerError::MachineSuspended { .. } => client_error(StatusCode::CONFLICT, e),
+            RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
+                client_error(StatusCode::CONFLICT, e)
+            }
             _ => internal_error(&e),
         })?;
     tracing::info!(session_id = session_id.as_u64(), "session created");

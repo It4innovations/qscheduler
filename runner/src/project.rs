@@ -59,6 +59,10 @@ impl ProjectMap {
         self.projects.get(&id)
     }
 
+    pub fn find_project_mut(&mut self, id: ProjectId) -> Option<&mut Project> {
+        self.projects.get_mut(&id)
+    }
+
     pub fn find_project_id_by_name(&self, name: &str) -> Option<ProjectId> {
         self.projects_by_name.get(name).copied()
     }

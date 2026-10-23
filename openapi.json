@@ -38,6 +38,156 @@
         }
       }
     },
+    "/machine/{machine}": {
+      "get": {
+        "summary": "Get a machine's configuration. The backend token is not returned.",
+        "operationId": "get_machine_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Machine configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "404": {
+            "description": "Machine not found"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      },
+      "put": {
+        "summary": "Replace a machine's configuration (fields omitted from the body get their default values).\nThe machine is restarted with the new configuration, as on a service restart: queued tasks\nand sessions are kept, tasks already handed to the backend are re-attached, and an open\nsession is closed (its unfinished tasks are cancelled). New tasks and sessions are rejected\nwith HTTP 409 while the restart is in progress.",
+        "operationId": "update_machine_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Machine reconfigured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "422": {
+            "description": "Invalid configuration (e.g. zero `queue_size`)"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Remove a machine. Without `force`, only a machine without any tasks and sessions is\nremoved. With `force`, its tasks and sessions are deleted as well, and jobs already handed\nto the backend get a best-effort cancel request.",
+        "operationId": "remove_machine_handler",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "path",
+            "description": "Machine name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "description": "Remove the machine even if it has tasks or sessions; they are deleted together with\ntheir consumption records (the consumed time is not returned to their projects).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Machine removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineRemoved"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "404": {
+            "description": "Machine not found"
+          },
+          "409": {
+            "description": "The machine has tasks or sessions and `force` is not set"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      }
+    },
     "/machine/{machine}/about": {
       "get": {
         "summary": "Describe the machine's backend: its type and version information.",
@@ -277,6 +427,192 @@
         }
       }
     },
+    "/machines": {
+      "get": {
+        "summary": "List all machines, sorted by name. Backend tokens are not returned.",
+        "operationId": "list_machines_handler",
+        "responses": {
+          "200": {
+            "description": "All machines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MachineResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Register a machine. It accepts tasks and sessions right away.",
+        "operationId": "create_machine_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMachineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Machine registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "409": {
+            "description": "A machine with this name already exists"
+          },
+          "422": {
+            "description": "Invalid configuration (e.g. zero `queue_size`)"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      }
+    },
+    "/notifiers": {
+      "get": {
+        "summary": "List registered notifiers, sorted by name. Tokens are not returned.",
+        "operationId": "list_notifiers_handler",
+        "responses": {
+          "200": {
+            "description": "Registered notifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotifierInfo"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Register a notifier — an HTTP callback target for task and session events. It can be\nselected by new tasks and sessions right away.",
+        "operationId": "create_notifier_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotifierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Notifier registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotifierInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "409": {
+            "description": "A notifier with this name already exists"
+          },
+          "422": {
+            "description": "Invalid name (empty or longer than 512 characters) or URL"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      }
+    },
+    "/notifiers/{name}": {
+      "delete": {
+        "summary": "Remove a notifier. Events already queued for it are still delivered; tasks and sessions\nthat use it stop sending notifications.",
+        "operationId": "remove_notifier_handler",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notifier name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notifier removed"
+          },
+          "401": {
+            "description": "Missing or invalid admin token"
+          },
+          "403": {
+            "description": "Admin API disabled (`ADMIN_TOKEN` not set)"
+          },
+          "404": {
+            "description": "Notifier not found"
+          }
+        },
+        "security": [
+          {
+            "admin_token": []
+          }
+        ]
+      }
+    },
     "/projects": {
       "get": {
         "summary": "List all projects.",
@@ -456,7 +792,7 @@
             "description": "Unknown `machine`."
           },
           "409": {
-            "description": "The machine is suspended; the body contains the suspension message."
+            "description": "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."
           },
           "422": {
             "description": "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`."
@@ -623,7 +959,7 @@
             "description": "The project has exceeded its time limit, or the project is not active."
           },
           "409": {
-            "description": "The machine is suspended; the body contains the suspension message."
+            "description": "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."
           },
           "422": {
             "description": "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, or the session is invalid or not open."
@@ -820,6 +1156,110 @@
           }
         }
       },
+      "BackendRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An IQM server.",
+            "required": [
+              "url",
+              "token",
+              "machine_name",
+              "poll_interval_ms",
+              "type"
+            ],
+            "properties": {
+              "machine_name": {
+                "type": "string",
+                "description": "Machine name on the IQM server."
+              },
+              "poll_interval_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Job status polling interval, in milliseconds.",
+                "minimum": 0
+              },
+              "token": {
+                "type": "string",
+                "description": "Authentication token."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "iqm"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "IQM server base URL."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The in-process test backend.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The backend a machine dispatches its tasks to."
+      },
+      "BackendResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "url",
+              "machine_name",
+              "poll_interval_ms",
+              "type"
+            ],
+            "properties": {
+              "machine_name": {
+                "type": "string"
+              },
+              "poll_interval_ms": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "iqm"
+                ]
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "test"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A machine's backend as reported by the API (without its token)."
+      },
       "BackendVersion": {
         "oneOf": [
           {
@@ -832,6 +1272,49 @@
           }
         ],
         "description": "Backend-specific version info."
+      },
+      "CreateMachineRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MachineSettings"
+          },
+          {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Unique machine name."
+              }
+            }
+          }
+        ]
+      },
+      "CreateNotifierRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique notifier name (at most 512 characters); tasks and sessions select the notifier\nby it in their `notify` field."
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token included in every event payload."
+          },
+          "url": {
+            "type": "string",
+            "description": "URL to POST task completion and session open/close events to."
+          }
+        }
       },
       "CreateProjectRequest": {
         "type": "object",
@@ -883,6 +1366,147 @@
             "type": "string"
           },
           "station_control_version": {
+            "type": "string"
+          }
+        }
+      },
+      "MachineRemoved": {
+        "type": "object",
+        "required": [
+          "tasks",
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of removed sessions."
+          },
+          "tasks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of removed tasks."
+          }
+        }
+      },
+      "MachineResponse": {
+        "type": "object",
+        "required": [
+          "name",
+          "queue_size",
+          "limit_check_interval_ms",
+          "max_session_time_ms",
+          "default_task_time_limit_ms",
+          "max_clock_skew_ms",
+          "backend"
+        ],
+        "properties": {
+          "backend": {
+            "$ref": "#/components/schemas/BackendResponse"
+          },
+          "default_task_time_limit_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "limit_check_interval_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_clock_skew_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_session_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "queue_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "suspension": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Suspension",
+                "description": "The active suspension, if the machine is suspended."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "MachineSettings": {
+        "type": "object",
+        "description": "A machine's configuration. Omitted fields get their default values.",
+        "required": [
+          "backend"
+        ],
+        "properties": {
+          "backend": {
+            "$ref": "#/components/schemas/BackendRequest"
+          },
+          "default_task_time_limit_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time limit of tasks submitted without an explicit `time_limit_ms`, in milliseconds.",
+            "default": 3600000,
+            "minimum": 0
+          },
+          "limit_check_interval_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How often session consumption is stored into the DB and task time limits are checked,\nin milliseconds.",
+            "default": 2000,
+            "minimum": 0
+          },
+          "max_clock_skew_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum assumed lag of the backend's clock behind ours, in milliseconds.",
+            "default": 4000,
+            "minimum": 0
+          },
+          "max_session_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum duration a session on this machine may request, in milliseconds.",
+            "default": 7200000,
+            "minimum": 0
+          },
+          "queue_size": {
+            "type": "integer",
+            "description": "Maximum number of tasks submitted to the backend at once.",
+            "default": 4,
+            "minimum": 0
+          }
+        }
+      },
+      "NotifierInfo": {
+        "type": "object",
+        "description": "A registered notifier as listed by the API (without its token).",
+        "required": [
+          "name",
+          "url",
+          "has_token"
+        ],
+        "properties": {
+          "has_token": {
+            "type": "boolean",
+            "description": "Whether event payloads include a token."
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
             "type": "string"
           }
         }
@@ -1180,6 +1804,12 @@
             "description": "Time budget, in milliseconds. Omit to leave unchanged."
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "admin_token": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }

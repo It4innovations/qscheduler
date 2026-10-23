@@ -28,6 +28,18 @@ pub enum RunnerError {
     TaskFail(String),
     #[error("Machine '{0}' already exists")]
     MachineAlreadyExists(String),
+    #[error("Invalid machine configuration: {0}")]
+    InvalidMachineConfig(String),
+    #[error("Machine '{0}' is being reconfigured or removed")]
+    MachineUnavailable(String),
+    #[error(
+        "Machine '{name}' has {tasks} task(s) and {sessions} session(s); remove it with force to delete them as well"
+    )]
+    MachineHasDependents {
+        name: String,
+        tasks: i64,
+        sessions: i64,
+    },
     #[error("Project '{0}' already exists")]
     ProjectAlreadyExists(String),
     #[error("Project '{0}' not found")]
@@ -58,6 +70,10 @@ pub enum RunnerError {
     NotifierAlreadyExists(String),
     #[error("Invalid notifier name: {0}")]
     InvalidNotifierName(String),
+    #[error("Invalid notifier URL {0:?}: must start with http:// or https://")]
+    InvalidNotifierUrl(String),
+    #[error("Notifier '{0}' not found")]
+    NotifierNotFound(String),
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 

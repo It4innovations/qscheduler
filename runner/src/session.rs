@@ -228,4 +228,9 @@ impl SessionMap {
         let session_id = session.id;
         self.0.insert(session_id, session);
     }
+
+    /// Removes every entry for which `keep` returns `false`.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Session) -> bool) {
+        self.0.retain(|_, v| keep(v));
+    }
 }
