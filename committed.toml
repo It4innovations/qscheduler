@@ -1,0 +1,6 @@
+# Commit message check (crate-ci/committed); Conventional Commits drive releases (release-plz.toml).
+style = "conventional"
+allowed_types = ["feat", "fix", "perf", "refactor", "docs", "test", "ci", "build", "chore", "style"]
+subject_length = 72
+subject_capitalized = false
+imperative_subject = false

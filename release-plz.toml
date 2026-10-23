@@ -1,0 +1,58 @@
+# Release automation: https://release-plz.dev/docs/config
+# The whole workspace is released as one product with one version, tag `vX.Y.Z` and
+# CHANGELOG.md; the version bump comes from Conventional Commits. Nothing goes to crates.io.
+
+[workspace]
+git_only = true            # the previous release is the latest `vX.Y.Z` tag, not a registry
+release_always = false     # release only when the release PR is merged
+semver_check = false       # the HTTP API is checked by scripts/check_api_version.py instead
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+pr_name = "chore: release v{{ version }}"
+pr_labels = ["release"]
+
+[[package]]
+name = "qscheduler"
+version_group = "qscheduler"
+changelog_path = "CHANGELOG.md"
+changelog_update = true
+changelog_include = ["runner", "service"]
+git_tag_enable = true
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "runner"
+version_group = "qscheduler"
+
+[[package]]
+name = "service"
+version_group = "qscheduler"
+
+[changelog]
+header = "# Changelog\n"
+# Groups are ordered by the hidden `<!-- n -->` prefix.
+body = """
+## v{{ version }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.breaking %}**Breaking:** {% endif %}\
+{% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+{{ commit.message | upper_first }}
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+protect_breaking_commits = true
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^(perf|refactor)", group = "<!-- 2 -->Changed" },
+  { message = "^(chore|ci|docs|style|test|build)", skip = true },
+  { message = ".*", group = "<!-- 2 -->Changed" },
+]

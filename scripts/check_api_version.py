@@ -11,7 +11,11 @@ oasdiff (https://github.com/oasdiff/oasdiff):
 While the version still equals the tag (feature branches, main between releases), the changes
 are only reported; the bump is enforced once release-plz has bumped the version (release PR).
 
+The current version is the workspace version in `Cargo.toml` (the `openapi.json` snapshot has no
+`info.version`, so release-plz bumping only `Cargo.toml` keeps the snapshot current).
+
 Usage: scripts/check_api_version.py [--base-spec FILE --base-version X.Y.Z] [--spec FILE]
+                                    [--version X.Y.Z]
 """
 
 import argparse
@@ -117,21 +121,19 @@ def main():
         "--base-spec", type=Path, help="baseline spec (default: from tag)"
     )
     parser.add_argument("--base-version", help="baseline version (default: from tag)")
+    parser.add_argument(
+        "--version", help="current version (default: workspace version in Cargo.toml)"
+    )
     parser.add_argument("--oasdiff", default=os.environ.get("OASDIFF", "oasdiff"))
     args = parser.parse_args()
 
-    spec_path = args.spec or ROOT / "openapi.json"
-    spec_text = spec_path.read_text()
-    version = parse_version(json.loads(spec_text)["info"]["version"])
-    if args.spec is None:
+    spec_text = (args.spec or ROOT / "openapi.json").read_text()
+    # The openapi.json snapshot has no `info.version`; Cargo.toml is the version source
+    if args.version is not None:
+        version = parse_version(args.version)
+    else:
         cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
-        cargo_version = parse_version(cargo["workspace"]["package"]["version"])
-        if version != cargo_version:
-            sys.exit(
-                f"Error: openapi.json has version {fmt(version)}, Cargo.toml has "
-                f"{fmt(cargo_version)}; regenerate the snapshot "
-                "(UPDATE_OPENAPI=1 cargo test -p service --test openapi_snapshot)"
-            )
+        version = parse_version(cargo["workspace"]["package"]["version"])
 
     if (args.base_spec is None) != (args.base_version is None):
         sys.exit("Error: --base-spec and --base-version must be given together")
