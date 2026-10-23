@@ -1,6 +1,6 @@
 use crate::backend::{BackendFuture, ByteStream, FromBackendMessage, create_backend};
 use crate::callback::{NotifierId, NotifierMap};
-use crate::config::RunnerConfiguration;
+use crate::config::{MachineConfiguration, RunnerConfiguration};
 use crate::db::close_dead_session;
 use crate::error::RunnerError;
 use crate::launcher::start_launcher;
@@ -25,6 +25,7 @@ pub(crate) struct CoreSplit<'a> {
     pub task_map: &'a TaskMap,
     pub session_map: &'a SessionMap,
     pub project_map: &'a ProjectMap,
+    pub notifiers: &'a NotifierMap,
     pub core_ref: &'a CoreRef,
 }
 
@@ -34,7 +35,14 @@ pub(crate) struct CoreSplitMut<'a> {
     pub task_map: &'a mut TaskMap,
     pub session_map: &'a mut SessionMap,
     pub project_map: &'a mut ProjectMap,
+    pub notifiers: &'a mut NotifierMap,
     pub core_ref: &'a CoreRef,
+}
+
+/// A running launcher of one machine.
+struct LauncherHandle {
+    stop: watch::Sender<bool>,
+    join: JoinHandle<()>,
 }
 
 pub struct Core {
@@ -42,14 +50,14 @@ pub struct Core {
     task_map: TaskMap,
     session_map: SessionMap,
     project_map: ProjectMap,
-    /// Fixed after startup, shared with the launchers.
-    notifiers: Arc<NotifierMap>,
+    notifiers: NotifierMap,
     pool: PgPool,
     core_ref: Option<CoreRef>,
-    shutdown_sender: watch::Sender<bool>,
-    launcher_handles: Vec<JoinHandle<()>>,
+    launchers: HashMap<MachineId, LauncherHandle>,
     /// Serializes suspend/resume, which update the DB and then the in-memory state.
     suspension_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes adding, updating and removing machines and notifiers.
+    admin_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub type CoreRef = Arc<Mutex<Core>>;
@@ -59,20 +67,8 @@ impl Core {
         let mut machine_map: MachineMap = Default::default();
         let mut backend_receivers = HashMap::with_capacity(config.machines.len());
         for (machine_id, m) in config.machines {
-            let (backend, backend_receiver) = create_backend(&m.backend);
-            machine_map.insert(Machine::new(
-                machine_id,
-                MachineConfig {
-                    name: m.name,
-                    queue_size: m.queue_size,
-                    limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
-                    max_session_time: Duration::from_millis(m.max_session_time_ms),
-                    default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
-                    max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
-                    backend: m.backend,
-                },
-                backend,
-            ));
+            let (machine, backend_receiver) = create_machine(machine_id, m);
+            machine_map.insert(machine);
             backend_receivers.insert(machine_id, backend_receiver);
         }
         let core_ref = Arc::new(Mutex::new(Core {
@@ -80,20 +76,23 @@ impl Core {
             task_map: Default::default(),
             session_map: Default::default(),
             project_map: Default::default(),
-            notifiers: Arc::new(NotifierMap::start(config.notifiers)),
+            notifiers: NotifierMap::start(config.notifiers),
             pool,
             core_ref: None,
-            shutdown_sender: watch::Sender::new(false),
-            launcher_handles: Vec::new(),
+            launchers: HashMap::new(),
             suspension_lock: Default::default(),
+            admin_lock: Default::default(),
         }));
         core_ref.lock().unwrap().core_ref = Some(core_ref.clone());
 
-        let resume_tasks = Core::restore(&core_ref).await?;
+        let mut resume_tasks = Core::restore(&core_ref, None).await?;
 
         {
             let mut core = core_ref.lock().unwrap();
-            core.start_launchers(backend_receivers, resume_tasks);
+            for (machine_id, backend_receiver) in backend_receivers {
+                let resume_tasks = resume_tasks.remove(&machine_id).unwrap_or_default();
+                core.start_launcher(machine_id, backend_receiver, resume_tasks);
+            }
         }
 
         Ok(core_ref)
@@ -108,26 +107,35 @@ impl Core {
     /// - re-queues sessions that were waiting but never opened,
     /// - closes any session that was open and cancels all of its tasks.
     ///
-    /// Must run before [`Core::start_launchers`] so queues are populated first.
-    async fn restore(core_ref: &CoreRef) -> crate::Result<HashMap<MachineId, Vec<ResumeTask>>> {
+    /// With `only` set, just the state of that machine is restored (when its launcher is
+    /// restarted after a reconfiguration); projects already in memory are kept as they are.
+    ///
+    /// Must run before [`Core::start_launcher`] so queues are populated first.
+    pub(crate) async fn restore(
+        core_ref: &CoreRef,
+        only: Option<MachineId>,
+    ) -> crate::Result<HashMap<MachineId, Vec<ResumeTask>>> {
         let pool = core_ref.lock().unwrap().pool().clone();
-        // An id unknown to the loaded notifiers (one added after startup) needs no filtering:
-        // `NotifierMap` treats it like no notifier.
+        let wanted = |raw_machine_id: i32| only.is_none_or(|m| m.as_i32() == raw_machine_id);
+        // An id unknown to the loaded notifiers (one CLI-added after startup) needs no
+        // filtering: `NotifierMap` treats it like no notifier.
         let restore_notifier = |raw: Option<i32>| raw.map(NotifierId::from_db);
-        let tasks = match db::load_active_tasks(&pool).await {
+        let mut tasks = match db::load_active_tasks(&pool).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(error = %e, "failed to load tasks for restoration");
                 return Err(RunnerError::GenericError("Restoration failed".into()));
             }
         };
-        let sessions = match db::load_active_sessions(&pool, &tasks).await {
+        let mut sessions = match db::load_active_sessions(&pool, &tasks).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "failed to load sessions for restoration");
                 return Err(RunnerError::GenericError("Restoration failed".into()));
             }
         };
+        tasks.retain(|t| wanted(t.machine_id));
+        sessions.retain(|s| wanted(s.machine_id));
         // Load only the projects actually needed: tasks parented directly by a
         // project (not via a session) touch project_map during exec-time accounting,
         // and every session carries a project_id that's read once it opens/closes
@@ -174,13 +182,20 @@ impl Core {
                 ..
             } = core.split_mut();
 
+            // A project already in memory carries in-flight time and checkpoints of other
+            // machines' work that its DB row may not reflect yet.
             for project in projects {
-                project_map.add_project(project);
+                if project_map.find_project(project.id).is_none() {
+                    project_map.add_project(project);
+                }
             }
 
             // Only the "rejects new work" part of a suspension is restored: its `cancel` policy
             // was applied to existing work when the suspension started.
             for (machine_id, suspension) in suspensions {
+                if only.is_some_and(|m| m != machine_id) {
+                    continue;
+                }
                 match machine_map.find_machine_mut(machine_id) {
                     Ok(machine) => machine.set_suspension(Some(suspension)),
                     Err(_) => tracing::warn!(
@@ -397,39 +412,78 @@ impl Core {
         &self.notifiers
     }
 
+    pub(crate) fn notifiers_mut(&mut self) -> &mut NotifierMap {
+        &mut self.notifiers
+    }
+
     pub(crate) fn suspension_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.suspension_lock.clone()
     }
 
-    pub(crate) fn start_launchers(
+    pub(crate) fn admin_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.admin_lock.clone()
+    }
+
+    /// Starts the launcher of a machine already in the machine map.
+    pub(crate) fn start_launcher(
         &mut self,
-        mut backend_receivers: HashMap<MachineId, UnboundedReceiver<FromBackendMessage>>,
-        mut resume_tasks: HashMap<MachineId, Vec<ResumeTask>>,
+        machine_id: MachineId,
+        backend_receiver: UnboundedReceiver<FromBackendMessage>,
+        resume_tasks: Vec<ResumeTask>,
     ) {
         let core_ref = self.core_ref.as_ref().unwrap();
-        let mut handles = Vec::new();
-        for m in self.machine_map.iter() {
-            let machine_id = m.id();
-            let backend_receiver = backend_receivers.remove(&machine_id).unwrap();
-            let resume_tasks = resume_tasks.remove(&machine_id).unwrap_or_default();
-            handles.push(start_launcher(
-                core_ref,
-                machine_id,
-                m.backend().clone(),
-                backend_receiver,
-                resume_tasks,
-                self.notifiers.clone(),
-                self.shutdown_sender.subscribe(),
-            ));
-        }
-        self.launcher_handles = handles;
+        let backend = self.machine_map.get_machine(machine_id).backend().clone();
+        let (stop, stop_receiver) = watch::channel(false);
+        let join = start_launcher(
+            core_ref,
+            machine_id,
+            backend,
+            backend_receiver,
+            resume_tasks,
+            stop_receiver,
+        );
+        self.launchers
+            .insert(machine_id, LauncherHandle { stop, join });
+    }
+
+    /// Signals a machine's launcher to stop and returns its handle so the caller can await it
+    /// (outside the core lock, which the launcher needs to finish).
+    pub(crate) fn stop_launcher(&mut self, machine_id: MachineId) -> Option<JoinHandle<()>> {
+        let handle = self.launchers.remove(&machine_id)?;
+        handle.stop.send_replace(true);
+        Some(handle.join)
     }
 
     /// Signals all launchers to stop and returns their handles so the caller can await them
     /// (outside the core lock, which the launchers need to finish).
     pub(crate) fn begin_shutdown(&mut self) -> Vec<JoinHandle<()>> {
-        self.shutdown_sender.send_replace(true);
-        std::mem::take(&mut self.launcher_handles)
+        let machine_ids: Vec<MachineId> = self.launchers.keys().copied().collect();
+        machine_ids
+            .into_iter()
+            .filter_map(|machine_id| self.stop_launcher(machine_id))
+            .collect()
+    }
+
+    /// Removes a machine (whose launcher is stopped) together with all its tasks and sessions
+    /// from memory. Returns the removed machine.
+    pub(crate) fn purge_machine(&mut self, machine_id: MachineId) -> Option<Machine> {
+        self.task_map
+            .retain(|t| t.config().machine_id != machine_id);
+        self.session_map
+            .retain(|s| s.config.machine_id != machine_id);
+        self.machine_map.remove(machine_id)
+    }
+
+    /// Creates a machine (with its backend) and adds it to the machine map; its launcher is
+    /// not started yet.
+    pub(crate) fn insert_machine(
+        &mut self,
+        machine_id: MachineId,
+        config: MachineConfiguration,
+    ) -> UnboundedReceiver<FromBackendMessage> {
+        let (machine, backend_receiver) = create_machine(machine_id, config);
+        self.machine_map.insert(machine);
+        backend_receiver
     }
 
     #[inline]
@@ -439,6 +493,7 @@ impl Core {
             task_map: &self.task_map,
             session_map: &self.session_map,
             project_map: &self.project_map,
+            notifiers: &self.notifiers,
             core_ref: self.core_ref.as_ref().unwrap(),
         }
     }
@@ -450,6 +505,7 @@ impl Core {
             task_map: &mut self.task_map,
             session_map: &mut self.session_map,
             project_map: &mut self.project_map,
+            notifiers: &mut self.notifiers,
             core_ref: self.core_ref.as_ref().unwrap(),
         }
     }
@@ -639,4 +695,26 @@ impl Core {
         let machine = self.machine_map.get_machine(task.config().machine_id);
         Ok(Arc::clone(machine.backend()).get_task_artifact(backend_id, name))
     }
+}
+
+/// Creates a machine and its backend from a stored configuration.
+fn create_machine(
+    machine_id: MachineId,
+    m: MachineConfiguration,
+) -> (Machine, UnboundedReceiver<FromBackendMessage>) {
+    let (backend, backend_receiver) = create_backend(&m.backend);
+    let machine = Machine::new(
+        machine_id,
+        MachineConfig {
+            name: m.name,
+            queue_size: m.queue_size,
+            limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
+            max_session_time: Duration::from_millis(m.max_session_time_ms),
+            default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
+            max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
+            backend: m.backend,
+        },
+        backend,
+    );
+    (machine, backend_receiver)
 }

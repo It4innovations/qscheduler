@@ -41,6 +41,8 @@ enum MonitorCommand {
         task_id: TaskId,
         ok: bool,
     },
+    /// Stop monitoring; the monitor exits.
+    Stop,
 }
 
 /// Timeout of a single job poll or cancel request, so an unreachable server (e.g. dropped
@@ -141,6 +143,10 @@ impl Backend for IqmBackend {
         {
             error!(%task_id, "monitor channel closed while requesting task cancel");
         }
+    }
+
+    fn stop(&self) {
+        let _ = self.monitor_sender.send(MonitorCommand::Stop);
     }
 
     #[tracing::instrument(skip(self, _payload))]
@@ -531,7 +537,7 @@ async fn iqm_main(
                             task.cancel = if ok { CancelState::Sent } else { CancelState::Pending };
                         }
                     }
-                    None => return,
+                    Some(MonitorCommand::Stop) | None => return,
                 }
             }
             _ = interval.tick(), if !monitored_tasks.is_empty() => {

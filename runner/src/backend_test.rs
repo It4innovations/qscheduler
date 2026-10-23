@@ -238,6 +238,8 @@ impl Backend for TestBackend {
         };
         Box::pin(std::future::ready(result.map(string_to_stream)))
     }
+
+    fn stop(&self) {}
 }
 
 fn string_to_stream(s: String) -> ByteStream {

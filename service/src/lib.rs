@@ -1,5 +1,6 @@
 pub mod config;
 mod machines;
+mod notifiers;
 mod projects;
 mod sessions;
 mod tasks;
@@ -7,7 +8,12 @@ mod tasks;
 use std::sync::Arc;
 
 use crate::config::ServiceConfiguration;
-use axum::{Json, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json,
+    extract::{FromRequestParts, State},
+    http::{StatusCode, header::AUTHORIZATION, request::Parts},
+    routing::get,
+};
 use runner::config::RunnerConfiguration;
 use runner::core::{Core, CoreRef};
 use runner::reactor::check_db_health;
@@ -20,6 +26,61 @@ use utoipa_axum::routes;
 struct AppState {
     version: &'static str,
     core_ref: CoreRef,
+    /// Bearer token required by the admin endpoints; `None` disables them.
+    admin_token: Option<String>,
+}
+
+/// Extractor guarding the admin endpoints (machine and notifier management): requires an
+/// `Authorization: Bearer <ADMIN_TOKEN>` header.
+pub(crate) struct AdminAuth;
+
+impl FromRequestParts<Arc<AppState>> for AdminAuth {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(expected) = &state.admin_token else {
+            return Err(client_error(
+                StatusCode::FORBIDDEN,
+                "admin API is disabled; set ADMIN_TOKEN to enable it",
+            ));
+        };
+        let provided = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => Ok(AdminAuth),
+            _ => Err(client_warn(
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid admin token",
+            )),
+        }
+    }
+}
+
+/// Compares two byte strings in time independent of where they differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Registers the `admin_token` bearer security scheme used by the admin endpoints.
+struct AdminSecurity;
+
+impl utoipa::Modify for AdminSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "admin_token",
+                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+            );
+    }
 }
 
 /// Returns the service version string.
@@ -84,7 +145,7 @@ pub(crate) fn client_warn(status: StatusCode, e: impl std::fmt::Display) -> (Sta
 }
 
 #[derive(OpenApi)]
-#[openapi(info(
+#[openapi(modifiers(&AdminSecurity), info(
     title = "qscheduler",
     description = "Scheduling service dispatching tasks to quantum computing backends.",
     // Explicit `env!` so a version bump always recompiles the spec (utoipa's implicit
@@ -115,6 +176,20 @@ fn api_router() -> OpenApiRouter<Arc<AppState>> {
             machines::resume_machine_handler
         ))
         .routes(routes!(machines::list_machine_suspensions_handler))
+        .routes(routes!(
+            machines::list_machines_handler,
+            machines::create_machine_handler
+        ))
+        .routes(routes!(
+            machines::get_machine_handler,
+            machines::update_machine_handler,
+            machines::remove_machine_handler
+        ))
+        .routes(routes!(
+            notifiers::list_notifiers_handler,
+            notifiers::create_notifier_handler
+        ))
+        .routes(routes!(notifiers::remove_notifier_handler))
         .routes(routes!(projects::create_project_handler))
         .routes(routes!(projects::list_projects_handler))
         .routes(routes!(projects::get_project_handler))
@@ -146,9 +221,16 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         notifiers,
     };
     let core_ref = Core::new(runner_conf, pool).await?;
+    let admin_token = std::env::var("ADMIN_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+    if admin_token.is_none() {
+        tracing::info!("ADMIN_TOKEN not set, machine and notifier management API disabled");
+    }
     let state = Arc::new(AppState {
         version,
         core_ref: core_ref.clone(),
+        admin_token,
     });
 
     let (router, api) = api_router().with_state(state).split_for_parts();

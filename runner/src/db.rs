@@ -112,17 +112,7 @@ pub async fn remove_machine(
         return Ok(RemoveMachineOutcome::NotFound);
     };
     let machine_id: i32 = row.get("id");
-    let counts = sqlx::query(
-        "SELECT \
-           (SELECT COUNT(*) FROM tasks WHERE machine_id = $1 \
-              OR session_id IN (SELECT id FROM sessions WHERE machine_id = $1)) AS tasks, \
-           (SELECT COUNT(*) FROM sessions WHERE machine_id = $1) AS sessions",
-    )
-    .bind(machine_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let tasks: i64 = counts.get("tasks");
-    let sessions: i64 = counts.get("sessions");
+    let (tasks, sessions) = count_dependents(&mut *tx, machine_id).await?;
     if (tasks > 0 || sessions > 0) && !force {
         return Ok(RemoveMachineOutcome::HasDependents { tasks, sessions });
     }
@@ -143,6 +133,30 @@ pub async fn remove_machine(
         .await?;
     tx.commit().await?;
     Ok(RemoveMachineOutcome::Removed { tasks, sessions })
+}
+
+const COUNT_DEPENDENTS_SQL: &str = "SELECT \
+       (SELECT COUNT(*) FROM tasks WHERE machine_id = $1 \
+          OR session_id IN (SELECT id FROM sessions WHERE machine_id = $1)) AS tasks, \
+       (SELECT COUNT(*) FROM sessions WHERE machine_id = $1) AS sessions";
+
+async fn count_dependents(
+    executor: impl sqlx::PgExecutor<'_>,
+    machine_id: i32,
+) -> sqlx::Result<(i64, i64)> {
+    let counts = sqlx::query(COUNT_DEPENDENTS_SQL)
+        .bind(machine_id)
+        .fetch_one(executor)
+        .await?;
+    Ok((counts.get("tasks"), counts.get("sessions")))
+}
+
+/// Number of tasks and sessions (in any state) of a machine, as `(tasks, sessions)`.
+pub async fn count_machine_dependents(
+    pool: &PgPool,
+    machine_id: MachineId,
+) -> crate::Result<(i64, i64)> {
+    Ok(count_dependents(pool, machine_id.as_i32()).await?)
 }
 
 /// A non-terminal task loaded from the database during startup restoration.

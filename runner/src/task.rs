@@ -388,4 +388,13 @@ impl TaskMap {
         let task_id = task.id();
         self.0.insert(task_id, task);
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Task> {
+        self.0.values()
+    }
+
+    /// Removes every entry for which `keep` returns `false`.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Task) -> bool) {
+        self.0.retain(|_, v| keep(v));
+    }
 }

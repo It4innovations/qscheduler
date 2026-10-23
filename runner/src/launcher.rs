@@ -27,7 +27,6 @@ pub fn start_launcher(
     backend: Arc<dyn Backend>,
     backend_receiver: UnboundedReceiver<FromBackendMessage>,
     restore_tasks: Vec<ResumeTask>,
-    notifiers: Arc<NotifierMap>,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let core_ref = core_ref.clone();
@@ -37,7 +36,6 @@ pub fn start_launcher(
             machine_id,
             backend,
             backend_receiver,
-            notifiers,
             restore_tasks,
             shutdown,
         )
@@ -205,7 +203,6 @@ fn pick_task(
     machine_id: MachineId,
     running_session: &mut Option<RunningSession>,
     no_assignments: bool,
-    notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) -> Option<(TaskId, Bytes)> {
     let CoreSplitMut {
@@ -213,6 +210,7 @@ fn pick_task(
         task_map,
         session_map,
         project_map,
+        notifiers,
         ..
     } = core.split_mut();
     let machine = machine_map.get_machine_mut(machine_id);
@@ -508,7 +506,6 @@ async fn launcher_main(
     machine_id: MachineId,
     backend: Arc<dyn Backend>,
     mut backend_receiver: UnboundedReceiver<FromBackendMessage>,
-    notifiers: Arc<NotifierMap>,
     resume_tasks: Vec<ResumeTask>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -606,13 +603,25 @@ async fn launcher_main(
                 session_map,
                 machine_map,
                 project_map,
+                notifiers,
                 ..
             } = core.split_mut();
+            let notifiers = &*notifiers;
             match event {
                 LauncherEvent::Notified => { /* Do nothing */ }
                 LauncherEvent::Shutdown => {
                     debug!(%machine_id, "Launcher shutting down");
                     shutting_down = true;
+                    // Drop the in-flight estimates of running tasks: when only this launcher
+                    // stops (machine reconfiguration), the projects stay in memory and the
+                    // restored tasks are charged again from scratch.
+                    for rt in running_tasks.values() {
+                        if let Some(project_id) = rt.project_id
+                            && let Some(project) = project_map.find_project_mut(project_id)
+                        {
+                            project.settle_in_flight(rt.charged, Duration::ZERO);
+                        }
+                    }
                     // Checkpoint the running session so its time since the last periodic
                     // checkpoint is not lost; restore closes it at this checkpoint.
                     if let Some(s) = running_session.as_mut() {
@@ -656,7 +665,7 @@ async fn launcher_main(
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
-                                &notifiers,
+                                notifiers,
                                 &mut db_updates,
                             );
                             running_session = None;
@@ -764,7 +773,7 @@ async fn launcher_main(
                             TaskState::Finished { completed } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 notify_task(
-                                    &notifiers,
+                                    notifiers,
                                     task_map.find_task(task_id).unwrap(),
                                     &state,
                                     &machine_map.get_machine(machine_id).config().name,
@@ -779,7 +788,7 @@ async fn launcher_main(
                             TaskState::Failed { completed, error } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
                                 notify_task(
-                                    &notifiers,
+                                    notifiers,
                                     task_map.find_task(task_id).unwrap(),
                                     &state,
                                     &machine_map.get_machine(machine_id).config().name,
@@ -798,7 +807,7 @@ async fn launcher_main(
                                     update_state = false;
                                 } else {
                                     notify_task(
-                                        &notifiers,
+                                        notifiers,
                                         task_map.find_task(task_id).unwrap(),
                                         &state,
                                         &machine_map.get_machine(machine_id).config().name,
@@ -850,7 +859,7 @@ async fn launcher_main(
                         machine_id,
                         &backend,
                         &mut submitted_tasks,
-                        &notifiers,
+                        notifiers,
                         &mut db_updates,
                     );
                 } else {
@@ -862,7 +871,7 @@ async fn launcher_main(
                             session_map,
                             machine,
                             project_map,
-                            &notifiers,
+                            notifiers,
                             &mut db_updates,
                         );
                     }
@@ -880,7 +889,7 @@ async fn launcher_main(
                         let task = task_map.get_task_mut(task_id);
                         task.set_state(TaskState::simple_cancelled());
                         notify_task(
-                            &notifiers,
+                            notifiers,
                             task,
                             task.state(),
                             &machine.config().name,
@@ -903,7 +912,7 @@ async fn launcher_main(
                     task_map,
                     project_map,
                     machine_name: machine_map.get_machine(machine_id).config().name.clone(),
-                    notifiers: &notifiers,
+                    notifiers,
                     db_updates: &mut db_updates,
                     error: &error,
                 };
@@ -921,7 +930,7 @@ async fn launcher_main(
                                 session_map,
                                 machine_map.get_machine(machine_id),
                                 ctx.project_map,
-                                &notifiers,
+                                notifiers,
                                 ctx.db_updates,
                             );
                         }
@@ -966,7 +975,7 @@ async fn launcher_main(
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
-                                &notifiers,
+                                notifiers,
                                 ctx.db_updates,
                             );
                         }
@@ -995,7 +1004,6 @@ async fn launcher_main(
                     machine_id,
                     &mut running_session,
                     submitted_tasks.is_empty(),
-                    &notifiers,
                     &mut db_updates,
                 )
             {
@@ -1015,7 +1023,7 @@ async fn launcher_main(
                     let completed = *state.completed().unwrap();
                     let split = core.split();
                     notify_task(
-                        &notifiers,
+                        split.notifiers,
                         split.task_map.find_task(task_id).unwrap(),
                         &state,
                         &split.machine_map.get_machine(machine_id).config().name,

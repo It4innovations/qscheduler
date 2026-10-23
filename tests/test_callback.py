@@ -353,3 +353,56 @@ def test_get_session_notify(qscheduler_test, callback_server):
     assert qs.remove_notifier(NOTIFIER).returncode == 0
     qs.restart()
     assert "notify" not in qs.get_session(s1)
+
+
+def test_notifier_api(qscheduler_test, callback_server, db_connect):
+    qs = qscheduler_test
+    qs.start()
+    url = callback_url(callback_server)
+
+    assert qs.api_list_notifiers() == []
+    info = qs.api_add_notifier(NOTIFIER, url, token=NOTIFY_TOKEN).json()
+    assert info == {"name": NOTIFIER, "url": url, "has_token": True}
+    qs.api_add_notifier("plain", url)
+    assert qs.api_list_notifiers() == [
+        info,
+        {"name": "plain", "url": url, "has_token": False},
+    ]
+    assert NOTIFY_TOKEN not in json.dumps(qs.api_list_notifiers())
+
+    qs.api_add_notifier(NOTIFIER, url, expect_status=409)
+    qs.api_add_notifier("", url, expect_status=422)
+    qs.api_add_notifier("x" * 513, url, expect_status=422)
+    qs.api_add_notifier("bad-url", "ftp://example.com", expect_status=422)
+
+    # Usable right away, without a restart
+    task_id = qs.submit(TT(), notify=NOTIFIER)
+    qs.wait_for_finished(task_id)
+    wait_for_callbacks(callback_server)
+    assert callback_server.callbacks[0]["task"]["id"] == task_id
+    assert callback_server.callbacks[0]["token"] == NOTIFY_TOKEN
+
+    qs.api_remove_notifier(NOTIFIER)
+    qs.api_remove_notifier(NOTIFIER, expect_status=404)
+    qs.submit(TT(), notify=NOTIFIER, expect_error=422)
+    assert "notify" not in qs.get_task(task_id)
+    with db_connect.cursor() as cur:
+        cur.execute("SELECT name FROM notifiers")
+        assert [row[0] for row in cur.fetchall()] == ["plain"]
+
+    qs.restart()
+    assert [n["name"] for n in qs.api_list_notifiers()] == ["plain"]
+
+
+def test_notifier_api_remove_stops_running_task_callbacks(
+    qscheduler_test, callback_server
+):
+    qs = qscheduler_test
+    qs.start()
+    qs.api_add_notifier(NOTIFIER, callback_url(callback_server))
+    task_id = qs.submit(TT().compute_time(1), notify=NOTIFIER)
+    qs.wait_for_running(task_id)
+    qs.api_remove_notifier(NOTIFIER)
+    qs.wait_for_finished(task_id)
+    time.sleep(0.3)
+    assert callback_server.callbacks == []

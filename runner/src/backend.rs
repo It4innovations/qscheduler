@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BackendConfig {
     Iqm(IqmBackendConfig),
@@ -62,6 +62,7 @@ pub(crate) trait Backend: Send + Sync {
         backend_id: &str,
         name: &str,
     ) -> BackendFuture<ByteStream>;
+    fn stop(&self);
 }
 
 pub(crate) enum FromBackendMessage {
