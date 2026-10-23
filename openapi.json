@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "qscheduler",
-    "description": "Scheduling service dispatching tasks to quantum computing backends.",
+    "description": "Scheduling service dispatching tasks to quantum computing backends.\n\nThe API refers to machines, projects and notifiers by **name**. Request and response bodies are\nJSON unless an endpoint says otherwise.\n\n## Concepts\n\n- **Machine** — a named execution target backed by a backend (`iqm` or the in-process `test`\n  backend). Each machine has its own task queue and hands at most `queue_size` tasks to its\n  backend at once.\n- **Project** — a named, time-limited budget. Work charged to a project is rejected with\n  `402` once the budget is exhausted or the project is deactivated.\n- **Session** — an exclusive, time-limited reservation of one machine for one project. While a\n  session is open, only its tasks run on the machine.\n- **Task** — a payload forwarded to a machine's backend. A task belongs to exactly one of a\n  project (it is charged its execution time) or an open session (the session's open time is\n  charged instead).\n- **Suspension** — a machine taken out of service with a message; new work for it is rejected\n  with `409`.\n- **Notifier** — a named HTTP callback target that tasks and sessions can opt into with\n  `notify`.\n\nThe database is the source of truth: tasks and sessions survive a service restart, and tasks\nstill running on a backend are re-attached.\n\n## Admin API\n\nMachines and notifiers are managed through the admin endpoints (`/machines`,\n`/machine/{machine}` and `/notifiers`). Changes apply to the running service at once. These\nendpoints require the header `Authorization: Bearer <token>`, where the token is the value of\nthe `ADMIN_TOKEN` environment variable of the service. When `ADMIN_TOKEN` is unset or empty,\nthe admin endpoints are disabled and return `403`; a missing or wrong token gets `401`. Backend\nand notifier tokens are accepted but never returned.\n\n## Notifications\n\nA task or session with `notify` makes the service `POST` a JSON event to that notifier's URL:\nfor a task once it reaches a terminal state (`finished`, `failed` or `cancelled`), for a\nsession when it opens (`session.state` is `open`) and when it closes (`closed`). A session\ncancelled before it opened only sends the `closed` event. A failed delivery is retried with\nexponential backoff, up to 16 attempts.\n\nThe event body carries the same object as `GET /tasks/{id}` (`TaskInfo`) or\n`GET /sessions/{id}` (`SessionInfo`), plus the notifier's token when it has one:\n\n```json\n{\"event\": \"task\", \"task\": {\"id\": 42, \"state\": \"finished\", \"...\": \"...\"}, \"token\": \"secret\"}\n{\"event\": \"session\", \"session\": {\"id\": 7, \"state\": \"open\", \"...\": \"...\"}, \"token\": \"secret\"}\n```\n\n## Versioning\n\n`info.version` is the service version and follows Semantic Versioning: a breaking API change\nbumps the major version (the minor version while on `0.y.z`), any other API change bumps the\nminor version (the patch version on `0.y.z`).\n",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -205,7 +205,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Backend type and version, e.g. `{\"type\": \"IQM\", \"version\": {\"server_version\": \"...\"}}`",
+            "description": "Backend type and version, e.g. `{\"type\": \"iqm\", \"version\": {\"qccsw_version\": \"...\", \"server_version\": \"...\", \"station_control_version\": \"...\"}}` or `{\"type\": \"test\", \"version\": \"1.0\"}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -218,7 +218,7 @@
             "description": "Machine not found"
           },
           "500": {
-            "description": "Backend error"
+            "description": "Backend error, including an IQM `/about` response missing any of the version fields"
           }
         }
       }
@@ -231,7 +231,7 @@
           {
             "name": "machine",
             "in": "path",
-            "description": "Machine ID",
+            "description": "Machine name",
             "required": true,
             "schema": {
               "type": "string"
@@ -266,7 +266,7 @@
           {
             "name": "machine",
             "in": "path",
-            "description": "Machine ID",
+            "description": "Machine name",
             "required": true,
             "schema": {
               "type": "string"
@@ -313,7 +313,8 @@
     },
     "/machine/{machine}/suspension": {
       "post": {
-        "summary": "Suspend a machine. While suspended, the machine rejects every new task and session\n(including tasks submitted into an already open session) with HTTP 409 and the suspension\nmessage. Existing work is handled according to `cancel`.",
+        "summary": "Suspend a machine. While suspended, the machine rejects every new task and session\n(including tasks submitted into an already open session) with HTTP 409 and the suspension\nmessage, e.g. `Machine 'garnet' is suspended: Calibration in progress`. A machine has at\nmost one active suspension, and it stays suspended across service restarts.",
+        "description": "Existing work is handled according to `cancel`, applied once when the suspension starts.\nA task failed by a suspension has the error `Machine suspended: <message>`. A task already\nsubmitted to the backend is failed right away: its cancellation on the backend is requested\n(and retried while the backend is unreachable), and whatever the backend reports about it\nafterwards is ignored. A project task is charged its estimated running time so far, which\nnever exceeds the true time.",
         "operationId": "suspend_machine_handler",
         "parameters": [
           {
@@ -354,7 +355,7 @@
             "description": "Machine is already suspended"
           },
           "422": {
-            "description": "`message` is empty or longer than 512 characters"
+            "description": "`message` is empty or longer than 512 characters, or `cancel` is invalid"
           }
         }
       },
@@ -635,6 +636,7 @@
       },
       "post": {
         "summary": "Register a project — a named, time-accounted budget that tasks and sessions are charged\nagainst.",
+        "description": "A task submitted with `project` is charged its execution time; a task in a session is not\ncharged itself, the session's open time is. Running work counts against the budget while it\nruns (checked every machine `limit_check_interval_ms`). Once the budget is exhausted, the\nproject's open sessions are closed, and its submitted and queued tasks end `failed` with\nthe error `Project time limit exceeded` (submitted ones are cancelled on the backend).",
         "operationId": "create_project_handler",
         "requestBody": {
           "content": {
@@ -730,7 +732,7 @@
     },
     "/sessions": {
       "post": {
-        "summary": "Create a session — a time-bounded, exclusive reservation of one machine for one project.\nTasks in the session are cancelled when the session closes.",
+        "summary": "Create a session — a time-bounded, exclusive reservation of one machine for one project.\nThe session waits in the machine's queue until it opens; while it is open, tasks are\nsubmitted into it with `POST /tasks?session_id=…`. The project is charged the time the\nsession is open. Tasks in the session are cancelled when the session closes.",
         "operationId": "create_session_handler",
         "parameters": [
           {
@@ -754,7 +756,7 @@
           {
             "name": "time_limit_ms",
             "in": "query",
-            "description": "Session lifetime in milliseconds.",
+            "description": "Session lifetime in milliseconds, at most the machine's `max_session_time_ms`.",
             "required": true,
             "schema": {
               "type": "integer",
@@ -795,14 +797,14 @@
             "description": "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."
           },
           "422": {
-            "description": "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`."
+            "description": "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `max_session_time_ms`."
           }
         }
       }
     },
     "/sessions/{id}": {
       "get": {
-        "summary": "Get a session's current info (state, timings, and its machine/project).",
+        "summary": "Get a session's current info (state, timings, and its machine/project). Closed sessions\nremain available after a service restart.",
         "operationId": "get_session",
         "parameters": [
           {
@@ -908,7 +910,7 @@
           {
             "name": "time_limit_ms",
             "in": "query",
-            "description": "Maximum execution time in milliseconds, counted from when the backend starts running\nthe task. When exceeded, the task is cancelled and ends `failed`. Defaults to the\nmachine's default task time limit.",
+            "description": "Maximum execution time in milliseconds, counted from when the backend starts running\nthe task (queue time does not count). When exceeded, the task is cancelled on the backend\nand ends `failed` with the error `Task time limit exceeded`. The limit is checked every\nmachine `limit_check_interval_ms` against a running-time estimate that never exceeds the\ntrue time (see the machine's `max_clock_skew_ms`), so a task is never stopped early but\nmay overrun slightly. Defaults to the machine's `default_task_time_limit_ms`.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -927,7 +929,7 @@
           }
         ],
         "requestBody": {
-          "description": "Raw task payload forwarded to the backend.",
+          "description": "Raw task payload forwarded to the backend. For the `iqm` backend, a JSON circuit description accepted by the IQM API. For the `test` backend, a JSON object `{\"outcome\": {\"type\": \"Ok\"}, \"result\": \"42\", \"artifacts\": {\"log\": \"...\"}, \"submit_time\": 0.5, \"compute_time\": 1.5}`: `outcome` (required) is `{\"type\": \"Ok\"}` or `{\"type\": \"Fail\", \"message\": \"...\"}`; `result` (default `\"\"`) is what `GET /tasks/{id}/result` returns; `artifacts` (default `{}`) maps names to the values `GET /tasks/{id}/artifacts/{name}` returns; `submit_time` and `compute_time` (default 0) are seconds to wait before acknowledging the submission and before reporting the result.",
           "content": {
             "application/octet-stream": {
               "schema": {
@@ -969,7 +971,7 @@
     },
     "/tasks/{id}": {
       "get": {
-        "summary": "Get a task's current info (state, timings, and its session/project/machine/user).",
+        "summary": "Get a task's current info (state, timings, and its session/project/machine/user). Finished\ntasks remain available after a service restart.",
         "operationId": "get_task",
         "parameters": [
           {
@@ -1067,7 +1069,7 @@
             }
           },
           "404": {
-            "description": "Task not found"
+            "description": "Task not found, or the backend has no artifact of this name"
           },
           "409": {
             "description": "Task has not been submitted to a backend yet"
@@ -1097,7 +1099,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Raw result JSON as returned by the backend",
+            "description": "Raw result as returned by the backend (plain text): the full job-status JSON document for `iqm`, the payload's `result` string for `test`",
             "content": {
               "text/plain": {
                 "schema": {
@@ -1149,10 +1151,11 @@
         "properties": {
           "type": {
             "type": "string",
-            "description": "Backend kind, e.g. `IQM` or `test`."
+            "description": "Backend kind: `iqm` or `test`."
           },
           "version": {
-            "$ref": "#/components/schemas/BackendVersion"
+            "$ref": "#/components/schemas/BackendVersion",
+            "description": "For `iqm`, the version fields reported by the IQM server's `/about` endpoint; for\n`test`, a plain string."
           }
         }
       },
@@ -1160,7 +1163,7 @@
         "oneOf": [
           {
             "type": "object",
-            "description": "An IQM server.",
+            "description": "An IQM server. Task payloads must be JSON circuit descriptions accepted by the IQM API\n(`POST /api/v1/jobs/{machine_name}/circuit`). A job is never given up on while the server\nis unreachable or returns errors: its polls back off exponentially (from\n`poll_interval_ms` up to 60 s) and return to the normal interval after the first\nsuccessful poll, and a cancel that cannot be delivered is retried on later polls. Each\nrequest to the server times out after 10 s.",
             "required": [
               "url",
               "token",
@@ -1171,7 +1174,7 @@
             "properties": {
               "machine_name": {
                 "type": "string",
-                "description": "Machine name on the IQM server."
+                "description": "Name of the target quantum device on the IQM server."
               },
               "poll_interval_ms": {
                 "type": "integer",
@@ -1181,7 +1184,7 @@
               },
               "token": {
                 "type": "string",
-                "description": "Authentication token."
+                "description": "Bearer token for the IQM server."
               },
               "type": {
                 "type": "string",
@@ -1391,6 +1394,7 @@
       },
       "MachineResponse": {
         "type": "object",
+        "description": "A machine's configuration; the fields mean the same as in `MachineSettings`.",
         "required": [
           "name",
           "queue_size",
@@ -1464,21 +1468,21 @@
           "limit_check_interval_ms": {
             "type": "integer",
             "format": "int32",
-            "description": "How often session consumption is stored into the DB and task time limits are checked,\nin milliseconds.",
+            "description": "How often session time is stored into the DB and task and project time limits are\nchecked for running work, in milliseconds. After a crash, up to this much session time\nmay go uncharged.",
             "default": 2000,
             "minimum": 0
           },
           "max_clock_skew_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Maximum assumed lag of the backend's clock behind ours, in milliseconds.",
+            "description": "Maximum assumed lag of the backend's clock behind ours, in milliseconds. Running tasks'\ntime is estimated so that it never exceeds the true time while the skew stays within\nthis bound, so time limits never fail a task early; the estimate may lag the true time\nby up to this amount (plus one poll interval), letting a task overrun its limit or its\nproject's budget slightly.",
             "default": 4000,
             "minimum": 0
           },
           "max_session_time_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Maximum duration a session on this machine may request, in milliseconds.",
+            "description": "Maximum duration a session on this machine may request, in milliseconds. Sessions\nrequesting longer are rejected.",
             "default": 7200000,
             "minimum": 0
           },
@@ -1504,10 +1508,12 @@
             "description": "Whether event payloads include a token."
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "Unique notifier name, selected by tasks and sessions with `notify`."
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "URL events are POSTed to."
           }
         }
       },
@@ -1527,7 +1533,7 @@
           "consumed_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Time consumed so far, in milliseconds."
+            "description": "Confirmed time consumed so far, in milliseconds: finished tasks and checkpointed session\ntime, so it never decreases. Running tasks count toward the limit checks but are only\nincluded here once they finish, with their exact execution time."
           },
           "limit_ms": {
             "type": "integer",
@@ -1570,7 +1576,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Milliseconds of execution time consumed by tasks run during this session, if any."
+            "description": "Milliseconds the session has been open, i.e. the time charged to its project. Updated\nperiodically while the session is open, so it may appear before `closed_at`."
           },
           "id": {
             "type": "integer",
@@ -1605,7 +1611,8 @@
           },
           "time_limit_ms": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Session lifetime in milliseconds."
           }
         }
       },
@@ -1688,7 +1695,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Backend-assigned job ID. Absent until the task is submitted to the backend."
           },
           "created_at": {
             "type": "string",
@@ -1715,7 +1723,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "Absent if the task is still `waiting` or `running`."
+            "description": "When the task reached its final state; absent while it is `waiting` or `running`. For a\ntask that ran on the backend, this is the backend's timestamp (`finished_at - started_at`\nequals `exectime_ms`); for a task ended by the scheduler itself (e.g. cancelled while\nqueued), it is the scheduler's time."
           },
           "id": {
             "type": "integer",
@@ -1755,7 +1763,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the backend started running the task. Absent until then."
+            "description": "When the backend started running the task, on the backend's clock. Absent until then."
           },
           "state": {
             "$ref": "#/components/schemas/TaskStateKind"
@@ -1766,11 +1774,12 @@
               "null"
             ],
             "format": "int64",
-            "description": "Execution time limit in milliseconds, counted from `started_at`. When exceeded, the task\nis cancelled on the backend and ends `failed`.",
+            "description": "Execution time limit in milliseconds, counted from `started_at`. When exceeded, the task\nis cancelled on the backend and ends `failed`. Absent only for tasks created before time\nlimits existed.",
             "minimum": 0
           },
           "user": {
-            "type": "string"
+            "type": "string",
+            "description": "Free-form identifier of the user who submitted the task."
           }
         }
       },

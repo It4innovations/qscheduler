@@ -41,7 +41,7 @@
   written to the database before exit
 - Notifiers: named HTTP callback targets independent of machines, managed with the
   `notifier add <NAME> --url <URL> [--token <TOKEN>]`, `notifier remove <NAME>` and
-  `notifier list` CLI commands (names up to 12 characters; changes take effect after a restart).
+  `notifier list` CLI commands (names up to 512 characters; changes take effect after a restart).
   Removing a notifier turns off notifications for the tasks and sessions that used it.
 - Optional `notify` parameter on `POST /tasks` and `POST /sessions` selecting the notifier for
   the task's completion event or the session's open/close events; an unknown notifier is

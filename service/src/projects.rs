@@ -33,7 +33,9 @@ pub(crate) struct CreateProjectRequest {
 pub(crate) struct ProjectResponse {
     /// Unique project name.
     name: String,
-    /// Time consumed so far, in milliseconds.
+    /// Confirmed time consumed so far, in milliseconds: finished tasks and checkpointed session
+    /// time, so it never decreases. Running tasks count toward the limit checks but are only
+    /// included here once they finish, with their exact execution time.
     consumed_ms: i64,
     /// Time budget, in milliseconds.
     limit_ms: i64,
@@ -77,6 +79,12 @@ pub(crate) async fn get_project_handler(
 
 /// Register a project — a named, time-accounted budget that tasks and sessions are charged
 /// against.
+///
+/// A task submitted with `project` is charged its execution time; a task in a session is not
+/// charged itself, the session's open time is. Running work counts against the budget while it
+/// runs (checked every machine `limit_check_interval_ms`). Once the budget is exhausted, the
+/// project's open sessions are closed, and its submitted and queued tasks end `failed` with
+/// the error `Project time limit exceeded` (submitted ones are cancelled on the backend).
 #[utoipa::path(
     post,
     path = "/projects",

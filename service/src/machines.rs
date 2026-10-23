@@ -29,7 +29,7 @@ pub(crate) fn find_machine(core: &Core, machine: &str) -> Result<MachineId, (Sta
 #[utoipa::path(
     get,
     path = "/machine/{machine}/arch",
-    params(("machine" = String, Path, description = "Machine ID")),
+    params(("machine" = String, Path, description = "Machine name")),
     responses(
         (status = 200, description = "Architecture JSON", body = String),
         (status = 404, description = "Machine not found"),
@@ -51,9 +51,11 @@ pub(crate) async fn get_machine_arch(
 /// Backend identification returned by `GET /machine/{machine}/about`.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct BackendAbout {
-    /// Backend kind, e.g. `IQM` or `test`.
+    /// Backend kind: `iqm` or `test`.
     #[serde(rename = "type")]
     pub backend_type: &'static str,
+    /// For `iqm`, the version fields reported by the IQM server's `/about` endpoint; for
+    /// `test`, a plain string.
     pub version: BackendVersion,
 }
 
@@ -63,9 +65,9 @@ pub struct BackendAbout {
     path = "/machine/{machine}/about",
     params(("machine" = String, Path, description = "Machine name")),
     responses(
-        (status = 200, description = "Backend type and version, e.g. `{\"type\": \"IQM\", \"version\": {\"server_version\": \"...\"}}`", body = BackendAbout),
+        (status = 200, description = "Backend type and version, e.g. `{\"type\": \"iqm\", \"version\": {\"qccsw_version\": \"...\", \"server_version\": \"...\", \"station_control_version\": \"...\"}}` or `{\"type\": \"test\", \"version\": \"1.0\"}`", body = BackendAbout),
         (status = 404, description = "Machine not found"),
-        (status = 500, description = "Backend error")
+        (status = 500, description = "Backend error, including an IQM `/about` response missing any of the version fields")
     )
 )]
 pub(crate) async fn get_machine_about(
@@ -93,7 +95,7 @@ pub(crate) async fn get_machine_about(
     get,
     path = "/machine/{machine}/calibration/{calibration}/{endpoint}",
     params(
-        ("machine" = String, Path, description = "Machine ID"),
+        ("machine" = String, Path, description = "Machine name"),
         ("calibration" = String, Path, description = "Calibration name"),
         ("endpoint" = String, Path, description = "Endpoint")
     ),
@@ -134,7 +136,15 @@ pub(crate) struct SuspendRequest {
 
 /// Suspend a machine. While suspended, the machine rejects every new task and session
 /// (including tasks submitted into an already open session) with HTTP 409 and the suspension
-/// message. Existing work is handled according to `cancel`.
+/// message, e.g. `Machine 'garnet' is suspended: Calibration in progress`. A machine has at
+/// most one active suspension, and it stays suspended across service restarts.
+///
+/// Existing work is handled according to `cancel`, applied once when the suspension starts.
+/// A task failed by a suspension has the error `Machine suspended: <message>`. A task already
+/// submitted to the backend is failed right away: its cancellation on the backend is requested
+/// (and retried while the backend is unreachable), and whatever the backend reports about it
+/// afterwards is ignored. A project task is charged its estimated running time so far, which
+/// never exceeds the true time.
 #[utoipa::path(
     post,
     path = "/machine/{machine}/suspension",
@@ -144,7 +154,7 @@ pub(crate) struct SuspendRequest {
         (status = 201, description = "Machine suspended", body = Suspension),
         (status = 404, description = "Machine not found"),
         (status = 409, description = "Machine is already suspended"),
-        (status = 422, description = "`message` is empty or longer than 512 characters")
+        (status = 422, description = "`message` is empty or longer than 512 characters, or `cancel` is invalid")
     )
 )]
 pub(crate) async fn suspend_machine_handler(
@@ -237,13 +247,18 @@ fn default_max_clock_skew_ms() -> u64 {
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub(crate) enum BackendRequest {
-    /// An IQM server.
+    /// An IQM server. Task payloads must be JSON circuit descriptions accepted by the IQM API
+    /// (`POST /api/v1/jobs/{machine_name}/circuit`). A job is never given up on while the server
+    /// is unreachable or returns errors: its polls back off exponentially (from
+    /// `poll_interval_ms` up to 60 s) and return to the normal interval after the first
+    /// successful poll, and a cancel that cannot be delivered is retried on later polls. Each
+    /// request to the server times out after 10 s.
     Iqm {
         /// IQM server base URL.
         url: String,
-        /// Authentication token.
+        /// Bearer token for the IQM server.
         token: String,
-        /// Machine name on the IQM server.
+        /// Name of the target quantum device on the IQM server.
         machine_name: String,
         /// Job status polling interval, in milliseconds.
         poll_interval_ms: u64,
@@ -259,12 +274,14 @@ pub(crate) struct MachineSettings {
     #[serde(default = "default_queue_size")]
     #[schema(default = 4)]
     queue_size: usize,
-    /// How often session consumption is stored into the DB and task time limits are checked,
-    /// in milliseconds.
+    /// How often session time is stored into the DB and task and project time limits are
+    /// checked for running work, in milliseconds. After a crash, up to this much session time
+    /// may go uncharged.
     #[serde(default = "default_limit_check_interval_ms")]
     #[schema(default = 2000)]
     limit_check_interval_ms: u32,
-    /// Maximum duration a session on this machine may request, in milliseconds.
+    /// Maximum duration a session on this machine may request, in milliseconds. Sessions
+    /// requesting longer are rejected.
     #[serde(default = "default_max_session_time_ms")]
     #[schema(default = 7200000)]
     max_session_time_ms: u64,
@@ -272,7 +289,11 @@ pub(crate) struct MachineSettings {
     #[serde(default = "default_task_time_limit_ms")]
     #[schema(default = 3600000)]
     default_task_time_limit_ms: u64,
-    /// Maximum assumed lag of the backend's clock behind ours, in milliseconds.
+    /// Maximum assumed lag of the backend's clock behind ours, in milliseconds. Running tasks'
+    /// time is estimated so that it never exceeds the true time while the skew stays within
+    /// this bound, so time limits never fail a task early; the estimate may lag the true time
+    /// by up to this amount (plus one poll interval), letting a task overrun its limit or its
+    /// project's budget slightly.
     #[serde(default = "default_max_clock_skew_ms")]
     #[schema(default = 4000)]
     max_clock_skew_ms: u64,
@@ -326,6 +347,7 @@ pub(crate) enum BackendResponse {
     Test,
 }
 
+/// A machine's configuration; the fields mean the same as in `MachineSettings`.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct MachineResponse {
     name: String,

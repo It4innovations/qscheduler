@@ -22,14 +22,15 @@ pub(crate) struct CreateSessionParams {
     machine: String,
     /// Name of the project the session's time is charged to.
     project: String,
-    /// Session lifetime in milliseconds.
+    /// Session lifetime in milliseconds, at most the machine's `max_session_time_ms`.
     time_limit_ms: u64,
     /// Name of the notifier to send the session's open/close events to. No notification is
     /// sent when omitted.
     notify: Option<String>,
 }
 
-/// Get a session's current info (state, timings, and its machine/project).
+/// Get a session's current info (state, timings, and its machine/project). Closed sessions
+/// remain available after a service restart.
 #[utoipa::path(
     get,
     path = "/sessions/{id}",
@@ -53,7 +54,9 @@ pub(crate) async fn get_session(
 }
 
 /// Create a session — a time-bounded, exclusive reservation of one machine for one project.
-/// Tasks in the session are cancelled when the session closes.
+/// The session waits in the machine's queue until it opens; while it is open, tasks are
+/// submitted into it with `POST /tasks?session_id=…`. The project is charged the time the
+/// session is open. Tasks in the session are cancelled when the session closes.
 #[utoipa::path(
     post,
     path = "/sessions",
@@ -63,7 +66,7 @@ pub(crate) async fn get_session(
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 404, description = "Unknown `machine`."),
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
-        (status = 422, description = "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `--max-session-time`.")
+        (status = 422, description = "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `max_session_time_ms`.")
     )
 )]
 pub(crate) async fn create_session_handler(
