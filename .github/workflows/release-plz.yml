@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     branches: [main]
+  # Manual run (Actions tab -> Release -> Run workflow) opens the release PR; releases are
+  # usually prepared locally instead (`release-plz update` on a `release-plz-*` branch).
+  workflow_dispatch:
 
 # A PR or tag created with the default GITHUB_TOKEN does not trigger other workflows, so CI
 # (including the API version check) would not run on the release PR. Set the RELEASE_PLZ_TOKEN
@@ -15,7 +18,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'spirali'
+    if: github.repository_owner == 'It4innovations' && github.event_name == 'push'
     permissions:
       contents: write
     env:
@@ -49,11 +52,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ env.RELEASE_TOKEN }}
 
-  # Opens or updates the "chore: release vX.Y.Z" PR (version bump + CHANGELOG).
+  # Opens or updates the "chore: release vX.Y.Z" PR (version bump + CHANGELOG). Manual only,
+  # and only from main, which is the base branch of the release PR.
   release-pr:
     name: Release PR
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'spirali'
+    if: >-
+      github.repository_owner == 'It4innovations' && github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/main'
     permissions:
       contents: write
       pull-requests: write
