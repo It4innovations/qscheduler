@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # release-plz-*: a pushed release branch gets the full CI before a PR is opened
+    branches: [main, "release-plz-*"]
   pull_request:
 
 concurrency:
@@ -51,14 +52,18 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # Only on main and the release PR (release-plz branches), not on every feature PR
+      # Only on main and releases (release-plz-* branch or `chore: release` PR), not feature PRs
       - uses: taiki-e/install-action@v2
-        if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+        if: >-
+          github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+          || startsWith(github.event.pull_request.title, 'chore: release')
         with:
           tool: cargo-audit
 
       - name: cargo audit
-        if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+        if: >-
+          github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+          || startsWith(github.event.pull_request.title, 'chore: release')
         run: cargo audit
 
       - name: cargo test
@@ -156,8 +161,10 @@ jobs:
   docker-smoke-test:
     name: Docker Image Smoke Test
     needs: check-and-build
-    # Only on main and the release PR (release-plz branches), not on every feature PR
-    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+    # Only on main and releases (release-plz-* branch or `chore: release` PR), not feature PRs
+    if: >-
+      github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
+      || startsWith(github.event.pull_request.title, 'chore: release')
     runs-on: ubuntu-latest
     services:
       postgres:

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1 - 2026-10-23
+
+### Added
+
+- Admin API
+
 ## v0.2.0
 
 ### Changed
