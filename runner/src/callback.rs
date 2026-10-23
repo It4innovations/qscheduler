@@ -36,7 +36,9 @@ pub(crate) struct Notifier {
 /// A registered notifier as listed by the API (without its token).
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotifierInfo {
+    /// Unique notifier name, selected by tasks and sessions with `notify`.
     pub name: String,
+    /// URL events are POSTed to.
     pub url: String,
     /// Whether event payloads include a token.
     pub has_token: bool,

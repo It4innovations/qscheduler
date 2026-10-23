@@ -32,8 +32,11 @@ pub(crate) struct CreateTaskParams {
     /// Free-form identifier of the user submitting the task, stored alongside the task.
     user: String,
     /// Maximum execution time in milliseconds, counted from when the backend starts running
-    /// the task. When exceeded, the task is cancelled and ends `failed`. Defaults to the
-    /// machine's default task time limit.
+    /// the task (queue time does not count). When exceeded, the task is cancelled on the backend
+    /// and ends `failed` with the error `Task time limit exceeded`. The limit is checked every
+    /// machine `limit_check_interval_ms` against a running-time estimate that never exceeds the
+    /// true time (see the machine's `max_clock_skew_ms`), so a task is never stopped early but
+    /// may overrun slightly. Defaults to the machine's `default_task_time_limit_ms`.
     time_limit_ms: Option<u64>,
     /// Name of the notifier to send the task's completion event to. No notification is sent
     /// when omitted.
@@ -48,7 +51,7 @@ pub(crate) struct CreateTaskParams {
     request_body(
         content = Vec<u8>,
         content_type = "application/octet-stream",
-        description = "Raw task payload forwarded to the backend."
+        description = "Raw task payload forwarded to the backend. For the `iqm` backend, a JSON circuit description accepted by the IQM API. For the `test` backend, a JSON object `{\"outcome\": {\"type\": \"Ok\"}, \"result\": \"42\", \"artifacts\": {\"log\": \"...\"}, \"submit_time\": 0.5, \"compute_time\": 1.5}`: `outcome` (required) is `{\"type\": \"Ok\"}` or `{\"type\": \"Fail\", \"message\": \"...\"}`; `result` (default `\"\"`) is what `GET /tasks/{id}/result` returns; `artifacts` (default `{}`) maps names to the values `GET /tasks/{id}/artifacts/{name}` returns; `submit_time` and `compute_time` (default 0) are seconds to wait before acknowledging the submission and before reporting the result."
     ),
     responses(
         (status = 201, description = "Task created", body = u32),
@@ -127,7 +130,8 @@ async fn create_task_config(
     })
 }
 
-/// Get a task's current info (state, timings, and its session/project/machine/user).
+/// Get a task's current info (state, timings, and its session/project/machine/user). Finished
+/// tasks remain available after a service restart.
 #[utoipa::path(
     get,
     path = "/tasks/{id}",
@@ -187,7 +191,7 @@ pub(crate) async fn cancel_task_handler(
     path = "/tasks/{id}/result",
     params(("id" = u64, Path, description = "Task ID")),
     responses(
-        (status = 200, description = "Raw result JSON as returned by the backend", body = String),
+        (status = 200, description = "Raw result as returned by the backend (plain text): the full job-status JSON document for `iqm`, the payload's `result` string for `test`", body = String),
         (status = 404, description = "Task not found"),
         (status = 409, description = "Task has not been submitted to a backend yet"),
         (status = 500, description = "Backend request failed")
@@ -225,7 +229,7 @@ pub(crate) async fn get_task_result(
     ),
     responses(
         (status = 200, description = "Raw artifact JSON as returned by the backend", body = String),
-        (status = 404, description = "Task not found"),
+        (status = 404, description = "Task not found, or the backend has no artifact of this name"),
         (status = 409, description = "Task has not been submitted to a backend yet"),
         (status = 500, description = "Backend request failed")
     )

@@ -289,7 +289,9 @@ pub struct TaskInfo {
     /// (not via a session). Mutually exclusive with `session`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Free-form identifier of the user who submitted the task.
     pub user: String,
+    /// Backend-assigned job ID. Absent until the task is submitted to the backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_id: Option<String>,
     /// Name of the target machine.
@@ -297,13 +299,17 @@ pub struct TaskInfo {
     pub state: TaskStateKind,
     pub created_at: DateTime<Utc>,
     /// Execution time limit in milliseconds, counted from `started_at`. When exceeded, the task
-    /// is cancelled on the backend and ends `failed`.
+    /// is cancelled on the backend and ends `failed`. Absent only for tasks created before time
+    /// limits existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_limit_ms: Option<u64>,
-    /// When the backend started running the task. Absent until then.
+    /// When the backend started running the task, on the backend's clock. Absent until then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
-    /// Absent if the task is still `waiting` or `running`.
+    /// When the task reached its final state; absent while it is `waiting` or `running`. For a
+    /// task that ran on the backend, this is the backend's timestamp (`finished_at - started_at`
+    /// equals `exectime_ms`); for a task ended by the scheduler itself (e.g. cancelled while
+    /// queued), it is the scheduler's time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
     /// Milliseconds of execution time consumed, if any.

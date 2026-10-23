@@ -147,7 +147,7 @@ pub(crate) fn client_warn(status: StatusCode, e: impl std::fmt::Display) -> (Sta
 #[derive(OpenApi)]
 #[openapi(modifiers(&AdminSecurity), info(
     title = "qscheduler",
-    description = "Scheduling service dispatching tasks to quantum computing backends.",
+    description = include_str!("api_description.md"),
     // Explicit `env!` so a version bump always recompiles the spec (utoipa's implicit
     // defaults are read by the proc macro and not tracked by Cargo).
     version = env!("CARGO_PKG_VERSION"),

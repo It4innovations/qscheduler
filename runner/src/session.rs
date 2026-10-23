@@ -152,6 +152,7 @@ pub struct SessionInfo {
     pub machine: String,
     /// Name of the project the session's time is charged to.
     pub project: String,
+    /// Session lifetime in milliseconds.
     pub time_limit_ms: i64,
     pub created_at: DateTime<Utc>,
     /// Absent if the session never opened (still waiting, or closed while still queued).
@@ -160,7 +161,8 @@ pub struct SessionInfo {
     /// Absent unless the session has closed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<DateTime<Utc>>,
-    /// Milliseconds of execution time consumed by tasks run during this session, if any.
+    /// Milliseconds the session has been open, i.e. the time charged to its project. Updated
+    /// periodically while the session is open, so it may appear before `closed_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exectime_ms: Option<i64>,
     /// Name of the notifier that receives the session's open/close events. Absent if the
