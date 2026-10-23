@@ -8,6 +8,9 @@ oasdiff (https://github.com/oasdiff/oasdiff):
 - additive (any other change):    0.y.z -> bump z, x.y.z (x >= 1) -> bump y
 - none:                            any version >= the tag
 
+While the version still equals the tag (feature branches, main between releases), the changes
+are only reported; the bump is enforced once release-plz has bumped the version (release PR).
+
 Usage: scripts/check_api_version.py [--base-spec FILE --base-version X.Y.Z] [--spec FILE]
 """
 
@@ -148,6 +151,17 @@ def main():
     needed = required_version(base_version, change)
     for line in lines:
         print(f"  {line}")
+    if version == base_version and change != "none":
+        # Not bumped yet: feature branches and main between releases. release-plz bumps the
+        # version from the commit types, so only report what those types have to say.
+        commit_type = "feat!:" if change == "breaking" else "feat:"
+        print(
+            f"Unreleased API change since {fmt(base_version)}: {change}; "
+            f"the next release must be >= {fmt(needed)}, so these changes need a "
+            f"`{commit_type}` commit"
+        )
+        print("OK (enforced once the version is bumped in the release PR)")
+        return
     print(
         f"API change since {fmt(base_version)}: {change}; "
         f"version must be >= {fmt(needed)}, is {fmt(version)}"

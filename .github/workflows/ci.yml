@@ -51,11 +51,14 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Only on main and the release PR (release-plz branches), not on every feature PR
       - uses: taiki-e/install-action@v2
+        if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
         with:
           tool: cargo-audit
 
       - name: cargo audit
+        if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
         run: cargo audit
 
       - name: cargo test
@@ -153,6 +156,8 @@ jobs:
   docker-smoke-test:
     name: Docker Image Smoke Test
     needs: check-and-build
+    # Only on main and the release PR (release-plz branches), not on every feature PR
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     services:
       postgres:
