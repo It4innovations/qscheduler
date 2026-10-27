@@ -221,6 +221,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
     let runner_conf = RunnerConfiguration {
         machines,
         notifiers,
+        task_retention: service_conf.task_retention,
     };
     let core_ref = Core::new(runner_conf, pool).await?;
     let admin_token = std::env::var("ADMIN_TOKEN")

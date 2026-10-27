@@ -79,6 +79,9 @@ class QScheduler:
         self.default_task_time_limit = None
         # Request body limit in MiB (`--max-payload-mb`); None keeps the service default.
         self.max_payload_mb: int | None = None
+        # How long finished tasks stay in memory (`--task-retention`, e.g. "1s"); None keeps
+        # the service default.
+        self.task_retention: str | None = None
         self.pulse_access = False
         # Bearer token of the admin endpoints; None starts the service without it.
         self.admin_token: str | None = ADMIN_TOKEN
@@ -163,9 +166,12 @@ class QScheduler:
         return self._cli(*args)
 
     def _serve_args(self) -> list[str]:
-        if self.max_payload_mb is None:
-            return []
-        return [f"--max-payload-mb={self.max_payload_mb}"]
+        args = []
+        if self.max_payload_mb is not None:
+            args.append(f"--max-payload-mb={self.max_payload_mb}")
+        if self.task_retention is not None:
+            args.append(f"--task-retention={self.task_retention}")
+        return args
 
     def _start_binary(self, log_name="qscheduler.log"):
         log_path = os.path.join(self.working_dir, log_name)

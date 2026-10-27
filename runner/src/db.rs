@@ -305,7 +305,7 @@ pub async fn load_projects_by_ids(
 
 pub async fn update_task_finished(pool: &PgPool, task_id: TaskId, completed: CompletedState) {
     if let Err(e) = sqlx::query(
-        "UPDATE tasks SET state = 'finished', finished_at = $3, exec_time_ms = $2 WHERE id = $1",
+        "UPDATE tasks SET state = 'finished', payload = NULL, finished_at = $3, exec_time_ms = $2 WHERE id = $1",
     )
     .bind(task_id.as_u64() as i64)
     .bind(exec_time_ms(completed.consumed))
@@ -324,7 +324,7 @@ pub async fn update_task_failed(
     error: &str,
 ) {
     if let Err(e) = sqlx::query(
-        "UPDATE tasks SET state = 'failed', finished_at = $4, error = $2, exec_time_ms = $3 WHERE id = $1",
+        "UPDATE tasks SET state = 'failed', payload = NULL, finished_at = $4, error = $2, exec_time_ms = $3 WHERE id = $1",
     )
     .bind(task_id.as_u64() as i64)
     .bind(error)
@@ -340,7 +340,7 @@ pub async fn update_task_failed(
 pub async fn update_tasks_cancelled(pool: &PgPool, task_ids: &[TaskId]) {
     let task_ids: Vec<i64> = task_ids.iter().map(|id| id.as_i64()).collect();
     if let Err(e) =
-        sqlx::query("UPDATE tasks SET state = 'cancelled', finished_at = NOW() WHERE id = ANY($1)")
+        sqlx::query("UPDATE tasks SET state = 'cancelled', payload = NULL, finished_at = NOW() WHERE id = ANY($1)")
             .bind(task_ids.as_slice())
             .execute(pool)
             .await
@@ -351,7 +351,7 @@ pub async fn update_tasks_cancelled(pool: &PgPool, task_ids: &[TaskId]) {
 
 pub async fn update_task_cancelled(pool: &PgPool, task_id: TaskId, completed: CompletedState) {
     if let Err(e) = sqlx::query(
-        "UPDATE tasks SET state = 'cancelled', finished_at = $3, exec_time_ms = $2 WHERE id = $1",
+        "UPDATE tasks SET state = 'cancelled', payload = NULL, finished_at = $3, exec_time_ms = $2 WHERE id = $1",
     )
     .bind(task_id.as_u64() as i64)
     .bind(exec_time_ms(completed.consumed))
@@ -418,11 +418,13 @@ async fn try_close_session_with_tasks(
     .execute(&mut *tx)
     .await?;
     for &task_id in cancelled_tasks {
-        sqlx::query("UPDATE tasks SET state = 'cancelled', finished_at = $2 WHERE id = $1")
-            .bind(task_id.as_u64() as i64)
-            .bind(timestamp)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE tasks SET state = 'cancelled', payload = NULL, finished_at = $2 WHERE id = $1",
+        )
+        .bind(task_id.as_u64() as i64)
+        .bind(timestamp)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await
 }
@@ -793,6 +795,22 @@ pub(crate) async fn find_task_info(
     .fetch_optional(pool)
     .await
     .map(|opt| opt.map(TaskInfoRow::into_task_info))
+    .map_err(crate::error::RunnerError::Sqlx)
+}
+
+/// Look up a task's machine and backend job id directly from the DB, for a task no longer
+/// resident in `Core`'s in-memory `TaskMap`.
+pub(crate) async fn find_task_backend_ref(
+    pool: &PgPool,
+    task_id: TaskId,
+) -> crate::Result<Option<(MachineId, Option<String>)>> {
+    sqlx::query_as::<_, (i32, Option<String>)>(
+        "SELECT machine_id, backend_id FROM tasks WHERE id = $1",
+    )
+    .bind(task_id.as_i64())
+    .fetch_optional(pool)
+    .await
+    .map(|opt| opt.map(|(machine_id, backend_id)| (MachineId::from_db(machine_id), backend_id)))
     .map_err(crate::error::RunnerError::Sqlx)
 }
 

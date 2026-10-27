@@ -1,3 +1,5 @@
+import os
+import time
 from datetime import datetime
 
 from utils import TEST_MACHINE_NAME, TEST_PROJECT, TEST_USER
@@ -146,6 +148,29 @@ def test_cancel_finished_task(qscheduler):
 def test_cancel_nonexistent_task(qscheduler):
     qscheduler.start()
     qscheduler.cancel_task(999_999, expect_error=404)
+
+
+def test_finished_task_evicted_from_memory(qscheduler):
+    qscheduler.task_retention = "1s"
+    qscheduler.start()
+    t = qscheduler.submit(TT())
+    qscheduler.wait_for_finished(t)
+    info = qscheduler.get_task(t)
+    result = qscheduler.get_task_result(t)
+
+    log_path = os.path.join(qscheduler.working_dir, "qscheduler.log")
+    deadline = time.monotonic() + 5.0
+    while True:
+        with open(log_path) as f:
+            if "Evicted finished tasks from memory" in f.read():
+                break
+        assert time.monotonic() < deadline, "task was not evicted"
+        time.sleep(0.2)
+
+    # Served from the DB now.
+    assert qscheduler.get_task(t) == info
+    assert qscheduler.get_task_result(t) == result
+    qscheduler.cancel_task(t, expect_error=409)
 
 
 def test_task_time_limit_exceeded(qscheduler):

@@ -104,6 +104,7 @@ impl Core {
                 core.start_launcher(machine_id, backend_receiver, resume_tasks);
             }
         }
+        start_task_eviction(&core_ref, config.task_retention);
 
         Ok(core_ref)
     }
@@ -699,32 +700,30 @@ impl Core {
         Ok(Arc::clone(machine.backend()).get_qc_artifact(name, accept))
     }
 
-    pub fn get_task_result(&self, task_id: TaskId) -> crate::Result<BackendFuture<BackendStream>> {
-        let task = self
-            .task_map
+    /// The machine and backend job id of a task resident in memory.
+    pub(crate) fn task_backend_ref(&self, task_id: TaskId) -> Option<(MachineId, Option<String>)> {
+        self.task_map
             .find_task(task_id)
-            .ok_or(RunnerError::InvalidTask(task_id))?;
-        let backend_id = task
-            .backend_id()
-            .ok_or(RunnerError::TaskNotSubmitted(task_id))?;
-        let machine = self.machine_map.get_machine(task.config().machine_id);
+            .map(|t| (t.config().machine_id, t.backend_id().map(String::from)))
+    }
+
+    pub(crate) fn get_task_result(
+        &self,
+        machine_id: MachineId,
+        backend_id: &str,
+    ) -> crate::Result<BackendFuture<BackendStream>> {
+        let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_task_result(backend_id))
     }
 
-    pub fn get_task_artifact(
+    pub(crate) fn get_task_artifact(
         &self,
-        task_id: TaskId,
+        machine_id: MachineId,
+        backend_id: &str,
         name: &str,
         accept: Option<&str>,
     ) -> crate::Result<BackendFuture<BackendStream>> {
-        let task = self
-            .task_map
-            .find_task(task_id)
-            .ok_or(RunnerError::InvalidTask(task_id))?;
-        let backend_id = task
-            .backend_id()
-            .ok_or(RunnerError::TaskNotSubmitted(task_id))?;
-        let machine = self.machine_map.get_machine(task.config().machine_id);
+        let machine = self.machine_map.find_machine(machine_id)?;
         Ok(Arc::clone(machine.backend()).get_task_artifact(backend_id, name, accept))
     }
 }
@@ -750,4 +749,25 @@ fn create_machine(
         backend,
     );
     (machine, backend_receiver)
+}
+
+/// Periodically drops terminal tasks older than `retention` from memory; `GET /tasks/{id}`
+/// and friends then fall back to the DB.
+fn start_task_eviction(core_ref: &CoreRef, retention: Duration) {
+    let core_ref = Arc::downgrade(core_ref);
+    let period = (retention / 2).clamp(Duration::from_secs(1), Duration::from_secs(60));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(core_ref) = core_ref.upgrade() else {
+                break;
+            };
+            let evicted = core_ref.lock().unwrap().task_map.evict_finished(retention);
+            if evicted > 0 {
+                tracing::debug!(evicted, "Evicted finished tasks from memory");
+            }
+        }
+    });
 }

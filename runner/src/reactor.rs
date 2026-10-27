@@ -1,3 +1,4 @@
+use crate::backend::BackendStream;
 use crate::callback::{NotifierId, NotifierInfo};
 use crate::config::{MachineConfiguration, NotifierConfiguration};
 use crate::core::{Core, CoreRef, CoreSplitMut};
@@ -84,23 +85,77 @@ pub async fn get_session_info(
 
 #[tracing::instrument(skip(core_ref), fields(%task_id))]
 pub async fn cancel_task(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<()> {
-    let mut core = core_ref.lock().unwrap();
-    let CoreSplitMut {
-        task_map,
-        machine_map,
-        ..
-    } = core.split_mut();
-    let task = task_map
-        .find_task(task_id)
-        .ok_or(RunnerError::InvalidTask(task_id))?;
-    if task.state().is_final() {
-        return Err(RunnerError::TaskAlreadyFinished(task_id));
+    let pool = {
+        let mut core = core_ref.lock().unwrap();
+        let pool = core.pool().clone();
+        let CoreSplitMut {
+            task_map,
+            machine_map,
+            ..
+        } = core.split_mut();
+        if let Some(task) = task_map.find_task(task_id) {
+            if task.state().is_final() {
+                return Err(RunnerError::TaskAlreadyFinished(task_id));
+            }
+            let machine_id = task.config().machine_id;
+            let machine = machine_map.get_machine_mut(machine_id);
+            machine.request_task_cancel(task_id);
+            machine.wake_launcher();
+            return Ok(());
+        }
+        pool
+    };
+    // Every non-terminal task is in memory, so a task found only in the DB is terminal.
+    match db::find_task_backend_ref(&pool, task_id).await? {
+        Some(_) => Err(RunnerError::TaskAlreadyFinished(task_id)),
+        None => Err(RunnerError::InvalidTask(task_id)),
     }
-    let machine_id = task.config().machine_id;
-    let machine = machine_map.get_machine_mut(machine_id);
-    machine.request_task_cancel(task_id);
-    machine.wake_launcher();
-    Ok(())
+}
+
+/// Resolves the machine and backend job id of a submitted task, preferring `Core`'s in-memory
+/// state and falling back to the DB for terminal tasks evicted from memory.
+async fn resolve_task_backend_ref(
+    core_ref: &CoreRef,
+    task_id: TaskId,
+) -> crate::Result<(MachineId, String)> {
+    let (found, pool) = {
+        let core = core_ref.lock().unwrap();
+        (core.task_backend_ref(task_id), core.pool().clone())
+    };
+    let (machine_id, backend_id) = match found {
+        Some(found) => found,
+        None => db::find_task_backend_ref(&pool, task_id)
+            .await?
+            .ok_or(RunnerError::InvalidTask(task_id))?,
+    };
+    let backend_id = backend_id.ok_or(RunnerError::TaskNotSubmitted(task_id))?;
+    Ok((machine_id, backend_id))
+}
+
+/// Fetches a task's raw result from the backend that ran it.
+pub async fn get_task_result(core_ref: &CoreRef, task_id: TaskId) -> crate::Result<BackendStream> {
+    let (machine_id, backend_id) = resolve_task_backend_ref(core_ref, task_id).await?;
+    let future = core_ref
+        .lock()
+        .unwrap()
+        .get_task_result(machine_id, &backend_id)?;
+    future.await
+}
+
+/// Fetches a named artifact of a task from the backend that ran it.
+pub async fn get_task_artifact(
+    core_ref: &CoreRef,
+    task_id: TaskId,
+    name: &str,
+    accept: Option<&str>,
+) -> crate::Result<BackendStream> {
+    let (machine_id, backend_id) = resolve_task_backend_ref(core_ref, task_id).await?;
+    let future =
+        core_ref
+            .lock()
+            .unwrap()
+            .get_task_artifact(machine_id, &backend_id, name, accept)?;
+    future.await
 }
 
 #[tracing::instrument(skip(core_ref), fields(%session_id))]

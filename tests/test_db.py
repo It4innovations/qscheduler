@@ -120,3 +120,33 @@ def test_session_closed_with_cancelled_tasks_in_db(qscheduler_test, db_connect):
 
     assert session_row[0] is not None  # closed_at set
     assert task_row[1] is not None  # finished_at set for cancelled task
+
+
+def _db_payload_is_null(cur, task_id) -> bool:
+    cur.execute("SELECT payload IS NULL FROM tasks WHERE id = %s", [task_id])
+    return cur.fetchone()[0]
+
+
+def test_payload_cleared_when_task_terminal(qscheduler_test, db_connect):
+    qscheduler_test.queue_size = 1
+    qscheduler_test.start()
+    t_running = qscheduler_test.submit(TT().compute_time(2))
+    t_queued = qscheduler_test.submit(TT())
+    t_failed = qscheduler_test.submit(TT().error("boom"))
+    qscheduler_test.wait_for_running(t_running)
+
+    with db_connect.cursor() as cur:
+        assert not _db_payload_is_null(cur, t_running)
+        assert not _db_payload_is_null(cur, t_queued)
+
+    qscheduler_test.cancel_task(t_queued)
+    qscheduler_test.wait_for_finished(t_running)
+    qscheduler_test.wait_for_failed(t_failed)
+
+    with db_connect.cursor() as cur:
+        _wait_db_task(cur, t_running, "finished")
+        _wait_db_task(cur, t_queued, "cancelled")
+        _wait_db_task(cur, t_failed, "failed")
+        assert _db_payload_is_null(cur, t_running)
+        assert _db_payload_is_null(cur, t_queued)
+        assert _db_payload_is_null(cur, t_failed)
