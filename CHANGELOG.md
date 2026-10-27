@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.2 - 2026-10-27
+
+### Added
+
+- Pulse level access
+- Task payload clear + Task memory retention
+
 ## v0.2.1 - 2026-10-23
 
 ### Added
