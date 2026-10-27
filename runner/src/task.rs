@@ -3,12 +3,12 @@ use crate::machine::MachineId;
 use crate::project::ProjectId;
 use crate::session::SessionId;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -258,6 +258,8 @@ pub(crate) struct Task {
     created_at: DateTime<Utc>,
     /// When the backend first reported the task as running (start of the time limit).
     started_at: Option<DateTime<Utc>>,
+    /// When the task reached a final state (monotonic clock); drives its eviction from memory.
+    finished: Option<Instant>,
     config: TaskConfig,
 }
 
@@ -269,6 +271,7 @@ impl Task {
             backend_id: None,
             created_at,
             started_at: None,
+            finished: None,
             config,
         }
     }
@@ -302,7 +305,13 @@ impl Task {
         &self.state
     }
 
+    /// Sets the task's state. A final state also drops the payload, which is no longer needed
+    /// (it is cleared in the DB as well).
     pub(crate) fn set_state(&mut self, state: TaskState) {
+        if state.is_final() {
+            self.config.payload = Bytes::new();
+            self.finished.get_or_insert_with(Instant::now);
+        }
         self.state = state;
     }
 }
@@ -381,6 +390,9 @@ impl TaskInfo {
                 (Some(completed.timestamp), completed.consumed_ms(), None)
             }
         };
+        // Truncated to the DB's precision, so the value doesn't change once the task is evicted
+        // from memory and served from the DB.
+        let finished_at = finished_at.map(|t| t.trunc_subsecs(6));
         TaskInfo {
             id: task.id().as_u64(),
             session: task.config().parent.session_id().map(|s| s.as_u64()),
@@ -430,6 +442,15 @@ impl TaskMap {
 
     pub fn iter(&self) -> impl Iterator<Item = &Task> {
         self.0.values()
+    }
+
+    /// Removes tasks that have been in a final state for at least `retention`. They remain
+    /// available from the DB.
+    pub fn evict_finished(&mut self, retention: Duration) -> usize {
+        let before = self.0.len();
+        self.0
+            .retain(|_, t| t.finished.is_none_or(|f| f.elapsed() < retention));
+        before - self.0.len()
     }
 
     /// Removes every entry for which `keep` returns `false`.

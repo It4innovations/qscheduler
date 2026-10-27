@@ -78,6 +78,11 @@ struct ServeOpts {
     /// (IQM `RunDefinition`s) carry the full settings tree and are typically several MiB.
     #[arg(long, default_value = "32", value_parser = clap::value_parser!(u32).range(1..=4096))]
     pub max_payload_mb: u32,
+
+    /// How long a finished task (with its state) is kept in memory for fast status queries,
+    /// e.g. `10m`. Afterwards it is read from the database.
+    #[arg(long, value_parser = parse_human_time, default_value = "10m")]
+    pub task_retention: Duration,
 }
 
 #[derive(Parser)]
@@ -247,6 +252,7 @@ async fn main() {
             let config = ServiceConfiguration {
                 port: opts.port,
                 max_payload_mb: opts.max_payload_mb as usize,
+                task_retention: opts.task_retention,
             };
             tracing::info!(config = ?config, "starting qscheduler");
             match service::run(env!("CARGO_PKG_VERSION"), config).await {

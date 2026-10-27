@@ -92,6 +92,8 @@ pub struct NotifierConfiguration {
 pub struct RunnerConfiguration {
     pub machines: Vec<(MachineId, MachineConfiguration)>,
     pub notifiers: Vec<(NotifierId, NotifierConfiguration)>,
+    /// How long a terminal task stays in memory; afterwards it is served from the DB.
+    pub task_retention: std::time::Duration,
 }
 
 #[cfg(test)]

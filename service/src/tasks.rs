@@ -255,15 +255,13 @@ pub(crate) async fn get_task_result(
 ) -> Result<Response, (StatusCode, String)> {
     let task_id =
         TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
-    let future = {
-        let core = state.core_ref.lock().unwrap();
-        core.get_task_result(task_id).map_err(|e| match &e {
+    let stream = runner::reactor::get_task_result(&state.core_ref, task_id)
+        .await
+        .map_err(|e| match &e {
             RunnerError::InvalidTask(_) => client_error(StatusCode::NOT_FOUND, e),
             RunnerError::TaskNotSubmitted(_) => client_error(StatusCode::CONFLICT, e),
             _ => internal_error(&e),
-        })?
-    };
-    let stream = future.await.map_err(internal_error)?;
+        })?;
     Ok(stream_response(stream))
 }
 
@@ -310,17 +308,18 @@ pub(crate) async fn get_task_artifact(
 ) -> Result<Response, (StatusCode, String)> {
     let task_id =
         TaskId::try_from(id).map_err(|_| client_error(StatusCode::NOT_FOUND, "invalid task id"))?;
-    let future = {
-        let core = state.core_ref.lock().unwrap();
-        core.get_task_artifact(task_id, &name, accept_header(&headers))
-            .map_err(|e| match &e {
-                RunnerError::InvalidTask(_) => client_error(StatusCode::NOT_FOUND, e),
-                RunnerError::TaskNotSubmitted(_) => client_error(StatusCode::CONFLICT, e),
-                _ => internal_error(&e),
-            })?
-    };
-    let stream = future.await.map_err(|e| match &e {
-        RunnerError::UnknownArtifact(_) => client_error(StatusCode::NOT_FOUND, e),
+    let stream = runner::reactor::get_task_artifact(
+        &state.core_ref,
+        task_id,
+        &name,
+        accept_header(&headers),
+    )
+    .await
+    .map_err(|e| match &e {
+        RunnerError::InvalidTask(_) | RunnerError::UnknownArtifact(_) => {
+            client_error(StatusCode::NOT_FOUND, e)
+        }
+        RunnerError::TaskNotSubmitted(_) => client_error(StatusCode::CONFLICT, e),
         _ => internal_error(&e),
     })?;
     Ok(stream_response(stream))
