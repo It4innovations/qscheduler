@@ -6,6 +6,7 @@ use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionStateKind};
 use crate::suspension::{SuspendCancel, Suspension};
 use crate::task::{CompletedState, TaskConfig, TaskId, TaskInfo, TaskKind, TaskStateKind};
+use crate::user::UserId;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
@@ -167,7 +168,8 @@ pub struct RestoredTask {
     pub session_id: Option<i64>,
     pub project_id: Option<i32>,
     pub backend_id: Option<String>,
-    pub user: String,
+    pub user_id: i32,
+    pub user_name: String,
     pub kind: String,
     pub payload: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
@@ -449,18 +451,32 @@ pub async fn delete_session(pool: &PgPool, session_id: SessionId) {
     }
 }
 
+/// Id of the user named `name`, creating the user if it doesn't exist yet.
+pub async fn get_or_create_user(pool: &PgPool, name: &str) -> crate::Result<UserId> {
+    let id: i32 = sqlx::query_scalar(
+        // The no-op update makes RETURNING yield the id of an existing row too, also when a
+        // concurrent request has just created it.
+        "INSERT INTO users (name) VALUES ($1) \
+         ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await?;
+    Ok(UserId::from_db(id))
+}
+
 pub async fn insert_task(
     pool: &PgPool,
     config: &TaskConfig,
 ) -> crate::Result<(TaskId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO tasks (machine_id, session_id, project_id, \"user\", payload, time_limit_ms, notifier_id, kind) \
+        "INSERT INTO tasks (machine_id, session_id, project_id, user_id, payload, time_limit_ms, notifier_id, kind) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::task_kind) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_i32())
     .bind(config.parent.session_id().map(|s| s.as_i64()))
     .bind(config.parent.project_id().map(|p| p.as_i32()))
-    .bind(&config.user)
+    .bind(config.user_id.as_i32())
     .bind(config.payload.as_ref())
     .bind(config.time_limit.as_millis() as i64)
     .bind(config.notifier.map(|n| n.as_i32()))
@@ -698,9 +714,11 @@ pub(crate) async fn load_active_suspensions(
 /// Load all tasks that are still in a non-terminal state (stored as `waiting`).
 pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>> {
     sqlx::query_as::<_, RestoredTask>(
-        "SELECT id, machine_id, session_id, project_id, backend_id, \"user\", kind::text AS kind, \
-                payload, created_at, time_limit_ms, started_at, notifier_id \
-         FROM tasks WHERE state = 'waiting'",
+        "SELECT t.id, t.machine_id, t.session_id, t.project_id, t.backend_id, t.user_id, \
+                u.name AS user_name, t.kind::text AS kind, t.payload, t.created_at, t.time_limit_ms, \
+                t.started_at, t.notifier_id \
+         FROM tasks t JOIN users u ON u.id = t.user_id \
+         WHERE t.state = 'waiting'",
     )
     .fetch_all(pool)
     .await
@@ -783,10 +801,11 @@ pub(crate) async fn find_task_info(
 ) -> crate::Result<Option<TaskInfo>> {
     sqlx::query_as::<_, TaskInfoRow>(
         "SELECT t.id, m.name AS machine, t.session_id, p.name AS project, t.backend_id, \
-                t.\"user\", t.kind::text AS kind, t.state::text AS state, t.error, t.finished_at, t.exec_time_ms, \
+                u.name AS \"user\", t.kind::text AS kind, t.state::text AS state, t.error, t.finished_at, t.exec_time_ms, \
                 t.created_at, t.time_limit_ms, t.started_at, n.name AS notify \
          FROM tasks t \
          JOIN machines m ON m.id = t.machine_id \
+         JOIN users u ON u.id = t.user_id \
          LEFT JOIN projects p ON p.id = t.project_id \
          LEFT JOIN notifiers n ON n.id = t.notifier_id \
          WHERE t.id = $1",

@@ -1,3 +1,4 @@
+import os
 import time
 
 from utils import TestTask as TT
@@ -150,3 +151,57 @@ def test_payload_cleared_when_task_terminal(qscheduler_test, db_connect):
         assert _db_payload_is_null(cur, t_running)
         assert _db_payload_is_null(cur, t_queued)
         assert _db_payload_is_null(cur, t_failed)
+
+
+def _db_task_user(cur, task_id):
+    cur.execute(
+        "SELECT u.id, u.name FROM tasks t JOIN users u ON u.id = t.user_id "
+        "WHERE t.id = %s",
+        [task_id],
+    )
+    return cur.fetchone()
+
+
+def test_task_users_stored_once(qscheduler_test, db_connect):
+    qscheduler_test.start()
+    t1 = qscheduler_test.submit(TT(), user="alice")
+    t2 = qscheduler_test.submit(TT(), user="bob")
+    t3 = qscheduler_test.submit(TT(), user="alice")
+    for t in (t1, t2, t3):
+        qscheduler_test.wait_for_finished(t)
+
+    with db_connect.cursor() as cur:
+        u1, u2, u3 = (_db_task_user(cur, t) for t in (t1, t2, t3))
+        cur.execute("SELECT count(*) FROM users")
+        user_count = cur.fetchone()[0]
+
+    assert u1 == u3
+    assert u1[1] == "alice"
+    assert u2[1] == "bob"
+    assert u1[0] != u2[0]
+    assert user_count == 2
+    assert qscheduler_test.get_task(t1)["user"] == "alice"
+    assert qscheduler_test.get_task(t2)["user"] == "bob"
+
+
+def test_idle_user_evicted_and_reloaded(qscheduler_test, db_connect):
+    qscheduler_test.task_retention = "1s"
+    qscheduler_test.start()
+    t1 = qscheduler_test.submit(TT(), user="alice")
+    qscheduler_test.wait_for_finished(t1)
+
+    log_path = os.path.join(qscheduler_test.working_dir, "qscheduler.log")
+    deadline = time.monotonic() + 5.0
+    while True:
+        with open(log_path) as f:
+            if "Evicted idle users from memory" in f.read():
+                break
+        assert time.monotonic() < deadline, "user was not evicted"
+        time.sleep(0.2)
+
+    assert qscheduler_test.get_task(t1)["user"] == "alice"
+    t2 = qscheduler_test.submit(TT(), user="alice")
+    qscheduler_test.wait_for_finished(t2)
+    assert qscheduler_test.get_task(t2)["user"] == "alice"
+    with db_connect.cursor() as cur:
+        assert _db_task_user(cur, t1) == _db_task_user(cur, t2)

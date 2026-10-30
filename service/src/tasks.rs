@@ -14,7 +14,7 @@ use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
 use runner::reactor::{
-    cancel_task, get_machine_default_task_time_limit, get_machine_id_by_name,
+    cancel_task, get_machine_default_task_time_limit, get_machine_id_by_name, get_or_create_user,
     get_project_id_by_name, get_task_info, resolve_notifier, submit_task,
 };
 use runner::task::{TaskConfig, TaskId, TaskInfo, TaskKind, TaskParent};
@@ -171,10 +171,12 @@ async fn create_task_config(
     } else {
         None
     };
+    // Last, so a request rejected above doesn't create the user.
+    let user_id = get_or_create_user(core_ref, &params.user).await?;
     Ok(TaskConfig {
         machine_id,
         parent: TaskParent::new(session_id, project_id),
-        user: params.user,
+        user_id,
         kind,
         payload: body,
         time_limit,

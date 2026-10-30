@@ -7,6 +7,7 @@ use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionInfo, SessionMap, SessionState};
 use crate::suspension::SuspendCancel;
 use crate::task::{CompletedState, Task, TaskInfo, TaskKind, TaskMap, TaskState};
+use crate::user::UserMap;
 use crate::{MachineId, SessionId, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -170,6 +171,7 @@ fn notify_task(
     state: &TaskState,
     machine_name: &str,
     project_map: &ProjectMap,
+    user_map: &UserMap,
 ) {
     let Some(notifier) = notifiers.get(task.config().notifier) else {
         return;
@@ -179,7 +181,14 @@ fn notify_task(
         .parent
         .project_id()
         .and_then(|pid| project_name(project_map, pid));
-    let info = TaskInfo::build(task, state, machine_name.to_string(), project, notifiers);
+    let info = TaskInfo::build(
+        task,
+        state,
+        machine_name.to_string(),
+        project,
+        user_map,
+        notifiers,
+    );
     send_notify(notifier, NotifyEvent::Task { task: info });
 }
 
@@ -347,6 +356,7 @@ fn close_running_session(
     session_map: &mut SessionMap,
     machine_map: &mut MachineMap,
     project_map: &ProjectMap,
+    user_map: &mut UserMap,
     machine_id: MachineId,
     backend: &Arc<dyn Backend>,
     submitted_tasks: &mut HashMap<TaskId, bool>,
@@ -366,18 +376,22 @@ fn close_running_session(
     while let Some(task_id) = machine.pop_session_task() {
         debug!(%task_id, "Cancelling unsubmitted task");
         let task = task_map.get_task_mut(task_id);
-        task.set_state(TaskState::Cancelled {
-            completed: CompletedState {
-                consumed: Duration::ZERO,
-                timestamp: now,
+        task.set_state(
+            TaskState::Cancelled {
+                completed: CompletedState {
+                    consumed: Duration::ZERO,
+                    timestamp: now,
+                },
             },
-        });
+            user_map,
+        );
         notify_task(
             notifiers,
             task,
             task.state(),
             &machine.config().name,
             project_map,
+            user_map,
         );
         cancelled_tasks.push(task_id);
     }
@@ -416,6 +430,7 @@ fn close_queued_session(
 struct FailContext<'a> {
     task_map: &'a mut TaskMap,
     project_map: &'a mut ProjectMap,
+    user_map: &'a mut UserMap,
     machine_name: String,
     notifiers: &'a NotifierMap,
     db_updates: &'a mut Vec<DbUpdate>,
@@ -463,10 +478,13 @@ impl FailContext<'_> {
 
     fn fail(&mut self, task_id: TaskId, completed: CompletedState, charged: Duration) {
         let task = self.task_map.get_task_mut(task_id);
-        task.set_state(TaskState::Failed {
-            completed,
-            error: self.error.to_string(),
-        });
+        task.set_state(
+            TaskState::Failed {
+                completed,
+                error: self.error.to_string(),
+            },
+            self.user_map,
+        );
         let project_id = task.config().parent.project_id();
         if let Some(project_id) = project_id
             && (!completed.consumed.is_zero() || !charged.is_zero())
@@ -481,6 +499,7 @@ impl FailContext<'_> {
             task.state(),
             &self.machine_name,
             self.project_map,
+            self.user_map,
         );
         self.db_updates.push(DbUpdate::TaskFailed {
             task_id,
@@ -603,6 +622,7 @@ async fn launcher_main(
                 session_map,
                 machine_map,
                 project_map,
+                user_map,
                 notifiers,
                 ..
             } = core.split_mut();
@@ -662,6 +682,7 @@ async fn launcher_main(
                                 session_map,
                                 machine_map,
                                 project_map,
+                                user_map,
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
@@ -778,6 +799,7 @@ async fn launcher_main(
                                     &state,
                                     &machine_map.get_machine(machine_id).config().name,
                                     project_map,
+                                    user_map,
                                 );
                                 db_updates.push(DbUpdate::TaskFinished {
                                     task_id,
@@ -793,6 +815,7 @@ async fn launcher_main(
                                     &state,
                                     &machine_map.get_machine(machine_id).config().name,
                                     project_map,
+                                    user_map,
                                 );
                                 db_updates.push(DbUpdate::TaskFailed {
                                     task_id,
@@ -812,6 +835,7 @@ async fn launcher_main(
                                         &state,
                                         &machine_map.get_machine(machine_id).config().name,
                                         project_map,
+                                        user_map,
                                     );
                                     db_updates.push(DbUpdate::TaskCancelled {
                                         task_id,
@@ -823,7 +847,7 @@ async fn launcher_main(
                         };
                         if update_state {
                             let task = task_map.get_task_mut(task_id);
-                            task.set_state(state);
+                            task.set_state(state, user_map);
                             if (!exec_time.is_zero() || !charged.is_zero())
                                 && let Some(project_id) = task.config().parent.project_id()
                             {
@@ -856,6 +880,7 @@ async fn launcher_main(
                         session_map,
                         machine_map,
                         project_map,
+                        user_map,
                         machine_id,
                         &backend,
                         &mut submitted_tasks,
@@ -887,13 +912,14 @@ async fn launcher_main(
                     if machine.remove_queued_task(task_id) {
                         debug!(%task_id, "Cancelling queued task on request");
                         let task = task_map.get_task_mut(task_id);
-                        task.set_state(TaskState::simple_cancelled());
+                        task.set_state(TaskState::simple_cancelled(), user_map);
                         notify_task(
                             notifiers,
                             task,
                             task.state(),
                             &machine.config().name,
                             project_map,
+                            user_map,
                         );
                         db_updates.push(DbUpdate::TaskCancelled {
                             task_id,
@@ -911,6 +937,7 @@ async fn launcher_main(
                 let mut ctx = FailContext {
                     task_map,
                     project_map,
+                    user_map,
                     machine_name: machine_map.get_machine(machine_id).config().name.clone(),
                     notifiers,
                     db_updates: &mut db_updates,
@@ -972,6 +999,7 @@ async fn launcher_main(
                                 session_map,
                                 machine_map,
                                 ctx.project_map,
+                                ctx.user_map,
                                 machine_id,
                                 &backend,
                                 &mut submitted_tasks,
@@ -1028,11 +1056,13 @@ async fn launcher_main(
                         &state,
                         &split.machine_map.get_machine(machine_id).config().name,
                         split.project_map,
+                        split.user_map,
                     );
-                    core.split_mut()
+                    let split = core.split_mut();
+                    split
                         .task_map
                         .get_task_mut(task_id)
-                        .set_state(state);
+                        .set_state(state, split.user_map);
                     db_updates.push(DbUpdate::TaskFailed {
                         task_id,
                         completed,
