@@ -2,6 +2,7 @@ use crate::callback::{NotifierId, NotifierMap};
 use crate::machine::MachineId;
 use crate::project::ProjectId;
 use crate::session::SessionId;
+use crate::user::{UserId, UserMap};
 use bytes::Bytes;
 use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
@@ -224,7 +225,7 @@ impl TaskParent {
 pub struct TaskConfig {
     pub machine_id: MachineId,
     pub parent: TaskParent,
-    pub user: String,
+    pub user_id: UserId,
     pub kind: TaskKind,
     pub payload: Bytes,
     /// Effective execution time limit, counted from when the backend first reports the task
@@ -242,7 +243,7 @@ impl Debug for TaskConfig {
             TaskParent::Project(project_id) => f.field("parent", &project_id),
             TaskParent::Session(session_id) => f.field("session", &session_id),
         };
-        f.field("user", &self.user);
+        f.field("user_id", &self.user_id);
         f.field("kind", &self.kind);
         f.field("time_limit", &self.time_limit);
         f.field("notifier", &self.notifier);
@@ -306,11 +307,14 @@ impl Task {
     }
 
     /// Sets the task's state. A final state also drops the payload, which is no longer needed
-    /// (it is cleared in the DB as well).
-    pub(crate) fn set_state(&mut self, state: TaskState) {
+    /// (it is cleared in the DB as well), and stops counting the task as its user's active one.
+    pub(crate) fn set_state(&mut self, state: TaskState, users: &mut UserMap) {
         if state.is_final() {
             self.config.payload = Bytes::new();
-            self.finished.get_or_insert_with(Instant::now);
+            if self.finished.is_none() {
+                self.finished = Some(Instant::now());
+                users.task_deactivated(self.config.user_id);
+            }
         }
         self.state = state;
     }
@@ -374,6 +378,7 @@ impl TaskInfo {
         state: &TaskState,
         machine: String,
         project: Option<String>,
+        users: &UserMap,
         notifiers: &NotifierMap,
     ) -> TaskInfo {
         let (finished_at, exectime_ms, error) = match state {
@@ -397,7 +402,7 @@ impl TaskInfo {
             id: task.id().as_u64(),
             session: task.config().parent.session_id().map(|s| s.as_u64()),
             project,
-            user: task.config().user.clone(),
+            user: users.get_user(task.config().user_id).name.clone(),
             kind: task.config().kind,
             backend_id: task.backend_id().map(String::from),
             machine,
@@ -444,12 +449,14 @@ impl TaskMap {
         self.0.values()
     }
 
-    /// Removes tasks that have been in a final state for at least `retention`. They remain
-    /// available from the DB.
-    pub fn evict_finished(&mut self, retention: Duration) -> usize {
+    /// Removes tasks that have been in a final state for at least `retention` as of `now`.
+    /// They remain available from the DB.
+    pub fn evict_finished(&mut self, now: Instant, retention: Duration) -> usize {
         let before = self.0.len();
-        self.0
-            .retain(|_, t| t.finished.is_none_or(|f| f.elapsed() < retention));
+        self.0.retain(|_, t| {
+            t.finished
+                .is_none_or(|f| now.saturating_duration_since(f) < retention)
+        });
         before - self.0.len()
     }
 

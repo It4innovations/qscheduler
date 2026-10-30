@@ -8,13 +8,14 @@ use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionInfo, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskKind, TaskMap, TaskParent, TaskState};
+use crate::user::{UserId, UserMap};
 use crate::{BackendVersion, db};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -25,6 +26,7 @@ pub(crate) struct CoreSplit<'a> {
     pub task_map: &'a TaskMap,
     pub session_map: &'a SessionMap,
     pub project_map: &'a ProjectMap,
+    pub user_map: &'a UserMap,
     pub notifiers: &'a NotifierMap,
     pub core_ref: &'a CoreRef,
 }
@@ -35,6 +37,7 @@ pub(crate) struct CoreSplitMut<'a> {
     pub task_map: &'a mut TaskMap,
     pub session_map: &'a mut SessionMap,
     pub project_map: &'a mut ProjectMap,
+    pub user_map: &'a mut UserMap,
     pub notifiers: &'a mut NotifierMap,
     pub core_ref: &'a CoreRef,
 }
@@ -50,6 +53,7 @@ pub struct Core {
     task_map: TaskMap,
     session_map: SessionMap,
     project_map: ProjectMap,
+    user_map: UserMap,
     notifiers: NotifierMap,
     pool: PgPool,
     core_ref: Option<CoreRef>,
@@ -86,6 +90,7 @@ impl Core {
             task_map: Default::default(),
             session_map: Default::default(),
             project_map: Default::default(),
+            user_map: Default::default(),
             notifiers: NotifierMap::start(config.notifiers),
             pool,
             core_ref: None,
@@ -104,7 +109,7 @@ impl Core {
                 core.start_launcher(machine_id, backend_receiver, resume_tasks);
             }
         }
-        start_task_eviction(&core_ref, config.task_retention);
+        start_eviction(&core_ref, config.task_retention);
 
         Ok(core_ref)
     }
@@ -190,6 +195,7 @@ impl Core {
                 task_map,
                 session_map,
                 project_map,
+                user_map,
                 ..
             } = core.split_mut();
 
@@ -326,17 +332,22 @@ impl Core {
                 let config = TaskConfig {
                     machine_id,
                     parent: TaskParent::new(session_id, project_id),
-                    user: t.user,
+                    user_id: UserId::from_db(t.user_id),
                     kind: TaskKind::from_db(&t.kind),
                     payload: payload.clone(),
                     time_limit,
                     notifier: restore_notifier(t.notifier_id),
                 };
+                // Every restored task is active and resident, so its user must be too.
+                user_map.insert(config.user_id, &t.user_name);
+                user_map
+                    .task_activated(config.user_id)
+                    .expect("user was just inserted");
 
                 if let Some(backend_id) = t.backend_id {
                     // Already submitted to the backend: re-attach for monitoring.
                     let mut task = Task::new(task_id, t.created_at, config);
-                    task.set_state(TaskState::Running);
+                    task.set_state(TaskState::Running, user_map);
                     task.set_backend_id(backend_id.clone());
                     if let Some(started_at) = t.started_at {
                         task.set_started_at(started_at);
@@ -479,8 +490,14 @@ impl Core {
     /// Removes a machine (whose launcher is stopped) together with all its tasks and sessions
     /// from memory. Returns the removed machine.
     pub(crate) fn purge_machine(&mut self, machine_id: MachineId) -> Option<Machine> {
-        self.task_map
-            .retain(|t| t.config().machine_id != machine_id);
+        let user_map = &mut self.user_map;
+        self.task_map.retain(|t| {
+            let keep = t.config().machine_id != machine_id;
+            if !keep && !t.state().is_final() {
+                user_map.task_deactivated(t.config().user_id);
+            }
+            keep
+        });
         self.session_map
             .retain(|s| s.config.machine_id != machine_id);
         self.machine_map.remove(machine_id)
@@ -505,6 +522,7 @@ impl Core {
             task_map: &self.task_map,
             session_map: &self.session_map,
             project_map: &self.project_map,
+            user_map: &self.user_map,
             notifiers: &self.notifiers,
             core_ref: self.core_ref.as_ref().unwrap(),
         }
@@ -517,6 +535,7 @@ impl Core {
             task_map: &mut self.task_map,
             session_map: &mut self.session_map,
             project_map: &mut self.project_map,
+            user_map: &mut self.user_map,
             notifiers: &mut self.notifiers,
             core_ref: self.core_ref.as_ref().unwrap(),
         }
@@ -582,13 +601,23 @@ impl Core {
         let CoreSplitMut {
             machine_map,
             task_map,
+            user_map,
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
         // Re-checked: the machine may have been suspended while the task row was inserted.
         machine.check_not_suspended()?;
+        // Fails only if the user was evicted while the task row was inserted, which takes far
+        // less than the eviction's idle period.
+        if user_map.find_user(config.user_id).is_none() {
+            return Err(RunnerError::GenericError(format!(
+                "user {} is not loaded",
+                config.user_id
+            )));
+        }
         let task = Task::new(task_id, created_at, config);
         machine.queue_task(&task)?;
+        user_map.task_activated(task.config().user_id)?;
         task_map.insert(task);
         machine.wake_launcher();
         Ok(task_id)
@@ -634,6 +663,7 @@ impl Core {
             task.state(),
             machine,
             project,
+            &self.user_map,
             &self.notifiers,
         ))
     }
@@ -752,8 +782,9 @@ fn create_machine(
 }
 
 /// Periodically drops terminal tasks older than `retention` from memory; `GET /tasks/{id}`
-/// and friends then fall back to the DB.
-fn start_task_eviction(core_ref: &CoreRef, retention: Duration) {
+/// and friends then fall back to the DB. Users idle for `retention` are dropped as well; they
+/// are reloaded from the DB when they submit again.
+fn start_eviction(core_ref: &CoreRef, retention: Duration) {
     let core_ref = Arc::downgrade(core_ref);
     let period = (retention / 2).clamp(Duration::from_secs(1), Duration::from_secs(60));
     tokio::spawn(async move {
@@ -764,9 +795,16 @@ fn start_task_eviction(core_ref: &CoreRef, retention: Duration) {
             let Some(core_ref) = core_ref.upgrade() else {
                 break;
             };
-            let evicted = core_ref.lock().unwrap().task_map.evict_finished(retention);
+            let mut core = core_ref.lock().unwrap();
+            // One `now` for both, so no user of a task still in memory is evicted.
+            let now = Instant::now();
+            let evicted = core.task_map.evict_finished(now, retention);
             if evicted > 0 {
                 tracing::debug!(evicted, "Evicted finished tasks from memory");
+            }
+            let evicted = core.user_map.evict_idle(now, retention);
+            if evicted > 0 {
+                tracing::debug!(evicted, "Evicted idle users from memory");
             }
         }
     });

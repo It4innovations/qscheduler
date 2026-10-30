@@ -10,6 +10,7 @@ use crate::suspension::{
     MAX_SUSPENSION_MESSAGE_LEN, SuspendCancel, Suspension, suspension_task_error,
 };
 use crate::task::{TaskConfig, TaskId, TaskInfo};
+use crate::user::UserId;
 use crate::{MachineId, db};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +53,26 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
         db::delete_task(&pool, task_id).await;
     }
     result
+}
+
+/// Resolves a user name to its id, creating the user in the DB on first use. The user stays in
+/// memory at least until a task submitted right after this call is added.
+pub async fn get_or_create_user(core_ref: &CoreRef, name: &str) -> crate::Result<UserId> {
+    let pool = {
+        let mut core = core_ref.lock().unwrap();
+        if let Some(user_id) = core.split_mut().user_map.touch_by_name(name) {
+            return Ok(user_id);
+        }
+        core.pool().clone()
+    };
+    let user_id = db::get_or_create_user(&pool, name).await?;
+    core_ref
+        .lock()
+        .unwrap()
+        .split_mut()
+        .user_map
+        .insert(user_id, name);
+    Ok(user_id)
 }
 
 /// Looks up a task's public info, preferring `Core`'s in-memory state and falling back to the
