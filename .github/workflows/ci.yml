@@ -6,6 +6,10 @@ on:
     branches: [main, "release-plz-*"]
   pull_request:
 
+# Read-only token for all jobs: checkout only; artifacts and caches use the Actions runtime token
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
