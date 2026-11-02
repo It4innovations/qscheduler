@@ -4,6 +4,7 @@ mod notifiers;
 mod projects;
 mod sessions;
 mod tasks;
+mod users;
 
 use std::sync::Arc;
 
@@ -196,6 +197,8 @@ fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(projects::list_projects_handler))
         .routes(routes!(projects::get_project_handler))
         .routes(routes!(projects::update_project_handler))
+        .routes(routes!(users::list_users_handler))
+        .routes(routes!(users::get_user_consumption_handler))
 }
 
 /// The OpenAPI spec of the REST API, as served at `/api-docs/openapi.json`. Needs no database.

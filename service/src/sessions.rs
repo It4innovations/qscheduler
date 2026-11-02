@@ -22,6 +22,8 @@ pub(crate) struct CreateSessionParams {
     machine: String,
     /// Name of the project the session's time is charged to.
     project: String,
+    /// Name of the user owning the session, who is charged the time the session is open.
+    owner: String,
     /// Session lifetime in milliseconds, at most the machine's `max_session_time_ms`.
     time_limit_ms: u64,
     /// Name of the notifier to send the session's open/close events to. No notification is
@@ -55,8 +57,9 @@ pub(crate) async fn get_session(
 
 /// Create a session — a time-bounded, exclusive reservation of one machine for one project.
 /// The session waits in the machine's queue until it opens; while it is open, tasks are
-/// submitted into it with `POST /tasks?session_id=…`. The project is charged the time the
-/// session is open. Tasks in the session are cancelled when the session closes.
+/// submitted into it with `POST /tasks?session_id=…`. The project and the owner are charged the
+/// time the session is open; the users of tasks in the session are not charged for those tasks.
+/// Tasks in the session are cancelled when the session closes.
 #[utoipa::path(
     post,
     path = "/sessions",
@@ -66,13 +69,19 @@ pub(crate) async fn get_session(
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 404, description = "Unknown `machine`."),
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
-        (status = 422, description = "Unknown `project` or `notify`, or `time_limit_ms` exceeds the machine's `max_session_time_ms`.")
+        (status = 422, description = "Unknown `project` or `notify`, `owner` longer than 250 characters, or `time_limit_ms` exceeds the machine's `max_session_time_ms`.")
     )
 )]
 pub(crate) async fn create_session_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CreateSessionParams>,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
+    if params.owner.chars().count() > 250 {
+        return Err(client_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "'owner' must be at most 250 characters long",
+        ));
+    }
     let (machine_id, notifier) = {
         let core = state.core_ref.lock().unwrap();
         let machine_id = find_machine(&core, &params.machine)?;
@@ -86,6 +95,7 @@ pub(crate) async fn create_session_handler(
     let config = SessionConfig {
         machine_id,
         project_id,
+        owner: params.owner,
         time_limit: Duration::from_millis(params.time_limit_ms),
         notifier,
     };

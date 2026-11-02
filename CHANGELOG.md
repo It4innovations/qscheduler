@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Breaking:** `POST /sessions` requires the new `owner` parameter, the name of the user owning
+  the session. Sessions created before this version get the user of their first task as the
+  owner, or a user named `unknown` if they have no tasks.
+- Session info (`GET /sessions/{id}` and session notifications) contains the session's `owner`.
+
+### Added
+
+- Consumed time is tracked per user, project and machine: a user is charged the time of the
+  sessions it owns and of its tasks outside a session, but not of its tasks inside a session.
+  Existing tasks and sessions are included. Removing a machine removes its entries.
+- `GET /users` lists the names of all known users.
+- `GET /users/{name}/consumption` returns a user's consumed time per project and machine.
+
 ## v0.2.2 - 2026-10-27
 
 ### Added

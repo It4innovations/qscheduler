@@ -117,10 +117,11 @@ def test_restore_waiting_session(qscheduler_test):
     # Keep the machine busy so the session stays queued (waiting), not opened.
     t1 = qs.submit(TT().compute_time(2))
     qs.wait_for_running(t1)
-    session_id = qs.new_session(time_limit=30)
+    session_id = qs.new_session(time_limit=30, owner="dave")
     assert qs.get_session_state(session_id) == "waiting"
 
     qs.restart()
+    assert qs.get_session(session_id)["owner"] == "dave"
 
     # Once the restored task frees the slot, the restored session opens.
     qs.wait_for_session_open(session_id)
