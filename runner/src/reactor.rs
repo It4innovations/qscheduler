@@ -10,7 +10,7 @@ use crate::suspension::{
     MAX_SUSPENSION_MESSAGE_LEN, SuspendCancel, Suspension, suspension_task_error,
 };
 use crate::task::{TaskConfig, TaskId, TaskInfo};
-use crate::user::UserId;
+use crate::user::{UserConsumption, UserId};
 use crate::{MachineId, db};
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,6 +73,22 @@ pub async fn get_or_create_user(core_ref: &CoreRef, name: &str) -> crate::Result
         .user_map
         .insert(user_id, name);
     Ok(user_id)
+}
+
+/// Names of all known users, sorted.
+pub async fn list_users(core_ref: &CoreRef) -> crate::Result<Vec<String>> {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    db::list_user_names(&pool).await
+}
+
+/// Time consumed by the user named `name` per project and machine, or `None` if there is no such
+/// user.
+pub async fn get_user_consumption(
+    core_ref: &CoreRef,
+    name: &str,
+) -> crate::Result<Option<Vec<UserConsumption>>> {
+    let pool = core_ref.lock().unwrap().pool().clone();
+    db::find_user_consumption(&pool, name).await
 }
 
 /// Looks up a task's public info, preferring `Core`'s in-memory state and falling back to the
@@ -207,7 +223,9 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
         core.validate_session_config(&config)?;
         core.pool().clone()
     };
-    let (session_id, created_at) = db::insert_session(&pool, &config).await?;
+    // After the validation, so a rejected request doesn't create the user.
+    let owner_id = db::get_or_create_user(&pool, &config.owner).await?;
+    let (session_id, created_at) = db::insert_session(&pool, &config, owner_id).await?;
     tracing::Span::current().record("session_id", tracing::field::display(session_id));
     tracing::debug!("New session");
     let result = core_ref

@@ -113,6 +113,9 @@ impl From<&SessionState> for SessionStateKind {
 pub struct SessionConfig {
     pub machine_id: MachineId,
     pub project_id: ProjectId,
+    /// Name of the user owning the session. Sessions are charged to their owner in the DB only,
+    /// so unlike a task's user, the owner doesn't have to be resident in `UserMap`.
+    pub owner: String,
     pub time_limit: Duration,
     /// Notifier that receives the session's open/close events, if any.
     pub notifier: Option<NotifierId>,
@@ -152,6 +155,8 @@ pub struct SessionInfo {
     pub machine: String,
     /// Name of the project the session's time is charged to.
     pub project: String,
+    /// Name of the user owning the session, who is charged the session's time.
+    pub owner: String,
     /// Session lifetime in milliseconds.
     pub time_limit_ms: i64,
     pub created_at: DateTime<Utc>,
@@ -161,7 +166,7 @@ pub struct SessionInfo {
     /// Absent unless the session has closed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<DateTime<Utc>>,
-    /// Milliseconds the session has been open, i.e. the time charged to its project. Updated
+    /// Milliseconds the session has been open, i.e. the time charged to its project and owner. Updated
     /// periodically while the session is open, so it may appear before `closed_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exectime_ms: Option<i64>,
@@ -191,6 +196,7 @@ impl SessionInfo {
             state: SessionStateKind::from(&session.state),
             machine,
             project,
+            owner: session.config.owner.clone(),
             time_limit_ms: session.config.time_limit.as_millis() as i64,
             created_at: session.created_at,
             opened_at,

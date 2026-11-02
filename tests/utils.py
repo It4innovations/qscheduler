@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from collections.abc import Sequence
+from urllib.parse import quote
 
 import requests
 
@@ -314,6 +315,23 @@ class QScheduler:
         r.raise_for_status()
         return r.json()
 
+    def list_users(self) -> list[str]:
+        r = requests.get(self.url("users"), timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    def get_user_consumption(self, name: str, expect_error: int | None = None):
+        r = requests.get(
+            self.url(f"users/{quote(name, safe='')}/consumption"), timeout=5
+        )
+        if expect_error is not None:
+            assert r.status_code == expect_error, (
+                f"Expected HTTP {expect_error}, got {r.status_code}: {r.text}"
+            )
+            return r
+        r.raise_for_status()
+        return r.json()
+
     def submit(
         self,
         task: TestTask,
@@ -372,6 +390,7 @@ class QScheduler:
         time_limit: int,
         machine: str = TEST_MACHINE_NAME,
         project: str = TEST_PROJECT,
+        owner: str = TEST_USER,
         notify: str | None = None,
         expect_error: int | None = None,
     ):
@@ -379,6 +398,7 @@ class QScheduler:
             "machine": machine,
             "time_limit_ms": time_limit * 1_000,
             "project": project,
+            "owner": owner,
         }
         if notify is not None:
             msg["notify"] = notify

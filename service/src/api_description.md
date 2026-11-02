@@ -1,7 +1,7 @@
 Scheduling service dispatching tasks to quantum computing backends.
 
-The API refers to machines, projects and notifiers by **name**. Request and response bodies are
-JSON unless an endpoint says otherwise.
+The API refers to machines, projects, notifiers and users by **name**. Request and response
+bodies are JSON unless an endpoint says otherwise.
 
 ## Concepts
 
@@ -15,6 +15,9 @@ JSON unless an endpoint says otherwise.
 - **Task** — a payload forwarded to a machine's backend. A task belongs to exactly one of a
   project (it is charged its execution time) or an open session (the session's open time is
   charged instead).
+- **User** — a name given when submitting a task or as the owner of a session. Each user's
+  consumed time is tracked per project and machine: the time of the sessions it owns and of its
+  tasks outside a session.
 - **Suspension** — a machine taken out of service with a message; new work for it is rejected
   with `409`.
 - **Notifier** — a named HTTP callback target that tasks and sessions can opt into with

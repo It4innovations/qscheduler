@@ -6,7 +6,7 @@ use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionStateKind};
 use crate::suspension::{SuspendCancel, Suspension};
 use crate::task::{CompletedState, TaskConfig, TaskId, TaskInfo, TaskKind, TaskStateKind};
-use crate::user::UserId;
+use crate::user::{UserConsumption, UserId};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
@@ -97,8 +97,9 @@ pub enum RemoveMachineOutcome {
 }
 
 /// Removes a machine. Without `force`, the machine is removed only if it has no tasks and no
-/// sessions. With `force`, its tasks and sessions are deleted as well. Project `consumed_ms`
-/// totals are left untouched (deleting rows does not fire the consumption triggers).
+/// sessions. With `force`, its tasks and sessions are deleted as well. Project `consumed_ms` totals
+/// are left untouched (deleting rows does not fire the consumption triggers), while the machine's
+/// `user_consumption` entries are removed with it (`ON DELETE CASCADE`).
 pub async fn remove_machine(
     pool: &PgPool,
     name: &str,
@@ -184,6 +185,7 @@ pub struct RestoredSession {
     pub id: i64,
     pub machine_id: i32,
     pub project_id: i32,
+    pub owner: String,
     pub time_limit_ms: i64,
     pub opened_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -465,6 +467,42 @@ pub async fn get_or_create_user(pool: &PgPool, name: &str) -> crate::Result<User
     Ok(UserId::from_db(id))
 }
 
+/// Names of all users, sorted.
+pub(crate) async fn list_user_names(pool: &PgPool) -> crate::Result<Vec<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT name FROM users ORDER BY name COLLATE \"C\"")
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+/// Time consumed by the user named `name` per project and machine, or `None` if there is no such
+/// user.
+pub(crate) async fn find_user_consumption(
+    pool: &PgPool,
+    name: &str,
+) -> crate::Result<Option<Vec<UserConsumption>>> {
+    let user_id: Option<i32> = sqlx::query_scalar("SELECT id FROM users WHERE name = $1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
+    let Some(user_id) = user_id else {
+        return Ok(None);
+    };
+    let consumption = sqlx::query_as::<_, UserConsumption>(
+        "SELECT p.name AS project, m.name AS machine, c.consumed_ms \
+         FROM user_consumption c \
+         JOIN projects p ON p.id = c.project_id \
+         JOIN machines m ON m.id = c.machine_id \
+         WHERE c.user_id = $1 \
+         ORDER BY p.name COLLATE \"C\", m.name COLLATE \"C\"",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(Some(consumption))
+}
+
 pub async fn insert_task(
     pool: &PgPool,
     config: &TaskConfig,
@@ -520,13 +558,15 @@ pub async fn update_session_exec_time(pool: &PgPool, session_id: SessionId, exec
 pub async fn insert_session(
     pool: &PgPool,
     config: &SessionConfig,
+    owner_id: UserId,
 ) -> crate::Result<(SessionId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO sessions (machine_id, project_id, time_limit_ms, notifier_id) \
-         VALUES ($1, $2, $3, $4) RETURNING id, created_at",
+        "INSERT INTO sessions (machine_id, project_id, user_id, time_limit_ms, notifier_id) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_i32())
     .bind(config.project_id.as_i32())
+    .bind(owner_id.as_i32())
     .bind(config.time_limit.as_millis() as i64)
     .bind(config.notifier.map(|n| n.as_i32()))
     .fetch_one(pool)
@@ -735,9 +775,10 @@ pub async fn load_active_sessions(
 ) -> sqlx::Result<Vec<RestoredSession>> {
     let task_session_ids: Vec<i64> = active_tasks.iter().filter_map(|t| t.session_id).collect();
     sqlx::query_as::<_, RestoredSession>(
-        "SELECT id, machine_id, project_id, time_limit_ms, opened_at, updated_at, closed_at, \
-                exec_time_ms, created_at, notifier_id \
-         FROM sessions WHERE closed_at IS NULL OR id = ANY($1)",
+        "SELECT s.id, s.machine_id, s.project_id, u.name AS owner, s.time_limit_ms, s.opened_at, \
+                s.updated_at, s.closed_at, s.exec_time_ms, s.created_at, s.notifier_id \
+         FROM sessions s JOIN users u ON u.id = s.user_id \
+         WHERE s.closed_at IS NULL OR s.id = ANY($1)",
     )
     .bind(&task_session_ids)
     .fetch_all(pool)
@@ -838,6 +879,7 @@ struct SessionInfoRow {
     id: i64,
     machine: String,
     project: String,
+    owner: String,
     time_limit_ms: i64,
     opened_at: Option<DateTime<Utc>>,
     closed_at: Option<DateTime<Utc>>,
@@ -860,6 +902,7 @@ impl SessionInfoRow {
             state,
             machine: self.machine,
             project: self.project,
+            owner: self.owner,
             time_limit_ms: self.time_limit_ms,
             created_at: self.created_at,
             opened_at: self.opened_at,
@@ -880,11 +923,12 @@ pub(crate) async fn find_session_info(
     session_id: SessionId,
 ) -> crate::Result<Option<SessionInfo>> {
     sqlx::query_as::<_, SessionInfoRow>(
-        "SELECT s.id, m.name AS machine, p.name AS project, s.time_limit_ms, s.opened_at, \
-                s.closed_at, s.exec_time_ms, s.created_at, n.name AS notify \
+        "SELECT s.id, m.name AS machine, p.name AS project, u.name AS owner, s.time_limit_ms, \
+                s.opened_at, s.closed_at, s.exec_time_ms, s.created_at, n.name AS notify \
          FROM sessions s \
          JOIN machines m ON m.id = s.machine_id \
          JOIN projects p ON p.id = s.project_id \
+         JOIN users u ON u.id = s.user_id \
          LEFT JOIN notifiers n ON n.id = s.notifier_id \
          WHERE s.id = $1",
     )

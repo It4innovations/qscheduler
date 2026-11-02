@@ -4,9 +4,15 @@ from utils import TEST_MACHINE_NAME, TEST_PROJECT
 from utils import TestTask as TT
 
 
+def test_session_owner_too_long(qscheduler_test):
+    qscheduler_test.start()
+    qscheduler_test.new_session(time_limit=1, owner="x" * 251, expect_error=422)
+    qscheduler_test.new_session(time_limit=1, owner="x" * 250)
+
+
 def test_session_info_fields(qscheduler):
     qscheduler.start()
-    s = qscheduler.new_session(time_limit=1)
+    s = qscheduler.new_session(time_limit=1, owner="dave")
     qscheduler.wait_for_session_open(s)
 
     info = qscheduler.get_session(s)
@@ -14,6 +20,7 @@ def test_session_info_fields(qscheduler):
     assert info["state"] == "open"
     assert info["machine"] == TEST_MACHINE_NAME
     assert info["project"] == TEST_PROJECT
+    assert info["owner"] == "dave"
     assert info["time_limit_ms"] == 1_000
     assert info["created_at"] is not None
     assert info["opened_at"] is not None

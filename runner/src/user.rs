@@ -4,6 +4,17 @@ use std::time::{Duration, Instant};
 
 define_id!(UserId);
 
+/// Time consumed by a user on one combination of a project and a machine.
+#[derive(Debug, sqlx::FromRow, serde::Serialize, utoipa::ToSchema)]
+pub struct UserConsumption {
+    /// Name of the project the time was charged to.
+    pub project: String,
+    /// Name of the machine the time was spent on.
+    pub machine: String,
+    /// Confirmed time consumed, in milliseconds.
+    pub consumed_ms: i64,
+}
+
 #[derive(Debug)]
 pub struct User {
     pub name: String,

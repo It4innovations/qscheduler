@@ -13,8 +13,10 @@ backends (currently IQM, plus an in-process `test` backend for development).
   (charged its execution time) or to an open session. A task's `kind` is `circuit` (the
   default; gate-level circuits as JSON) or `pulse` (a compiled pulse-level job as protobuf, see
   [Pulse-level tasks](#pulse-level-tasks)).
-- **Sessions** are exclusive, time-limited reservations of a machine for one project; the
-  project is charged the time the session is open.
+- **Sessions** are exclusive, time-limited reservations of a machine for one project, owned by
+  a user; the project and the owner are charged the time the session is open.
+- **Users** are the names given when submitting tasks or owning sessions. Each user's consumed
+  time is tracked per project and machine, see `GET /users/{name}/consumption`.
 - **Suspensions** take a machine out of service with a message, optionally failing its existing
   work.
 - **Notifiers** are HTTP callback targets that tasks and sessions can opt into, to be told

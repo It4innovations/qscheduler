@@ -245,6 +245,7 @@ impl Core {
                 let config = SessionConfig {
                     machine_id,
                     project_id,
+                    owner: s.owner.clone(),
                     time_limit: Duration::from_millis(s.time_limit_ms as u64),
                     notifier: restore_notifier(s.notifier_id),
                 };

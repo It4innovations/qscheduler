@@ -26,6 +26,6 @@ pub use project::Project;
 pub use session::{SessionConfig, SessionId, SessionInfo, SessionState};
 pub use suspension::{SuspendCancel, Suspension};
 pub use task::TaskId;
-pub use user::UserId;
+pub use user::{UserConsumption, UserId};
 
 pub type Result<T> = std::result::Result<T, RunnerError>;
