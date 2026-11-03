@@ -83,6 +83,9 @@ class QScheduler:
         # How long finished tasks stay in memory (`--task-retention`, e.g. "1s"); None keeps
         # the service default.
         self.task_retention: str | None = None
+        # Limit of a user's active tasks (`--max-user-active-tasks`); None keeps the service
+        # default.
+        self.max_user_active_tasks: int | None = None
         self.pulse_access = False
         # Bearer token of the admin endpoints; None starts the service without it.
         self.admin_token: str | None = ADMIN_TOKEN
@@ -172,6 +175,8 @@ class QScheduler:
             args.append(f"--max-payload-mb={self.max_payload_mb}")
         if self.task_retention is not None:
             args.append(f"--task-retention={self.task_retention}")
+        if self.max_user_active_tasks is not None:
+            args.append(f"--max-user-active-tasks={self.max_user_active_tasks}")
         return args
 
     def _start_binary(self, log_name="qscheduler.log"):

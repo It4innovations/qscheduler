@@ -76,6 +76,8 @@ pub enum RunnerError {
     InvalidNotifierUrl(String),
     #[error("Notifier '{0}' not found")]
     NotifierNotFound(String),
+    #[error("User '{user}' has reached the limit of {limit} active tasks")]
+    UserActiveTaskLimitExceeded { user: String, limit: u32 },
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
