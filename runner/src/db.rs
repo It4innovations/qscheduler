@@ -758,7 +758,8 @@ pub async fn load_active_tasks(pool: &PgPool) -> sqlx::Result<Vec<RestoredTask>>
                 u.name AS user_name, t.kind::text AS kind, t.payload, t.created_at, t.time_limit_ms, \
                 t.started_at, t.notifier_id \
          FROM tasks t JOIN users u ON u.id = t.user_id \
-         WHERE t.state = 'waiting'",
+         WHERE t.state = 'waiting' \
+         ORDER BY t.id",
     )
     .fetch_all(pool)
     .await
@@ -778,7 +779,8 @@ pub async fn load_active_sessions(
         "SELECT s.id, s.machine_id, s.project_id, s.user_id, u.name AS owner, s.time_limit_ms, s.opened_at, \
                 s.updated_at, s.closed_at, s.exec_time_ms, s.created_at, s.notifier_id \
          FROM sessions s JOIN users u ON u.id = s.user_id \
-         WHERE s.closed_at IS NULL OR s.id = ANY($1)",
+         WHERE s.closed_at IS NULL OR s.id = ANY($1) \
+         ORDER BY s.id",
     )
     .bind(&task_session_ids)
     .fetch_all(pool)

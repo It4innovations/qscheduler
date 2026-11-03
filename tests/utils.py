@@ -16,6 +16,8 @@ TEST_USER = "test-user"
 ADMIN_TOKEN = "test-admin-token"
 KIB = 1024
 MIB = 1024 * KIB
+# How often `wait_for_*` asks the service for a state.
+POLL_INTERVAL = 0.05
 
 
 class QSchedulerError(Exception):
@@ -90,6 +92,8 @@ class Config:
     max_session_time: int | None = None
     limit_check_interval: int | None = None
     default_task_time_limit: int | None = None
+    # Half-time of the fair share usage decay (`--decay-half-time`, e.g. "90m").
+    decay_half_time: str | None = None
     # Request body limit (`--max-payload`, e.g. "1M").
     max_payload: str | None = None
     # How long finished tasks stay in memory (`--task-retention`, e.g. "1s").
@@ -167,6 +171,8 @@ class QScheduler:
             args.append(
                 f"--default-task-time-limit={self.cfg.default_task_time_limit}s"
             )
+        if self.cfg.decay_half_time is not None:
+            args.append(f"--decay-half-time={self.cfg.decay_half_time}")
         if self.cfg.pulse_access:
             args.append("--pulse-access")
         args += self.backend.machine_args()
@@ -513,7 +519,6 @@ class QScheduler:
     def wait_for_session_state(self, session_id: int, target: str):
         TIMEOUT = 10
         deadline = time.monotonic() + TIMEOUT
-        wait_time = 0.1
         state = None
         while time.monotonic() < deadline:
             state = self.get_session_state(session_id)
@@ -523,8 +528,7 @@ class QScheduler:
                 raise QSchedulerError(
                     f"Session {session_id}: expected state {target} but got {state}"
                 )
-            time.sleep(wait_time)
-            wait_time += 0.1
+            time.sleep(POLL_INTERVAL)
         raise QSchedulerError(
             f"Session {session_id}: expected state {target} but got {state} after {TIMEOUT}s"
         )
@@ -534,7 +538,6 @@ class QScheduler:
             target = (target,)
         TIMEOUT = 10
         deadline = time.monotonic() + TIMEOUT
-        wait_time = 0.1
         while time.monotonic() < deadline:
             state = self.get_task_state(task_id)
             if state in target:
@@ -543,8 +546,7 @@ class QScheduler:
                 raise QSchedulerError(
                     f"Task {task_id}: expects state {target} but got {state}"
                 )
-            time.sleep(wait_time)
-            wait_time += 0.1
+            time.sleep(POLL_INTERVAL)
         raise QSchedulerError(
             f"Task {task_id}: expects state {target} but got {state} after {TIMEOUT}s"
         )

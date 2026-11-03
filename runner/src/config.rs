@@ -14,6 +14,8 @@ pub const DEFAULT_MAX_SESSION_TIME_MS: u64 = 2 * 60 * 60 * 1000;
 pub const DEFAULT_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
 /// Default maximum clock skew between this host and a backend (4 seconds).
 pub const DEFAULT_MAX_CLOCK_SKEW_MS: u64 = 4 * 1000;
+/// Default half-time of the decay of users' fair share usage (90 minutes).
+pub const DEFAULT_DECAY_HALF_TIME_MS: u64 = 90 * 60 * 1000;
 /// Default maximum number of non-final tasks a single user may have.
 pub const DEFAULT_MAX_USER_ACTIVE_ITEMS: u32 = 2000;
 
@@ -30,6 +32,11 @@ fn default_task_time_limit_ms() -> u64 {
 /// For machines whose stored configuration predates the `max_clock_skew_ms` field.
 fn default_max_clock_skew_ms() -> u64 {
     DEFAULT_MAX_CLOCK_SKEW_MS
+}
+
+/// For machines whose stored configuration predates the `decay_half_time_ms` field.
+fn default_decay_half_time_ms() -> u64 {
+    DEFAULT_DECAY_HALF_TIME_MS
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -51,6 +58,9 @@ pub struct MachineConfiguration {
     /// running-time estimate of tasks from ever exceeding the true time.
     #[serde(default = "default_max_clock_skew_ms")]
     pub max_clock_skew_ms: u64,
+    /// Time after which a user's accumulated fair share usage drops to half.
+    #[serde(default = "default_decay_half_time_ms")]
+    pub decay_half_time_ms: u64,
     /// Whether pulse-level tasks (`kind=pulse`) may be submitted to this machine.
     #[serde(default)]
     pub pulse_access: bool,
@@ -58,8 +68,8 @@ pub struct MachineConfiguration {
 }
 
 impl MachineConfiguration {
-    /// Rejects configurations a launcher cannot run with: an empty name, a zero queue size, or
-    /// a zero check/poll interval.
+    /// Rejects configurations a launcher cannot run with: an empty name, a zero queue size, a
+    /// zero check/poll interval, or a decay half-time below 1 ms.
     pub fn validate(&self) -> crate::Result<()> {
         let invalid = |msg: &str| Err(RunnerError::InvalidMachineConfig(msg.to_string()));
         if self.name.trim().is_empty() {
@@ -70,6 +80,9 @@ impl MachineConfiguration {
         }
         if self.limit_check_interval_ms == 0 {
             return invalid("limit_check_interval must be positive");
+        }
+        if self.decay_half_time_ms == 0 {
+            return invalid("decay_half_time must be at least 1 ms");
         }
         if let BackendConfig::Iqm(iqm) = &self.backend
             && iqm.poll_interval.is_zero()
@@ -120,6 +133,7 @@ mod tests {
             max_session_time_ms: 1000,
             default_task_time_limit_ms: 1000,
             max_clock_skew_ms: 0,
+            decay_half_time_ms: 1000,
             pulse_access: false,
             backend: BackendConfig::Test,
         }
@@ -142,6 +156,9 @@ mod tests {
         c.limit_check_interval_ms = 0;
         assert!(c.validate().is_err());
         let mut c = test_config();
+        c.decay_half_time_ms = 0;
+        assert!(c.validate().is_err());
+        let mut c = test_config();
         c.backend = BackendConfig::Iqm(IqmBackendConfig {
             url: "u".to_string(),
             token: "t".to_string(),
@@ -149,6 +166,42 @@ mod tests {
             poll_interval: Duration::ZERO,
         });
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn default_decay_half_time_is_90_minutes() {
+        assert_eq!(super::DEFAULT_DECAY_HALF_TIME_MS, 5_400_000);
+    }
+
+    #[test]
+    fn validate_decay_half_time_bounds() {
+        let mut c = test_config();
+        c.decay_half_time_ms = 0;
+        let error = c.validate().unwrap_err().to_string();
+        assert!(error.contains("at least 1 ms"), "{error}");
+        c.decay_half_time_ms = 1;
+        assert!(c.validate().is_ok());
+        c.decay_half_time_ms = u64::MAX;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn decay_half_time_survives_serialization() {
+        let mut c = test_config();
+        c.decay_half_time_ms = 1234;
+        let stored = serde_json::to_string(&c).unwrap();
+        let parsed: MachineConfiguration = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed.decay_half_time_ms, 1234);
+    }
+
+    #[test]
+    fn stored_config_without_decay_half_time_gets_default() {
+        let parsed: MachineConfiguration = serde_json::from_str(
+            r#"{"name": "m", "queue_size": 1, "limit_check_interval_ms": 1000,
+                "backend": {"type": "test"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.decay_half_time_ms, super::DEFAULT_DECAY_HALF_TIME_MS);
     }
 
     #[test]
@@ -160,6 +213,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.limit_check_interval_ms, 5000);
+        assert_eq!(config.decay_half_time_ms, super::DEFAULT_DECAY_HALF_TIME_MS);
         let BackendConfig::Iqm(iqm) = config.backend else {
             panic!("expected IQM backend config");
         };

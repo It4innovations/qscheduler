@@ -1,4 +1,5 @@
 import os
+import random
 import socket
 import subprocess
 from pathlib import Path
@@ -78,12 +79,19 @@ def db_connect(db):
 
 
 def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A port below Linux's default ephemeral range (32768+): nothing holds it between a restart
+    of the service, so a client connection of a parallel test must not get it assigned."""
+    while True:
+        port = random.randrange(10_000, 32_000)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
 
 
-@fixture(scope="session")
+@fixture
 def qscheduler_port() -> int:
     return _free_port()
 

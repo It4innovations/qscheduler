@@ -350,7 +350,8 @@ impl Core {
                         task.set_started_at(started_at);
                     }
                     keep_restored_task(task_map, user_map, &t.user_name, task);
-                    if machine_map.find_machine(machine_id).is_ok() {
+                    if let Ok(machine) = machine_map.find_machine_mut(machine_id) {
+                        machine.record_new_task_in_backend(UserId::from_db(t.user_id));
                         resume_tasks
                             .entry(machine_id)
                             .or_default()
@@ -885,6 +886,7 @@ fn create_machine(
         MachineConfig {
             name: m.name,
             queue_size: m.queue_size,
+            decay_half_time: Duration::from_millis(m.decay_half_time_ms),
             limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
             max_session_time: Duration::from_millis(m.max_session_time_ms),
             default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
