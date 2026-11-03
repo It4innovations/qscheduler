@@ -45,7 +45,7 @@ def test_shutdown_checkpoints_open_session(qscheduler_test, db_connect):
     so after a restart it is closed at shutdown time and fully charged."""
     qs = qscheduler_test
     # No periodic checkpoint happens during the test
-    qs.limit_check_interval = 60
+    qs.config(limit_check_interval=60)
     qs.start()
     session_id = qs.new_session(30)
     qs.wait_for_session_state(session_id, "open")
@@ -71,7 +71,7 @@ def test_shutdown_applies_accepted_task_cancel(qscheduler_test):
     """A cancel accepted by the API just before shutdown is not lost: the queued
     task stays cancelled after a restart instead of being run."""
     qs = qscheduler_test
-    qs.queue_size = 1
+    qs.config(queue_size=1)
     qs.start()
     running = qs.submit(TT().compute_time(30))
     qs.wait_for_running(running)

@@ -109,7 +109,7 @@ def _machine_row(cur, name=TEST_MACHINE_NAME):
 
 
 def test_machine_update(qscheduler_test, db_connect):
-    qscheduler_test.max_session_time = 60
+    qscheduler_test.config(max_session_time=60)
     qscheduler_test.start()
     qscheduler_test.new_session(time_limit=30)
     qscheduler_test.stop(kill=False)
@@ -208,7 +208,7 @@ def test_api_add_machine(qscheduler_test, db_connect):
 
 def test_api_update_machine(qscheduler_test, db_connect):
     qs = qscheduler_test
-    qs.max_session_time = 60
+    qs.config(max_session_time=60)
     qs.start()
     tasks = [qs.submit(TT().compute_time(0.5)) for _ in range(5)]
     qs.wait_for_running(tasks[0])
@@ -334,6 +334,6 @@ def test_api_admin_auth(qscheduler_test):
     assert len(qs.api_list_machines()) == 1
 
     qs.stop()
-    qs.admin_token = None
+    qs.config(admin_token=None)
     qs.restart()
     qs.admin_request("GET", "machines", token="anything", expect_status=403)

@@ -137,7 +137,7 @@ def test_consumed_time_many_tasks(qscheduler):
 
 def test_submit_rejected_when_quota_exceeded(qscheduler):
     # Keep the periodic in-flight project check from failing the task while it runs.
-    qscheduler.limit_check_interval = 60
+    qscheduler.config(limit_check_interval=60)
     qscheduler.start(add_test_project=False)
     qscheduler.add_project("myproject", limit_ms=1)
 
@@ -163,8 +163,7 @@ def test_session_create_rejected_when_project_inactive(qscheduler):
 
 def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
     # Keep the periodic in-flight project check from failing task1 while it runs.
-    qscheduler_test.limit_check_interval = 60
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(limit_check_interval=60, queue_size=1)
     qscheduler_test.start(add_test_project=False)
     qscheduler_test.add_project("myproject", limit_ms=100)
 
@@ -177,8 +176,7 @@ def test_task_failed_when_quota_exceeded_in_launcher(qscheduler_test):
 
 
 def test_running_tasks_failed_when_project_limit_exceeded(qscheduler):
-    qscheduler.limit_check_interval = 1
-    qscheduler.queue_size = 2
+    qscheduler.config(limit_check_interval=1, queue_size=2)
     qscheduler.start(add_test_project=False)
     qscheduler.add_project("myproject", limit_ms=1_500)
 
@@ -198,8 +196,7 @@ def test_running_tasks_failed_when_project_limit_exceeded(qscheduler):
 
 
 def test_queued_tasks_failed_after_running_task_exhausts_project(qscheduler_test):
-    qscheduler_test.limit_check_interval = 1
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(limit_check_interval=1, queue_size=1)
     qscheduler_test.start(add_test_project=False)
     qscheduler_test.add_project("myproject", limit_ms=1_500)
 
@@ -232,7 +229,7 @@ def test_project_consumption_excludes_running_tasks(qscheduler_test):
     """Reported consumption is confirmed time only; running tasks' estimates count toward
     the limit checks but never show up in the API."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
 
     task_id = qs.submit(TT().compute_time(30))
@@ -253,8 +250,7 @@ def test_project_consumption_never_decreases(qscheduler):
     """While running tasks are charged, cancelled for the project limit, and settled with their
     exact exec times, reported consumption only ever grows."""
     qs = qscheduler
-    qs.limit_check_interval = 1
-    qs.queue_size = 2
+    qs.config(limit_check_interval=1, queue_size=2)
     qs.start(add_test_project=False)
     qs.add_project("myproject", limit_ms=1_500)
 

@@ -73,7 +73,9 @@ def wait_for_callbacks(server, count=1, timeout=5):
 
 @pytest.fixture
 def notify_qs(qscheduler, callback_server):
-    qscheduler.notifiers = [(NOTIFIER, callback_url(callback_server), NOTIFY_TOKEN)]
+    qscheduler.config(
+        notifiers=[(NOTIFIER, callback_url(callback_server), NOTIFY_TOKEN)]
+    )
     return qscheduler
 
 
@@ -103,7 +105,7 @@ def test_callback_fires_on_task_fail(notify_qs, callback_server):
 
 
 def test_callback_fires_on_task_cancel(notify_qs, callback_server):
-    notify_qs.queue_size = 1
+    notify_qs.config(queue_size=1)
     notify_qs.start()
     session_id = notify_qs.new_session(time_limit=2, notify=NOTIFIER)
     notify_qs.wait_for_session_open(session_id)
@@ -141,7 +143,7 @@ def test_get_task_notify(qscheduler_test, callback_server):
     """`notify` is reported by GET /tasks/{id}, both from memory and (after a restart evicts
     the terminal task) from the DB."""
     qs = qscheduler_test
-    qs.notifiers = [(NOTIFIER, callback_url(callback_server), None)]
+    qs.config(notifiers=[(NOTIFIER, callback_url(callback_server), None)])
     qs.start()
     t1 = qs.submit(TT(), notify=NOTIFIER)
     t2 = qs.submit(TT())
@@ -171,7 +173,7 @@ def test_callback_fires_on_session_open_and_close(notify_qs, callback_server):
 
 
 def test_callback_fires_on_queued_session_cancel(notify_qs, callback_server):
-    notify_qs.queue_size = 1
+    notify_qs.config(queue_size=1)
     notify_qs.start()
     session1 = notify_qs.new_session(time_limit=2, notify=NOTIFIER)
     notify_qs.wait_for_session_open(session1)
@@ -250,10 +252,12 @@ def test_callbacks_routed_per_notifier(
 ):
     callback_server2 = make_callback_server()
     qs = qscheduler_test
-    qs.notifiers = [
-        ("first", callback_url(callback_server), "t1"),
-        ("second", callback_url(callback_server2), None),
-    ]
+    qs.config(
+        notifiers=[
+            ("first", callback_url(callback_server), "t1"),
+            ("second", callback_url(callback_server2), None),
+        ]
+    )
     qs.start()
     t1 = qs.submit(TT(), notify="first")
     t2 = qs.submit(TT(), notify="second")
@@ -279,7 +283,7 @@ def test_callbacks_routed_per_notifier(
 def test_callback_after_restart(qscheduler_test, callback_server):
     """The task's notifier is persisted: a task running across a restart still notifies."""
     qs = qscheduler_test
-    qs.notifiers = [(NOTIFIER, callback_url(callback_server), NOTIFY_TOKEN)]
+    qs.config(notifiers=[(NOTIFIER, callback_url(callback_server), NOTIFY_TOKEN)])
     qs.start()
     task_id = qs.submit(TT().compute_time(1.5), notify=NOTIFIER)
     qs.wait_for_running(task_id)
@@ -293,7 +297,7 @@ def test_callback_after_restart(qscheduler_test, callback_server):
 def test_notifier_cli(qscheduler_test, callback_server, db_connect):
     qs = qscheduler_test
     url = callback_url(callback_server)
-    qs.notifiers = [(NOTIFIER, url, None)]
+    qs.config(notifiers=[(NOTIFIER, url, None)])
     qs.start()
 
     r = qs.add_notifier(NOTIFIER, url)
@@ -337,7 +341,7 @@ def test_get_session_notify(qscheduler_test, callback_server):
     """`notify` is reported by GET /sessions/{id}, both from memory and (after a restart
     evicts the closed session) from the DB."""
     qs = qscheduler_test
-    qs.notifiers = [(NOTIFIER, callback_url(callback_server), None)]
+    qs.config(notifiers=[(NOTIFIER, callback_url(callback_server), None)])
     qs.start()
     s1 = qs.new_session(time_limit=1, notify=NOTIFIER)
     s2 = qs.new_session(time_limit=1)

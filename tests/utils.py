@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from urllib.parse import quote
 
 import requests
@@ -60,7 +61,42 @@ class TestTask:
         return data.encode()
 
 
+@dataclass(frozen=True)
+class Config:
+    """Settings of a `QScheduler`, changed with `QScheduler.config()`. None keeps the default of
+    the service or the machine."""
+
+    # (name, url, token) of notifiers registered by start()
+    notifiers: Sequence[tuple[str, str, str | None]] = ()
+    queue_size: int = 2
+    # In seconds, as are `limit_check_interval` and `default_task_time_limit`.
+    max_session_time: int | None = None
+    limit_check_interval: int | None = None
+    default_task_time_limit: int | None = None
+    # Request body limit in MiB (`--max-payload-mb`).
+    max_payload_mb: int | None = None
+    # How long finished tasks stay in memory (`--task-retention`, e.g. "1s").
+    task_retention: str | None = None
+    # Limit of a user's active tasks (`--max-user-active-tasks`).
+    max_user_active_tasks: int | None = None
+    pulse_access: bool = False
+    # Bearer token of the admin endpoints; None starts the service without it.
+    admin_token: str | None = ADMIN_TOKEN
+
+
 class QScheduler:
+    # Without an instance `__dict__`, assigning a setting directly (`qs.queue_size = 1`) fails
+    # instead of being silently ignored.
+    __slots__ = (
+        "_log_file",
+        "_process",
+        "backend",
+        "cfg",
+        "database_url",
+        "port",
+        "working_dir",
+    )
+
     def __init__(
         self,
         working_dir: str,
@@ -72,25 +108,14 @@ class QScheduler:
         self.port = port
         self.backend = backend
         self.database_url = database_url
-        # (name, url, token) of notifiers registered by start()
-        self.notifiers: list[tuple[str, str, str | None]] = []
-        self.queue_size = 2
-        self.max_session_time = None
-        self.limit_check_interval = None
-        self.default_task_time_limit = None
-        # Request body limit in MiB (`--max-payload-mb`); None keeps the service default.
-        self.max_payload_mb: int | None = None
-        # How long finished tasks stay in memory (`--task-retention`, e.g. "1s"); None keeps
-        # the service default.
-        self.task_retention: str | None = None
-        # Limit of a user's active tasks (`--max-user-active-tasks`); None keeps the service
-        # default.
-        self.max_user_active_tasks: int | None = None
-        self.pulse_access = False
-        # Bearer token of the admin endpoints; None starts the service without it.
-        self.admin_token: str | None = ADMIN_TOKEN
+        self.cfg = Config()
         self._process = None
         self._log_file = None
+
+    def config(self, **options):
+        """Changes settings in `Config`; an unknown name raises `TypeError`. Most of them take
+        effect on start(); those passed to `serve` are applied on restart() as well."""
+        self.cfg = replace(self.cfg, **options)
 
     def url(self, path: str):
         return f"http://127.0.0.1:{self.port}/{path}"
@@ -113,15 +138,17 @@ class QScheduler:
             "machine",
             "add",
             TEST_MACHINE_NAME,
-            f"--queue-size={self.queue_size}",
+            f"--queue-size={self.cfg.queue_size}",
         ]
-        if self.max_session_time is not None:
-            args.append(f"--max-session-time={self.max_session_time}s")
-        if self.limit_check_interval is not None:
-            args.append(f"--limit-check-interval={self.limit_check_interval}s")
-        if self.default_task_time_limit is not None:
-            args.append(f"--default-task-time-limit={self.default_task_time_limit}s")
-        if self.pulse_access:
+        if self.cfg.max_session_time is not None:
+            args.append(f"--max-session-time={self.cfg.max_session_time}s")
+        if self.cfg.limit_check_interval is not None:
+            args.append(f"--limit-check-interval={self.cfg.limit_check_interval}s")
+        if self.cfg.default_task_time_limit is not None:
+            args.append(
+                f"--default-task-time-limit={self.cfg.default_task_time_limit}s"
+            )
+        if self.cfg.pulse_access:
             args.append("--pulse-access")
         args += self.backend.machine_args()
         subprocess.run(
@@ -171,12 +198,12 @@ class QScheduler:
 
     def _serve_args(self) -> list[str]:
         args = []
-        if self.max_payload_mb is not None:
-            args.append(f"--max-payload-mb={self.max_payload_mb}")
-        if self.task_retention is not None:
-            args.append(f"--task-retention={self.task_retention}")
-        if self.max_user_active_tasks is not None:
-            args.append(f"--max-user-active-tasks={self.max_user_active_tasks}")
+        if self.cfg.max_payload_mb is not None:
+            args.append(f"--max-payload-mb={self.cfg.max_payload_mb}")
+        if self.cfg.task_retention is not None:
+            args.append(f"--task-retention={self.cfg.task_retention}")
+        if self.cfg.max_user_active_tasks is not None:
+            args.append(f"--max-user-active-tasks={self.cfg.max_user_active_tasks}")
         return args
 
     def _start_binary(self, log_name="qscheduler.log"):
@@ -185,8 +212,8 @@ class QScheduler:
         # is closed in stop()/cleanup, so a context manager is not applicable.
         self._log_file = open(log_path, "w")  # noqa: SIM115
         env = {"RUST_LOG": "debug", "DATABASE_URL": self.database_url}
-        if self.admin_token is not None:
-            env["ADMIN_TOKEN"] = self.admin_token
+        if self.cfg.admin_token is not None:
+            env["ADMIN_TOKEN"] = self.cfg.admin_token
         self._process = subprocess.Popen(
             [self._binary, "serve", "--port", str(self.port), *self._serve_args()],
             stdout=self._log_file,
@@ -214,7 +241,7 @@ class QScheduler:
     def start(self, add_test_project=True):
         self.backend.start()
         self._add_machine()
-        for name, url, token in self.notifiers:
+        for name, url, token in self.cfg.notifiers:
             r = self.add_notifier(name, url, token)
             assert r.returncode == 0, r.stderr
         self._start_binary()
@@ -676,7 +703,7 @@ class QScheduler:
     ) -> requests.Response:
         """Calls an admin endpoint, authorized with `token` (default: the service's admin
         token), and checks the response status."""
-        token = self.admin_token if token is None else token
+        token = self.cfg.admin_token if token is None else token
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         r = requests.request(
             method, self.url(path), headers=headers, timeout=10, **kwargs
