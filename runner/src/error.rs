@@ -78,6 +78,15 @@ pub enum RunnerError {
     NotifierNotFound(String),
     #[error("User '{user}' has reached the limit of {limit} active tasks")]
     UserActiveTaskLimitExceeded { user: String, limit: u32 },
+    #[error(
+        "Payload of {requested} bytes rejected for user '{user}': active tasks use {active} of the {limit} bytes allowed"
+    )]
+    UserPayloadLimitExceeded {
+        user: String,
+        requested: u64,
+        active: u64,
+        limit: u64,
+    },
     #[error("Database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 

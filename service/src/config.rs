@@ -3,10 +3,12 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct ServiceConfiguration {
     pub port: u16,
-    /// Maximum size of a request body (e.g. a task payload), in MiB.
-    pub max_payload_mb: usize,
+    /// Maximum size of a request body (e.g. a task payload), in bytes.
+    pub max_payload: usize,
     /// How long a finished task stays in memory; afterwards it is served from the DB.
     pub task_retention: std::time::Duration,
     /// Maximum number of non-final tasks a single user may have.
     pub max_user_active_tasks: u32,
+    /// Maximum total size of the payloads of a single user's non-final tasks, in bytes.
+    pub max_user_active_payload: u64,
 }

@@ -8,7 +8,7 @@ use crate::machine::{Machine, MachineConfig, MachineId, MachineMap, ResumeTask};
 use crate::project::{ProjectId, ProjectMap};
 use crate::session::{Session, SessionConfig, SessionId, SessionInfo, SessionMap, SessionState};
 use crate::task::{Task, TaskConfig, TaskId, TaskInfo, TaskKind, TaskMap, TaskParent, TaskState};
-use crate::user::{UserId, UserMap};
+use crate::user::{User, UserId, UserMap};
 use crate::{BackendVersion, db};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -55,6 +55,7 @@ pub struct Core {
     project_map: ProjectMap,
     user_map: UserMap,
     max_user_active_tasks: u32,
+    max_user_active_payload: u64,
     notifiers: NotifierMap,
     pool: PgPool,
     core_ref: Option<CoreRef>,
@@ -93,6 +94,7 @@ impl Core {
             project_map: Default::default(),
             user_map: Default::default(),
             max_user_active_tasks: config.max_user_active_tasks,
+            max_user_active_payload: config.max_user_active_payload,
             notifiers: NotifierMap::start(config.notifiers),
             pool,
             core_ref: None,
@@ -341,12 +343,6 @@ impl Core {
                     time_limit,
                     notifier: restore_notifier(t.notifier_id),
                 };
-                // Every restored task is active and resident, so its user must be too.
-                user_map.insert(config.user_id, &t.user_name);
-                user_map
-                    .task_activated(config.user_id)
-                    .expect("user was just inserted");
-
                 if let Some(backend_id) = t.backend_id {
                     // Already submitted to the backend: re-attach for monitoring.
                     let mut task = Task::new(task_id, t.created_at, config);
@@ -355,7 +351,7 @@ impl Core {
                     if let Some(started_at) = t.started_at {
                         task.set_started_at(started_at);
                     }
-                    task_map.insert(task);
+                    keep_restored_task(task_map, user_map, &t.user_name, task);
                     if machine_map.find_machine(machine_id).is_ok() {
                         resume_tasks
                             .entry(machine_id)
@@ -377,6 +373,7 @@ impl Core {
                         );
                     }
                 } else if session_id.is_some() {
+                    // Cancelled right away and never kept, so not counted as its user's.
                     orphan_cancels.push(task_id);
                 } else {
                     // Still waiting in the queue: re-queue it.
@@ -401,7 +398,7 @@ impl Core {
                             );
                         }
                     }
-                    task_map.insert(task);
+                    keep_restored_task(task_map, user_map, &t.user_name, task);
                 }
             }
 
@@ -497,7 +494,7 @@ impl Core {
         self.task_map.retain(|t| {
             let keep = t.config().machine_id != machine_id;
             if !keep && !t.state().is_final() {
-                user_map.task_deactivated(t.config().user_id);
+                user_map.task_deactivated(t.config().user_id, t.config().payload.len() as u64);
             }
             keep
         });
@@ -592,17 +589,42 @@ impl Core {
                 return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
             }
         }
-        self.check_user_active_task_limit(config.user_id)
+        self.check_user_limits(config.user_id, config.payload.len() as u64)
     }
 
-    /// Fails if the user can't have another active task. A user that isn't loaded passes, as it
-    /// has no active tasks.
-    fn check_user_active_task_limit(&self, user_id: UserId) -> crate::Result<()> {
-        if let Some(user) = self.user_map.find_user(user_id)
-            && user.active_tasks >= self.max_user_active_tasks
-        {
+    /// Fails if the user can't have another active task with a payload of `payload_size` bytes.
+    /// A user that isn't loaded passes here; `add_task` reports it.
+    fn check_user_limits(&self, user_id: UserId, payload_size: u64) -> crate::Result<()> {
+        match self.user_map.find_user(user_id) {
+            Some(user) => self.check_limits_of(&user.name, Some(user), payload_size),
+            None => Ok(()),
+        }
+    }
+
+    /// Like `check_user_limits`, for an upload of the user named `name`, which may not be known
+    /// yet: a user that isn't loaded has no active tasks.
+    pub(crate) fn check_user_upload(&self, name: &str, payload_size: u64) -> crate::Result<()> {
+        self.check_limits_of(name, self.user_map.find_by_name(name), payload_size)
+    }
+
+    fn check_limits_of(
+        &self,
+        name: &str,
+        user: Option<&User>,
+        payload_size: u64,
+    ) -> crate::Result<()> {
+        let active = user.map_or(0, |u| u.active_payload_bytes);
+        if active.saturating_add(payload_size) > self.max_user_active_payload {
+            return Err(RunnerError::UserPayloadLimitExceeded {
+                user: name.to_string(),
+                requested: payload_size,
+                active,
+                limit: self.max_user_active_payload,
+            });
+        }
+        if user.is_some_and(|u| u.active_tasks >= self.max_user_active_tasks) {
             return Err(RunnerError::UserActiveTaskLimitExceeded {
-                user: user.name.clone(),
+                user: name.to_string(),
                 limit: self.max_user_active_tasks,
             });
         }
@@ -617,7 +639,7 @@ impl Core {
     ) -> crate::Result<TaskId> {
         // Re-checked: concurrent submits of the user may have been added while the task row was
         // inserted.
-        self.check_user_active_task_limit(config.user_id)?;
+        self.check_user_limits(config.user_id, config.payload.len() as u64)?;
         let CoreSplitMut {
             machine_map,
             task_map,
@@ -637,7 +659,7 @@ impl Core {
         }
         let task = Task::new(task_id, created_at, config);
         machine.queue_task(&task)?;
-        user_map.task_activated(task.config().user_id)?;
+        user_map.task_activated(task.config().user_id, task.config().payload.len() as u64)?;
         task_map.insert(task);
         machine.wake_launcher();
         Ok(task_id)
@@ -779,6 +801,18 @@ impl Core {
 }
 
 /// Creates a machine and its backend from a stored configuration.
+/// Keeps a restored task in memory and counts it as its user's active task. Doing both in one
+/// place keeps the user's counters matching the tasks that can ever release them: a task that
+/// isn't kept must not be counted, as nothing would uncount it.
+fn keep_restored_task(task_map: &mut TaskMap, user_map: &mut UserMap, user_name: &str, task: Task) {
+    let config = task.config();
+    user_map.insert(config.user_id, user_name);
+    user_map
+        .task_activated(config.user_id, config.payload.len() as u64)
+        .expect("user was just inserted");
+    task_map.insert(task);
+}
+
 fn create_machine(
     machine_id: MachineId,
     m: MachineConfiguration,

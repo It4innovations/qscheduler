@@ -2,10 +2,10 @@ use crate::{AppState, client_error, client_warn, internal_error};
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{FromRequest, Path, Query, Request, State},
     http::{
         HeaderMap, StatusCode,
-        header::{ACCEPT, CONTENT_TYPE},
+        header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE},
     },
     response::Response,
 };
@@ -14,8 +14,8 @@ use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
 use runner::reactor::{
-    cancel_task, get_machine_default_task_time_limit, get_machine_id_by_name, get_or_create_user,
-    get_project_id_by_name, get_task_info, resolve_notifier, submit_task,
+    cancel_task, check_user_upload, get_machine_default_task_time_limit, get_machine_id_by_name,
+    get_or_create_user, get_project_id_by_name, get_task_info, resolve_notifier, submit_task,
 };
 use runner::task::{TaskConfig, TaskId, TaskInfo, TaskKind, TaskParent};
 use serde::Deserialize;
@@ -102,41 +102,70 @@ fn check_content_type(kind: TaskKind, headers: &HeaderMap) -> runner::Result<()>
         (status = 201, description = "Task created", body = u32),
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
+        (status = 413, description = "The payload is larger than the service's maximum request body size, or than the limit on the total size of a user's active task payloads. Retrying cannot succeed."),
         (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, the session is invalid or not open, `kind=pulse` on a machine without pulse-level access, or a `Content-Type` that doesn't match `kind`."),
-        (status = 429, description = "The user has reached the service's limit of active (not yet finished, failed, or cancelled) tasks. Submit again once some of them end.")
+        (status = 429, description = "The user has reached the service's limit of active (not yet finished, failed, or cancelled) tasks, or the payload does not fit into what remains of the limit on the total size of the user's active task payloads. Submit again once some of them end. A request with a `Content-Length` can be rejected this way before its body is read.")
     )
 )]
 pub(crate) async fn create_task(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CreateTaskParams>,
     headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Result<(StatusCode, Json<u64>), (StatusCode, String)> {
+    // Don't read an upload that is going to be rejected anyway.
+    let content_length = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if let Some(size) = content_length {
+        check_user_upload(&state.core_ref.lock().unwrap(), &params.user, size)
+            .map_err(submit_error)?;
+    }
+    let body = Bytes::from_request(request, &state)
+        .await
+        .map_err(|e| client_error(e.status(), e.body_text()))?;
+    // Again with the real size: there may have been no `Content-Length`. Before the user gets
+    // created by `create_task_config`.
+    check_user_upload(
+        &state.core_ref.lock().unwrap(),
+        &params.user,
+        body.len() as u64,
+    )
+    .map_err(submit_error)?;
     let task = create_task_config(&state.core_ref, params, &headers, body)
         .await
         .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     tracing::debug!(task_config=?task, "new task");
     let task_id = submit_task(&state.core_ref, task)
         .await
-        .map_err(|e| match &e {
-            RunnerError::InvalidSession(_)
-            | RunnerError::NonRunningSession(_)
-            | RunnerError::PulseAccessDenied(_) => {
-                client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
-            }
-            RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
-                client_warn(StatusCode::PAYMENT_REQUIRED, e)
-            }
-            RunnerError::UserActiveTaskLimitExceeded { .. } => {
-                client_warn(StatusCode::TOO_MANY_REQUESTS, e)
-            }
-            RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
-                client_error(StatusCode::CONFLICT, e)
-            }
-            _ => internal_error(&e),
-        })?;
+        .map_err(submit_error)?;
     tracing::info!(%task_id, "task submitted");
     Ok((StatusCode::CREATED, Json(task_id.as_u64())))
+}
+
+/// Maps a rejected task submission to its HTTP status.
+fn submit_error(e: RunnerError) -> (StatusCode, String) {
+    match &e {
+        RunnerError::InvalidSession(_)
+        | RunnerError::NonRunningSession(_)
+        | RunnerError::PulseAccessDenied(_) => client_error(StatusCode::UNPROCESSABLE_ENTITY, e),
+        RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
+            client_warn(StatusCode::PAYMENT_REQUIRED, e)
+        }
+        // Doesn't fit even with no other active task, so retrying can't help.
+        RunnerError::UserPayloadLimitExceeded {
+            requested, limit, ..
+        } if requested > limit => client_warn(StatusCode::PAYLOAD_TOO_LARGE, e),
+        RunnerError::UserActiveTaskLimitExceeded { .. }
+        | RunnerError::UserPayloadLimitExceeded { .. } => {
+            client_warn(StatusCode::TOO_MANY_REQUESTS, e)
+        }
+        RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
+            client_error(StatusCode::CONFLICT, e)
+        }
+        _ => internal_error(&e),
+    }
 }
 
 async fn create_task_config(

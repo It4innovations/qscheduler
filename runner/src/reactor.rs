@@ -55,6 +55,13 @@ pub async fn submit_task(core_ref: &CoreRef, config: TaskConfig) -> crate::Resul
     result
 }
 
+/// Checks that the user named `name` may submit a task with a payload of `payload_size` bytes,
+/// e.g. before an upload is read. Doesn't create the user. Only a hint for tasks being uploaded:
+/// `submit_task` makes the decision.
+pub fn check_user_upload(core: &Core, name: &str, payload_size: u64) -> crate::Result<()> {
+    core.check_user_upload(name, payload_size)
+}
+
 /// Resolves a user name to its id, creating the user in the DB on first use. The user stays in
 /// memory at least until a task submitted right after this call is added.
 pub async fn get_or_create_user(core_ref: &CoreRef, name: &str) -> crate::Result<UserId> {

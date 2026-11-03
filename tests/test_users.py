@@ -1,8 +1,16 @@
 import time
 from urllib.parse import quote
 
+import pytest
 import requests
-from utils import TEST_MACHINE_NAME, TEST_PROJECT
+from utils import (
+    KIB,
+    MIB,
+    TEST_MACHINE_NAME,
+    TEST_PROJECT,
+    padded_payload,
+    read_http_status,
+)
 from utils import TestTask as TT
 
 
@@ -152,11 +160,99 @@ def test_user_active_task_limit_after_restart(qscheduler_test):
     tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(3)]
     qs.restart()
 
-    # The running task may not survive the restart with the test backend, the waiting ones do.
-    active = sum(
-        qs.get_task_state(t) not in ("finished", "failed", "cancelled") for t in tasks
-    )
-    assert active >= 2
-    for _ in range(3 - active):
-        qs.submit(TT().compute_time(60), user="alice")
+    # The test backend re-runs a resumed task from its payload, so all of them are still active.
+    for t in tasks:
+        assert qs.get_task_state(t) not in ("finished", "failed", "cancelled")
     qs.submit(TT(), user="alice", expect_error=429)
+
+
+def _long_task(size=400 * KIB):
+    return padded_payload(size, TT().compute_time(60))
+
+
+def test_user_payload_limit(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M")
+    qs.start()
+
+    first = qs.submit(None, payload=_long_task(), user="alice")
+    qs.submit(None, payload=_long_task(), user="alice")
+    r = qs.submit(None, payload=_long_task(), user="alice", expect_error=429)
+    assert "alice" in r.text and str(MIB) in r.text
+    # What still fits is accepted.
+    qs.submit(None, payload=_long_task(100 * KIB), user="alice")
+
+    # The limit is per user.
+    qs.submit(None, payload=_long_task(), user="bob")
+
+    # A cancelled task gives its bytes back.
+    qs.cancel_task(first)
+    qs.wait_for_cancelled(first)
+    qs.submit(None, payload=_long_task(), user="alice")
+    qs.submit(None, payload=_long_task(), user="alice", expect_error=429)
+
+
+@pytest.mark.parametrize(
+    "task", [TT(), TT().error("fails")], ids=["finished", "failed"]
+)
+def test_user_payload_limit_released_by_final_state(qscheduler_test, task):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M")
+    qs.start()
+
+    # A payload filling the limit exactly fits, again and again once the previous one ended.
+    for _ in range(2):
+        t = qs.submit(None, payload=padded_payload(MIB, task))
+        qs.wait_for_task_state(t, ("finished", "failed"))
+
+
+def test_user_payload_over_limit_is_too_large(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M")
+    qs.start()
+
+    r = qs.submit(None, payload=padded_payload(MIB + 1), expect_error=413)
+    assert str(MIB) in r.text
+    # A rejected request doesn't create the user.
+    assert qs.list_users() == []
+
+
+def test_user_limits_reject_upload_before_reading_it(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M", max_user_active_tasks=3)
+    qs.start()
+
+    # None of these sends a body: without the rejection they would wait for it.
+    with qs.submit_headers_only(MIB + 1, user="alice") as sock:
+        assert read_http_status(sock) == 413
+    assert qs.list_users() == []
+
+    qs.submit(None, payload=_long_task(), user="alice")
+    qs.submit(None, payload=_long_task(), user="alice")
+    with qs.submit_headers_only(400 * KIB, user="alice") as sock:
+        assert read_http_status(sock) == 429
+
+    # An upload that fits waits for its body, and is accepted.
+    with qs.submit_headers_only(100 * KIB, user="alice") as sock:
+        with pytest.raises(TimeoutError):
+            read_http_status(sock, timeout=0.5)
+        sock.sendall(_long_task(100 * KIB))
+        assert read_http_status(sock) == 201
+
+    # The limit of active tasks is checked up front as well.
+    with qs.submit_headers_only(1, user="alice") as sock:
+        assert read_http_status(sock) == 429
+
+
+def test_user_payload_limit_without_content_length(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M")
+    qs.start()
+
+    # An iterator is sent chunked, so the size is only known once the body is read.
+    qs.submit(None, payload=iter([padded_payload(MIB + 1)]), expect_error=413)
+    assert qs.list_users() == []
+
+    qs.submit(None, payload=iter([_long_task()]), user="alice")
+    qs.submit(None, payload=iter([_long_task()]), user="alice")
+    qs.submit(None, payload=iter([_long_task()]), user="alice", expect_error=429)
