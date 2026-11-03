@@ -2,11 +2,11 @@
 
 import json
 
+from utils import MIB, padded_payload
 from utils import TestTask as TT
 
 # Stand-in for a serialized IQM `RunDefinition`; qscheduler forwards it without parsing.
 RUN_DEFINITION = b"\x0a\x04test\x12\x00\xff"
-MIB = 1024 * 1024
 
 
 def test_pulse_rejected_without_pulse_access(qscheduler):
@@ -137,26 +137,20 @@ def test_machine_artifact_unknown_name(qscheduler):
     qscheduler.get_machine_artifact("settings", machine="nope", expect_error=404)
 
 
-def _padded_payload(size: int) -> bytes:
-    """A valid test-backend payload padded with trailing JSON whitespace to `size` bytes."""
-    payload = TT().create_payload()
-    return payload + b" " * (size - len(payload))
-
-
 def test_large_payload_default_limit(qscheduler_test):
     """Compiled pulse jobs are several MiB, well over axum's 2 MiB default limit."""
     qs = qscheduler_test
     qs.config(pulse_access=True)
     qs.start()
-    t = qs.submit(None, kind="pulse", payload=_padded_payload(5 * MIB))
+    t = qs.submit(None, kind="pulse", payload=padded_payload(5 * MIB))
     qs.wait_for_finished(t)
-    qs.submit(None, payload=_padded_payload(33 * MIB), expect_error=413)
+    qs.submit(None, payload=padded_payload(33 * MIB), expect_error=413)
 
 
 def test_payload_limit_configurable(qscheduler_test):
     qs = qscheduler_test
-    qs.config(max_payload_mb=1)
+    qs.config(max_payload="1M")
     qs.start()
-    t = qs.submit(None, payload=_padded_payload(MIB - 1024))
+    t = qs.submit(None, payload=padded_payload(MIB - 1024))
     qs.wait_for_finished(t)
-    qs.submit(None, payload=_padded_payload(MIB + 1024), expect_error=413)
+    qs.submit(None, payload=padded_payload(MIB + 1024), expect_error=413)

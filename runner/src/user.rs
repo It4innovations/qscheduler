@@ -20,6 +20,8 @@ pub struct User {
     pub name: String,
     /// Number of the user's tasks in a non-final state; all of them are resident in memory.
     pub active_tasks: u32,
+    /// Total size of the payloads of the user's tasks in a non-final state, in bytes.
+    pub active_payload_bytes: u64,
     /// Since when the user has had no active task (or was last looked up); drives its eviction
     /// from memory.
     idle_since: Instant,
@@ -40,6 +42,11 @@ impl UserMap {
 
     pub fn find_user(&self, id: UserId) -> Option<&User> {
         self.users.get(&id)
+    }
+
+    /// Looks up a user by name without marking it as recently used.
+    pub fn find_by_name(&self, name: &str) -> Option<&User> {
+        self.users.get(self.users_by_name.get(name)?)
     }
 
     /// Looks up a user by name, marking it as recently used so it isn't evicted before the
@@ -69,6 +76,7 @@ impl UserMap {
                     User {
                         name: name.to_string(),
                         active_tasks: 0,
+                        active_payload_bytes: 0,
                         idle_since: Instant::now(),
                     },
                 );
@@ -77,18 +85,20 @@ impl UserMap {
     }
 
     /// Counts a new active task of the user; fails if the user is not in memory.
-    pub fn task_activated(&mut self, id: UserId) -> crate::Result<()> {
+    pub fn task_activated(&mut self, id: UserId, payload_size: u64) -> crate::Result<()> {
         let user = self.users.get_mut(&id).ok_or_else(|| {
             crate::error::RunnerError::GenericError(format!("user {id} is not loaded"))
         })?;
         user.active_tasks += 1;
+        user.active_payload_bytes += payload_size;
         Ok(())
     }
 
     /// Uncounts an active task of the user, which reached a final state (or left memory).
-    pub fn task_deactivated(&mut self, id: UserId) {
+    pub fn task_deactivated(&mut self, id: UserId, payload_size: u64) {
         let user = self.users.get_mut(&id).unwrap();
         user.active_tasks -= 1;
+        user.active_payload_bytes -= payload_size;
         if user.active_tasks == 0 {
             user.idle_since = Instant::now();
         }
@@ -135,7 +145,29 @@ mod tests {
     #[test]
     fn activation_requires_loaded_user() {
         let mut users = UserMap::default();
-        assert!(users.task_activated(uid(1)).is_err());
+        assert!(users.task_activated(uid(1), 0).is_err());
+    }
+
+    #[test]
+    fn tracks_active_payload_bytes() {
+        let mut users = UserMap::default();
+        users.insert(uid(1), "alice");
+        users.insert(uid(2), "bob");
+        users.task_activated(uid(1), 100).unwrap();
+        users.task_activated(uid(1), 20).unwrap();
+        users.task_activated(uid(2), 7).unwrap();
+        assert_eq!(users.get_user(uid(1)).active_payload_bytes, 120);
+        assert_eq!(users.get_user(uid(2)).active_payload_bytes, 7);
+
+        // Re-inserting a loaded user keeps its counters.
+        users.insert(uid(1), "alice");
+        assert_eq!(users.get_user(uid(1)).active_payload_bytes, 120);
+
+        users.task_deactivated(uid(1), 100);
+        assert_eq!(users.get_user(uid(1)).active_payload_bytes, 20);
+        users.task_deactivated(uid(1), 20);
+        assert_eq!(users.get_user(uid(1)).active_payload_bytes, 0);
+        assert_eq!(users.find_by_name("bob").unwrap().active_payload_bytes, 7);
     }
 
     #[test]
@@ -143,7 +175,7 @@ mod tests {
         let mut users = UserMap::default();
         users.insert(uid(1), "alice");
         users.insert(uid(2), "bob");
-        users.task_activated(uid(1)).unwrap();
+        users.task_activated(uid(1), 0).unwrap();
         let retention = Duration::from_secs(10);
         let later = Instant::now() + retention;
 
@@ -155,10 +187,10 @@ mod tests {
         assert!(users.touch_by_name("bob").is_none());
 
         // Its last task finishing starts the idle period.
-        users.task_activated(uid(1)).unwrap();
-        users.task_deactivated(uid(1));
+        users.task_activated(uid(1), 0).unwrap();
+        users.task_deactivated(uid(1), 0);
         assert_eq!(users.get_user(uid(1)).active_tasks, 1);
-        users.task_deactivated(uid(1));
+        users.task_deactivated(uid(1), 0);
         assert_eq!(users.evict_idle(Instant::now(), retention), 0);
         assert_eq!(users.evict_idle(Instant::now() + retention, retention), 1);
         assert!(users.touch_by_name("alice").is_none());

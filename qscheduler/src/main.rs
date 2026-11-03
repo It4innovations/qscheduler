@@ -76,10 +76,12 @@ struct ServeOpts {
     #[arg(long, default_value = "4300")]
     pub port: u16,
 
-    /// Maximum size of a request body, e.g. a task payload, in MiB. Compiled pulse-level jobs
-    /// (IQM `RunDefinition`s) carry the full settings tree and are typically several MiB.
-    #[arg(long, default_value = "32", value_parser = clap::value_parser!(u32).range(1..=4096))]
-    pub max_payload_mb: u32,
+    /// Maximum size of a request body, e.g. a task payload, at most 4G. A whole number with an
+    /// optional K, M, G or T suffix (powers of 1024), e.g. `32M`; without a suffix it is in
+    /// bytes. Compiled pulse-level jobs (IQM `RunDefinition`s) carry the full settings tree and
+    /// are typically several MiB.
+    #[arg(long, default_value = "32M", value_parser = parse_max_payload)]
+    pub max_payload: u64,
 
     /// How long a finished task (with its state) is kept in memory for fast status queries,
     /// e.g. `10m`. Afterwards it is read from the database.
@@ -94,6 +96,11 @@ struct ServeOpts {
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub max_user_active_tasks: u32,
+
+    /// Maximum total size of the payloads of a single user's active tasks, in the format of
+    /// `--max-payload`, e.g. `200M` or `1G`. Further submits are rejected until some of them end.
+    #[arg(long, default_value = "200M", value_parser = parse_size)]
+    pub max_user_active_payload: u64,
 }
 
 #[derive(Parser)]
@@ -176,6 +183,41 @@ impl MachineConfigArgs {
 
 fn parse_human_time(s: &str) -> Result<Duration, humantime::DurationError> {
     humantime::parse_duration(s)
+}
+
+/// Parses a positive size in bytes: a whole number with an optional K, M, G or T suffix (powers
+/// of 1024), in any case and optionally followed by `B` or `iB`.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let invalid =
+        || "expected a whole number with an optional K, M, G or T suffix, e.g. 200M".to_string();
+    let s = s.trim();
+    let (number, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let multiplier: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1 << 10,
+        "m" | "mb" | "mib" => 1 << 20,
+        "g" | "gb" | "gib" => 1 << 30,
+        "t" | "tb" | "tib" => 1 << 40,
+        _ => return Err(invalid()),
+    };
+    let size = number
+        .parse::<u64>()
+        .map_err(|_| invalid())?
+        .checked_mul(multiplier)
+        .ok_or_else(|| "size is too large".to_string())?;
+    if size == 0 {
+        return Err("size must be positive".to_string());
+    }
+    Ok(size)
+}
+
+fn parse_max_payload(s: &str) -> Result<u64, String> {
+    const MAX_PAYLOAD: u64 = 4 << 30;
+    let size = parse_size(s)?;
+    if size > MAX_PAYLOAD {
+        return Err("size must be at most 4G".to_string());
+    }
+    Ok(size)
 }
 
 #[derive(Parser)]
@@ -262,9 +304,10 @@ async fn main() {
             dotenvy::dotenv().ok();
             let config = ServiceConfiguration {
                 port: opts.port,
-                max_payload_mb: opts.max_payload_mb as usize,
+                max_payload: opts.max_payload as usize,
                 task_retention: opts.task_retention,
                 max_user_active_tasks: opts.max_user_active_tasks,
+                max_user_active_payload: opts.max_user_active_payload,
             };
             tracing::info!(config = ?config, "starting qscheduler");
             match service::run(env!("CARGO_PKG_VERSION"), config).await {
@@ -475,5 +518,55 @@ async fn cmd_notifier_remove(args: NotifierRemoveArgs) {
             tracing::error!(name = %args.name, error = %e, "failed to remove notifier");
             die(format!("failed to remove notifier '{}': {e}", args.name));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_max_payload, parse_size};
+
+    #[test]
+    fn parses_sizes() {
+        assert_eq!(parse_size("1"), Ok(1));
+        assert_eq!(parse_size("512B"), Ok(512));
+        for unit in ["K", "k", "KB", "kb", "KiB", "kib"] {
+            assert_eq!(parse_size(&format!("2{unit}")), Ok(2 * 1024));
+        }
+        for unit in ["M", "m", "MB", "MiB"] {
+            assert_eq!(parse_size(&format!("200{unit}")), Ok(200 * 1024 * 1024));
+        }
+        assert_eq!(parse_size("1G"), Ok(1 << 30));
+        assert_eq!(parse_size("1GB"), Ok(1 << 30));
+        assert_eq!(parse_size("3T"), Ok(3 << 40));
+        assert_eq!(parse_size(" 2 M "), Ok(2 << 20));
+    }
+
+    #[test]
+    fn rejects_invalid_sizes() {
+        for size in [
+            "",
+            "M",
+            "0",
+            "0M",
+            "-1",
+            "-1M",
+            "1.5G",
+            "1X",
+            "1MM",
+            "1 000",
+            "1Mi",
+            "20000000T",
+            "99999999999999999999",
+        ] {
+            assert!(parse_size(size).is_err(), "{size:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn max_payload_is_limited_to_4g() {
+        assert_eq!(parse_max_payload("32M"), Ok(32 << 20));
+        assert_eq!(parse_max_payload("4G"), Ok(4 << 30));
+        assert!(parse_max_payload("4097M").is_err());
+        assert!(parse_max_payload("1T").is_err());
     }
 }

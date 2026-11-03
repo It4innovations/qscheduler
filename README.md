@@ -54,10 +54,14 @@ For local development, `docker compose up -d` starts PostgreSQL from the include
 ADMIN_TOKEN=my-secret qscheduler serve --port 4300
 ```
 
-Request bodies are limited to 32 MiB by default; change the limit with `--max-payload-mb <N>`.
+Request bodies are limited to 32 MiB by default; change the limit with `--max-payload <SIZE>`, at
+most `4G`. A size is a whole number with an optional `K`, `M`, `G` or `T` suffix (powers of 1024),
+e.g. `200M`; without a suffix it is in bytes.
 
-Each user may have at most 2000 active (not yet finished, failed, or cancelled) tasks by default;
-further submits get HTTP 429. Change the limit with `--max-user-active-tasks <N>`.
+Each user may have at most 2000 active (not yet finished, failed, or cancelled) tasks by default,
+with payloads of at most 200 MiB in total. Change the limits with `--max-user-active-tasks <N>` and
+`--max-user-active-payload <SIZE>`. A submit over a limit gets HTTP 429, or 413 if the payload alone
+is larger than the limit; a request with a `Content-Length` is rejected before its body is read.
 
 On `SIGTERM` (e.g. `docker stop`) or `Ctrl+C`, the service shuts down gracefully: it finishes
 in-flight requests, applies accepted cancel requests, writes all pending state (including the

@@ -98,6 +98,9 @@ pub struct RunnerConfiguration {
     pub task_retention: std::time::Duration,
     /// Maximum number of non-final tasks a single user may have; further submits are rejected.
     pub max_user_active_tasks: u32,
+    /// Maximum total size of the payloads of a single user's non-final tasks, in bytes; submits
+    /// that would exceed it are rejected.
+    pub max_user_active_payload: u64,
 }
 
 #[cfg(test)]

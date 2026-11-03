@@ -310,11 +310,12 @@ impl Task {
     /// (it is cleared in the DB as well), and stops counting the task as its user's active one.
     pub(crate) fn set_state(&mut self, state: TaskState, users: &mut UserMap) {
         if state.is_final() {
-            self.config.payload = Bytes::new();
             if self.finished.is_none() {
                 self.finished = Some(Instant::now());
-                users.task_deactivated(self.config.user_id);
+                // Before the payload is dropped: its size is what the user gets back.
+                users.task_deactivated(self.config.user_id, self.config.payload.len() as u64);
             }
+            self.config.payload = Bytes::new();
         }
         self.state = state;
     }

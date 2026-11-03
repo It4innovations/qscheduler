@@ -8,6 +8,8 @@ asserts the state was rebuilt from the database.
 import time
 from datetime import datetime
 
+import pytest
+from utils import KIB, MIB, padded_payload
 from utils import TestTask as TT
 
 
@@ -106,6 +108,137 @@ def test_restore_closes_running_session(qscheduler_test):
 
     qs.wait_for_session_closed(session_id)
     qs.wait_for_cancelled(task_id)
+
+
+def _restore_running(qs):
+    task = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.wait_for_running(task)
+    return task
+
+
+def _restore_waiting(qs):
+    blocker = qs.submit(TT().compute_time(60), user="bob")
+    qs.wait_for_running(blocker)
+    task = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.assert_task_waiting(task)
+    return task
+
+
+def _restore_session_running(qs):
+    session_id = qs.new_session(time_limit=30, owner="bob")
+    qs.wait_for_session_open(session_id)
+    task = qs.submit(
+        None, payload=_restore_payload(), session_id=session_id, user="alice"
+    )
+    qs.wait_for_running(task)
+    return task
+
+
+def _restore_session_orphan(qs):
+    """A task of an open session never submitted to the backend: the restore cancels it without
+    keeping it in memory."""
+    session_id = qs.new_session(time_limit=30, owner="bob")
+    qs.wait_for_session_open(session_id)
+    blocker = qs.submit(TT().compute_time(60), session_id=session_id, user="bob")
+    qs.wait_for_running(blocker)
+    task = qs.submit(
+        None, payload=_restore_payload(), session_id=session_id, user="alice"
+    )
+    qs.assert_task_waiting(task)
+    return task
+
+
+def _restore_payload():
+    return padded_payload(400 * KIB, TT().compute_time(60))
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        _restore_running,
+        _restore_waiting,
+        _restore_session_running,
+        _restore_session_orphan,
+    ],
+    ids=["running", "waiting", "session_running", "session_orphan"],
+)
+def test_restore_gives_user_full_allowance_back(qscheduler_test, setup):
+    """Whichever way a task goes through `Core::restore`, once it has ended its user has both
+    limits fully available: nothing stays counted that nothing would uncount."""
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_tasks=2, max_user_active_payload="1M")
+    qs.start()
+
+    task = setup(qs)
+    qs.restart()
+
+    # The restore cancels the tasks of a session on its own.
+    if qs.get_task(task).get("session") is None:
+        qs.cancel_task(task)
+    qs.wait_for_cancelled(task)
+
+    # The whole limit of active tasks is free...
+    tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(2)]
+    qs.submit(TT(), user="alice", expect_error=429)
+    for t in tasks:
+        qs.cancel_task(t)
+        qs.wait_for_cancelled(t)
+
+    # ... and so is the whole limit of payload bytes.
+    qs.submit(None, payload=padded_payload(MIB, TT().compute_time(60)), user="alice")
+    qs.submit(TT(), user="alice", expect_error=429)
+
+
+def test_restore_keeps_user_payload_size(qscheduler_test):
+    """Running and waiting tasks keep their bytes counted, exactly once, across restarts."""
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_payload="1M")
+    qs.start()
+
+    running = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.wait_for_running(running)
+    waiting = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.assert_task_waiting(waiting)
+    free = MIB - 2 * 400 * KIB
+
+    for _ in range(2):
+        qs.restart()
+        qs.submit(
+            None, payload=padded_payload(free + 1), user="alice", expect_error=429
+        )
+
+    qs.submit(None, payload=padded_payload(free, TT().compute_time(60)), user="alice")
+    qs.submit(TT(), user="alice", expect_error=429)
+
+
+def test_machine_update_keeps_user_payload_size(qscheduler_test):
+    """Updating a machine restores its tasks; their bytes must not be counted twice."""
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_payload="1M")
+    qs.start()
+
+    running = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.wait_for_running(running)
+    waiting = qs.submit(None, payload=_restore_payload(), user="alice")
+    qs.assert_task_waiting(waiting)
+    free = MIB - 2 * 400 * KIB
+
+    qs.api_update_machine(queue_size=1)
+
+    qs.submit(None, payload=padded_payload(free + 1), user="alice", expect_error=429)
+    qs.submit(None, payload=padded_payload(free, TT().compute_time(60)), user="alice")
+
+
+def test_machine_removal_releases_user_payload_size(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_payload="1M")
+    qs.start()
+    qs.api_add_machine("second")
+
+    qs.submit(None, payload=_restore_payload(), machine="second", user="alice")
+    qs.api_remove_machine("second", force=True)
+
+    qs.submit(None, payload=padded_payload(MIB, TT().compute_time(60)), user="alice")
 
 
 def test_restore_waiting_session(qscheduler_test):

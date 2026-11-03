@@ -1,10 +1,11 @@
 import json
 import os
+import socket
 import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -13,6 +14,8 @@ TEST_PROJECT = "test-project"
 TEST_MACHINE_NAME = "TestMachine"
 TEST_USER = "test-user"
 ADMIN_TOKEN = "test-admin-token"
+KIB = 1024
+MIB = 1024 * KIB
 
 
 class QSchedulerError(Exception):
@@ -61,6 +64,20 @@ class TestTask:
         return data.encode()
 
 
+def padded_payload(size: int, task: TestTask | None = None) -> bytes:
+    """The payload of `task` (default: a plain `TestTask`) padded with trailing JSON whitespace
+    to `size` bytes; it stays valid for the test backend."""
+    payload = (task or TestTask()).create_payload()
+    return payload + b" " * (size - len(payload))
+
+
+def read_http_status(sock: socket.socket, timeout: float = 5.0) -> int:
+    """Reads the status of the HTTP response arriving on `sock`; `TimeoutError` if there is none
+    within `timeout`."""
+    sock.settimeout(timeout)
+    return int(sock.recv(4096).split()[1])
+
+
 @dataclass(frozen=True)
 class Config:
     """Settings of a `QScheduler`, changed with `QScheduler.config()`. None keeps the default of
@@ -73,12 +90,14 @@ class Config:
     max_session_time: int | None = None
     limit_check_interval: int | None = None
     default_task_time_limit: int | None = None
-    # Request body limit in MiB (`--max-payload-mb`).
-    max_payload_mb: int | None = None
+    # Request body limit (`--max-payload`, e.g. "1M").
+    max_payload: str | None = None
     # How long finished tasks stay in memory (`--task-retention`, e.g. "1s").
     task_retention: str | None = None
     # Limit of a user's active tasks (`--max-user-active-tasks`).
     max_user_active_tasks: int | None = None
+    # Limit of the total size of a user's active payloads (`--max-user-active-payload`, e.g. "1M").
+    max_user_active_payload: str | None = None
     pulse_access: bool = False
     # Bearer token of the admin endpoints; None starts the service without it.
     admin_token: str | None = ADMIN_TOKEN
@@ -198,12 +217,14 @@ class QScheduler:
 
     def _serve_args(self) -> list[str]:
         args = []
-        if self.cfg.max_payload_mb is not None:
-            args.append(f"--max-payload-mb={self.cfg.max_payload_mb}")
+        if self.cfg.max_payload is not None:
+            args.append(f"--max-payload={self.cfg.max_payload}")
         if self.cfg.task_retention is not None:
             args.append(f"--task-retention={self.cfg.task_retention}")
         if self.cfg.max_user_active_tasks is not None:
             args.append(f"--max-user-active-tasks={self.cfg.max_user_active_tasks}")
+        if self.cfg.max_user_active_payload is not None:
+            args.append(f"--max-user-active-payload={self.cfg.max_user_active_payload}")
         return args
 
     def _start_binary(self, log_name="qscheduler.log"):
@@ -416,6 +437,24 @@ class QScheduler:
         if not r.ok:
             raise QSchedulerError(f"HTTP {r.status_code} submitting task: {r.text}")
         return r.json()
+
+    def submit_headers_only(
+        self, content_length: int, user: str = TEST_USER
+    ) -> socket.socket:
+        """Starts a task upload by sending just its headers, announcing `content_length` bytes.
+        Returns the open connection: the body can be sent on it, and the response read with
+        `read_http_status`."""
+        query = urlencode(
+            {"machine": TEST_MACHINE_NAME, "project": TEST_PROJECT, "user": user}
+        )
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        sock.sendall(
+            f"POST /tasks?{query} HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            f"Content-Length: {content_length}\r\n\r\n".encode()
+        )
+        return sock
 
     def new_session(
         self,
