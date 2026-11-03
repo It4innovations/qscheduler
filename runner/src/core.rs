@@ -54,7 +54,7 @@ pub struct Core {
     session_map: SessionMap,
     project_map: ProjectMap,
     user_map: UserMap,
-    max_user_active_tasks: u32,
+    max_user_active_items: u32,
     max_user_active_payload: u64,
     notifiers: NotifierMap,
     pool: PgPool,
@@ -93,7 +93,7 @@ impl Core {
             session_map: Default::default(),
             project_map: Default::default(),
             user_map: Default::default(),
-            max_user_active_tasks: config.max_user_active_tasks,
+            max_user_active_items: config.max_user_active_items,
             max_user_active_payload: config.max_user_active_payload,
             notifiers: NotifierMap::start(config.notifiers),
             pool,
@@ -253,7 +253,8 @@ impl Core {
                     time_limit: Duration::from_millis(s.time_limit_ms as u64),
                     notifier: restore_notifier(s.notifier_id),
                 };
-                let mut session = Session::new(session_id, s.created_at, config);
+                let mut session =
+                    Session::new(session_id, s.created_at, UserId::from_db(s.user_id), config);
                 session.consumed = Duration::from_millis(s.exec_time_ms.unwrap_or(0) as u64);
                 if let Some(opened_at) = s.opened_at {
                     // Was opened but crashed before (or without) a clean close: prefer the DB's
@@ -292,7 +293,7 @@ impl Core {
                             );
                         }
                     }
-                    session_map.insert(session);
+                    keep_active_session(session_map, user_map, session);
                 }
             }
 
@@ -498,8 +499,13 @@ impl Core {
             }
             keep
         });
-        self.session_map
-            .retain(|s| s.config.machine_id != machine_id);
+        self.session_map.retain(|s| {
+            let keep = s.config.machine_id != machine_id;
+            if !keep && !matches!(s.state, SessionState::Closed { .. }) {
+                user_map.session_deactivated(s.owner_id);
+            }
+            keep
+        });
         self.machine_map.remove(machine_id)
     }
 
@@ -562,7 +568,12 @@ impl Core {
         if !project.has_time_for(config.time_limit) {
             return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
         }
-        Ok(())
+        self.check_session_owner_limit(&config.owner)
+    }
+
+    /// Fails if the user named `owner`, who may not be known yet, can't own another session.
+    fn check_session_owner_limit(&self, owner: &str) -> crate::Result<()> {
+        self.check_item_limit(owner, self.user_map.find_by_name(owner))
     }
 
     pub(crate) fn validate_task_config(&self, config: &TaskConfig) -> crate::Result<()> {
@@ -592,7 +603,7 @@ impl Core {
         self.check_user_limits(config.user_id, config.payload.len() as u64)
     }
 
-    /// Fails if the user can't have another active task with a payload of `payload_size` bytes.
+    /// Fails if the user can't have another active item with a payload of `payload_size` bytes.
     /// A user that isn't loaded passes here; `add_task` reports it.
     fn check_user_limits(&self, user_id: UserId, payload_size: u64) -> crate::Result<()> {
         match self.user_map.find_user(user_id) {
@@ -602,7 +613,7 @@ impl Core {
     }
 
     /// Like `check_user_limits`, for an upload of the user named `name`, which may not be known
-    /// yet: a user that isn't loaded has no active tasks.
+    /// yet: a user that isn't loaded has no active items.
     pub(crate) fn check_user_upload(&self, name: &str, payload_size: u64) -> crate::Result<()> {
         self.check_limits_of(name, self.user_map.find_by_name(name), payload_size)
     }
@@ -622,10 +633,14 @@ impl Core {
                 limit: self.max_user_active_payload,
             });
         }
-        if user.is_some_and(|u| u.active_tasks >= self.max_user_active_tasks) {
-            return Err(RunnerError::UserActiveTaskLimitExceeded {
+        self.check_item_limit(name, user)
+    }
+
+    fn check_item_limit(&self, name: &str, user: Option<&User>) -> crate::Result<()> {
+        if user.is_some_and(|u| u.active_items >= self.max_user_active_items) {
+            return Err(RunnerError::UserActiveItemLimitExceeded {
                 user: name.to_string(),
-                limit: self.max_user_active_tasks,
+                limit: self.max_user_active_items,
             });
         }
         Ok(())
@@ -669,19 +684,24 @@ impl Core {
         &mut self,
         session_id: SessionId,
         created_at: DateTime<Utc>,
+        owner_id: UserId,
         config: SessionConfig,
     ) -> crate::Result<SessionId> {
+        // Re-checked: concurrent requests of the owner may have been added while the session row
+        // was inserted.
+        self.check_session_owner_limit(&config.owner)?;
         let CoreSplitMut {
             machine_map,
             session_map,
+            user_map,
             ..
         } = self.split_mut();
         let machine = machine_map.find_machine_mut(config.machine_id)?;
         // Re-checked: the machine may have been suspended while the session row was inserted.
         machine.check_not_suspended()?;
-        let session = Session::new(session_id, created_at, config);
+        let session = Session::new(session_id, created_at, owner_id, config);
         machine.queue_session(&session)?;
-        session_map.insert(session);
+        keep_active_session(session_map, user_map, session);
         machine.wake_launcher();
         Ok(session_id)
     }
@@ -801,7 +821,17 @@ impl Core {
 }
 
 /// Creates a machine and its backend from a stored configuration.
-/// Keeps a restored task in memory and counts it as its user's active task. Doing both in one
+/// Keeps a session that isn't closed in memory and counts it as its owner's active item. As with
+/// `keep_restored_task`, doing both in one place keeps the count matching what can release it.
+fn keep_active_session(session_map: &mut SessionMap, user_map: &mut UserMap, session: Session) {
+    user_map.insert(session.owner_id, &session.config.owner);
+    user_map
+        .session_activated(session.owner_id)
+        .expect("user was just inserted");
+    session_map.insert(session);
+}
+
+/// Keeps a restored task in memory and counts it as its user's active item. Doing both in one
 /// place keeps the user's counters matching the tasks that can ever release them: a task that
 /// isn't kept must not be counted, as nothing would uncount it.
 fn keep_restored_task(task_map: &mut TaskMap, user_map: &mut UserMap, user_name: &str, task: Task) {

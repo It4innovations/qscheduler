@@ -1,6 +1,7 @@
 use crate::callback::{NotifierId, NotifierMap};
 use crate::machine::MachineId;
 use crate::project::ProjectId;
+use crate::user::{UserId, UserMap};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,7 +76,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    pub fn close(&mut self, closed_at: DateTime<Utc>) {
+    fn close(&mut self, closed_at: DateTime<Utc>) {
         let opened_at = match self {
             SessionState::Waiting => None,
             SessionState::Open { opened_at } => Some(*opened_at),
@@ -113,8 +114,7 @@ impl From<&SessionState> for SessionStateKind {
 pub struct SessionConfig {
     pub machine_id: MachineId,
     pub project_id: ProjectId,
-    /// Name of the user owning the session. Sessions are charged to their owner in the DB only,
-    /// so unlike a task's user, the owner doesn't have to be resident in `UserMap`.
+    /// Name of the user owning the session.
     pub owner: String,
     pub time_limit: Duration,
     /// Notifier that receives the session's open/close events, if any.
@@ -126,22 +126,36 @@ pub struct Session {
     pub state: SessionState,
     pub consumed: Duration,
     pub created_at: DateTime<Utc>,
+    /// Id of the user named by `config.owner`, which counts the session while it isn't closed.
+    pub owner_id: UserId,
     pub config: SessionConfig,
 }
 
 impl Session {
-    pub fn new(id: SessionId, created_at: DateTime<Utc>, config: SessionConfig) -> Self {
+    pub fn new(
+        id: SessionId,
+        created_at: DateTime<Utc>,
+        owner_id: UserId,
+        config: SessionConfig,
+    ) -> Self {
         Self {
             id,
             state: SessionState::Waiting,
             consumed: Duration::ZERO,
             created_at,
+            owner_id,
             config,
         }
     }
 
     pub fn id(&self) -> SessionId {
         self.id
+    }
+
+    /// Closes the session, which stops counting as its owner's active item.
+    pub(crate) fn close(&mut self, closed_at: DateTime<Utc>, user_map: &mut UserMap) {
+        self.state.close(closed_at);
+        user_map.session_deactivated(self.owner_id);
     }
 }
 

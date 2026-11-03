@@ -166,7 +166,7 @@ def test_restore_gives_user_full_allowance_back(qscheduler_test, setup):
     """Whichever way a task goes through `Core::restore`, once it has ended its user has both
     limits fully available: nothing stays counted that nothing would uncount."""
     qs = qscheduler_test
-    qs.config(queue_size=1, max_user_active_tasks=2, max_user_active_payload="1M")
+    qs.config(queue_size=1, max_user_active_items=2, max_user_active_payload="1M")
     qs.start()
 
     task = setup(qs)
@@ -239,6 +239,85 @@ def test_machine_removal_releases_user_payload_size(qscheduler_test):
     qs.api_remove_machine("second", force=True)
 
     qs.submit(None, payload=padded_payload(MIB, TT().compute_time(60)), user="alice")
+
+
+def test_restore_keeps_waiting_session_counted(qscheduler_test):
+    """A session re-queued by a restart stays counted for its owner, exactly once."""
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=2)
+    qs.start()
+
+    qs.wait_for_running(qs.submit(TT().compute_time(60), user="bob"))
+    qs.new_session(time_limit=60, owner="alice")
+
+    for _ in range(2):
+        qs.restart()
+
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def test_restore_releases_closed_open_session(qscheduler_test):
+    """An open session is closed by a restart, so it no longer counts for its owner."""
+    qs = qscheduler_test
+    qs.config(max_user_active_items=1)
+    qs.start()
+
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+
+    qs.restart()
+    qs.wait_for_session_closed(session_id)
+
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def test_machine_update_keeps_waiting_session_counted(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=2)
+    qs.start()
+
+    qs.wait_for_running(qs.submit(TT().compute_time(60), user="bob"))
+    qs.new_session(time_limit=60, owner="alice")
+
+    qs.api_update_machine(queue_size=1)
+
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def test_machine_update_releases_open_session(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(max_user_active_items=1)
+    qs.start()
+
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+
+    qs.api_update_machine()
+    qs.wait_for_session_closed(session_id)
+
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def test_machine_removal_releases_sessions(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=2)
+    qs.start()
+    qs.api_add_machine("second")
+
+    opened = qs.new_session(time_limit=60, owner="alice", machine="second")
+    qs.wait_for_session_open(opened)
+    qs.new_session(time_limit=60, owner="alice", machine="second")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+    qs.api_remove_machine("second", force=True)
+
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
 
 
 def test_restore_waiting_session(qscheduler_test):

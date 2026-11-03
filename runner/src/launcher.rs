@@ -368,7 +368,7 @@ fn close_running_session(
     }
     let session = session_map.get_session_mut(s.session_id);
     let now = Utc::now();
-    session.state.close(now);
+    session.close(now, user_map);
     session.consumed = exec_time;
     let machine = machine_map.get_machine_mut(machine_id);
     let mut cancelled_tasks = Vec::new();
@@ -411,12 +411,13 @@ fn close_queued_session(
     session_map: &mut SessionMap,
     machine: &Machine,
     project_map: &ProjectMap,
+    user_map: &mut UserMap,
     notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) {
     let session = session_map.get_session_mut(session_id);
     let now = Utc::now();
-    session.state.close(now);
+    session.close(now, user_map);
     notify_session(notifiers, session, &machine.config().name, project_map);
     db_updates.push(DbUpdate::SessionClosed {
         session_id,
@@ -896,6 +897,7 @@ async fn launcher_main(
                             session_map,
                             machine,
                             project_map,
+                            user_map,
                             notifiers,
                             &mut db_updates,
                         );
@@ -957,6 +959,7 @@ async fn launcher_main(
                                 session_map,
                                 machine_map.get_machine(machine_id),
                                 ctx.project_map,
+                                ctx.user_map,
                                 notifiers,
                                 ctx.db_updates,
                             );

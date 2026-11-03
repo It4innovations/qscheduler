@@ -185,6 +185,7 @@ pub struct RestoredSession {
     pub id: i64,
     pub machine_id: i32,
     pub project_id: i32,
+    pub user_id: i32,
     pub owner: String,
     pub time_limit_ms: i64,
     pub opened_at: Option<DateTime<Utc>>,
@@ -775,7 +776,7 @@ pub async fn load_active_sessions(
 ) -> sqlx::Result<Vec<RestoredSession>> {
     let task_session_ids: Vec<i64> = active_tasks.iter().filter_map(|t| t.session_id).collect();
     sqlx::query_as::<_, RestoredSession>(
-        "SELECT s.id, s.machine_id, s.project_id, u.name AS owner, s.time_limit_ms, s.opened_at, \
+        "SELECT s.id, s.machine_id, s.project_id, s.user_id, u.name AS owner, s.time_limit_ms, s.opened_at, \
                 s.updated_at, s.closed_at, s.exec_time_ms, s.created_at, s.notifier_id \
          FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE s.closed_at IS NULL OR s.id = ANY($1)",

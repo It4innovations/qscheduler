@@ -104,7 +104,7 @@ fn check_content_type(kind: TaskKind, headers: &HeaderMap) -> runner::Result<()>
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
         (status = 413, description = "The payload is larger than the service's maximum request body size, or than the limit on the total size of a user's active task payloads. Retrying cannot succeed."),
         (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, the session is invalid or not open, `kind=pulse` on a machine without pulse-level access, or a `Content-Type` that doesn't match `kind`."),
-        (status = 429, description = "The user has reached the service's limit of active (not yet finished, failed, or cancelled) tasks, or the payload does not fit into what remains of the limit on the total size of the user's active task payloads. Submit again once some of them end. A request with a `Content-Length` can be rejected this way before its body is read.")
+        (status = 429, description = "The user has reached the service's limit of active items (tasks not yet finished, failed, or cancelled, plus sessions not yet closed), or the payload does not fit into what remains of the limit on the total size of the user's active task payloads. Submit again once some of them end. A request with a `Content-Length` can be rejected this way before its body is read.")
     )
 )]
 pub(crate) async fn create_task(
@@ -157,7 +157,7 @@ fn submit_error(e: RunnerError) -> (StatusCode, String) {
         RunnerError::UserPayloadLimitExceeded {
             requested, limit, ..
         } if requested > limit => client_warn(StatusCode::PAYLOAD_TOO_LARGE, e),
-        RunnerError::UserActiveTaskLimitExceeded { .. }
+        RunnerError::UserActiveItemLimitExceeded { .. }
         | RunnerError::UserPayloadLimitExceeded { .. } => {
             client_warn(StatusCode::TOO_MANY_REQUESTS, e)
         }

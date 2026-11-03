@@ -1,6 +1,6 @@
 use clap::Parser;
 use runner::config::{
-    DEFAULT_MAX_USER_ACTIVE_TASKS, DEFAULT_QUEUE_SIZE, MachineConfiguration, NotifierConfiguration,
+    DEFAULT_MAX_USER_ACTIVE_ITEMS, DEFAULT_QUEUE_SIZE, MachineConfiguration, NotifierConfiguration,
 };
 use runner::error::RunnerError;
 use runner::{BackendConfig, IqmBackendConfig};
@@ -88,14 +88,15 @@ struct ServeOpts {
     #[arg(long, value_parser = parse_human_time, default_value = "10m")]
     pub task_retention: Duration,
 
-    /// Maximum number of active (not yet finished, failed, or cancelled) tasks a single user may
-    /// have. Further submits are rejected until some of them end.
+    /// Maximum number of active items a single user may have: tasks not yet finished, failed, or
+    /// cancelled, plus owned sessions not yet closed. Further tasks and sessions are rejected until
+    /// some of them end.
     #[arg(
         long,
-        default_value_t = DEFAULT_MAX_USER_ACTIVE_TASKS,
+        default_value_t = DEFAULT_MAX_USER_ACTIVE_ITEMS,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
-    pub max_user_active_tasks: u32,
+    pub max_user_active_items: u32,
 
     /// Maximum total size of the payloads of a single user's active tasks, in the format of
     /// `--max-payload`, e.g. `200M` or `1G`. Further submits are rejected until some of them end.
@@ -306,7 +307,7 @@ async fn main() {
                 port: opts.port,
                 max_payload: opts.max_payload as usize,
                 task_retention: opts.task_retention,
-                max_user_active_tasks: opts.max_user_active_tasks,
+                max_user_active_items: opts.max_user_active_items,
                 max_user_active_payload: opts.max_user_active_payload,
             };
             tracing::info!(config = ?config, "starting qscheduler");

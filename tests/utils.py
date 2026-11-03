@@ -94,8 +94,8 @@ class Config:
     max_payload: str | None = None
     # How long finished tasks stay in memory (`--task-retention`, e.g. "1s").
     task_retention: str | None = None
-    # Limit of a user's active tasks (`--max-user-active-tasks`).
-    max_user_active_tasks: int | None = None
+    # Limit of a user's active tasks and sessions (`--max-user-active-items`).
+    max_user_active_items: int | None = None
     # Limit of the total size of a user's active payloads (`--max-user-active-payload`, e.g. "1M").
     max_user_active_payload: str | None = None
     pulse_access: bool = False
@@ -221,8 +221,8 @@ class QScheduler:
             args.append(f"--max-payload={self.cfg.max_payload}")
         if self.cfg.task_retention is not None:
             args.append(f"--task-retention={self.cfg.task_retention}")
-        if self.cfg.max_user_active_tasks is not None:
-            args.append(f"--max-user-active-tasks={self.cfg.max_user_active_tasks}")
+        if self.cfg.max_user_active_items is not None:
+            args.append(f"--max-user-active-items={self.cfg.max_user_active_items}")
         if self.cfg.max_user_active_payload is not None:
             args.append(f"--max-user-active-payload={self.cfg.max_user_active_payload}")
         return args

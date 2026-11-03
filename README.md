@@ -58,10 +58,11 @@ Request bodies are limited to 32 MiB by default; change the limit with `--max-pa
 most `4G`. A size is a whole number with an optional `K`, `M`, `G` or `T` suffix (powers of 1024),
 e.g. `200M`; without a suffix it is in bytes.
 
-Each user may have at most 2000 active (not yet finished, failed, or cancelled) tasks by default,
-with payloads of at most 200 MiB in total. Change the limits with `--max-user-active-tasks <N>` and
-`--max-user-active-payload <SIZE>`. A submit over a limit gets HTTP 429, or 413 if the payload alone
-is larger than the limit; a request with a `Content-Length` is rejected before its body is read.
+Each user may have at most 2000 active items by default: tasks not yet finished, failed, or
+cancelled, plus owned sessions not yet closed. Their task payloads may take at most 200 MiB in total.
+Change the limits with `--max-user-active-items <N>` and `--max-user-active-payload <SIZE>`. A
+request over a limit gets HTTP 429, or 413 if the payload alone is larger than the limit; a task
+submit with a `Content-Length` is rejected before its body is read.
 
 On `SIGTERM` (e.g. `docker stop`) or `Ctrl+C`, the service shuts down gracefully: it finishes
 in-flight requests, applies accepted cancel requests, writes all pending state (including the
