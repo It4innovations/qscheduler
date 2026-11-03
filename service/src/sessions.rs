@@ -69,7 +69,8 @@ pub(crate) async fn get_session(
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 404, description = "Unknown `machine`."),
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
-        (status = 422, description = "Unknown `project` or `notify`, `owner` longer than 250 characters, or `time_limit_ms` exceeds the machine's `max_session_time_ms`.")
+        (status = 422, description = "Unknown `project` or `notify`, `owner` longer than 250 characters, or `time_limit_ms` exceeds the machine's `max_session_time_ms`."),
+        (status = 429, description = "The owner has reached the service's limit of active items: tasks not yet finished, failed, or cancelled, plus sessions not yet closed. Try again once some of them have ended.")
     )
 )]
 pub(crate) async fn create_session_handler(
@@ -107,6 +108,9 @@ pub(crate) async fn create_session_handler(
             }
             RunnerError::SessionDurationExceedsLimit { .. } => {
                 client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
+            }
+            RunnerError::UserActiveItemLimitExceeded { .. } => {
+                client_warn(StatusCode::TOO_MANY_REQUESTS, e)
             }
             RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
                 client_error(StatusCode::CONFLICT, e)

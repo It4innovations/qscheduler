@@ -225,7 +225,7 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
         machines,
         notifiers,
         task_retention: service_conf.task_retention,
-        max_user_active_tasks: service_conf.max_user_active_tasks,
+        max_user_active_items: service_conf.max_user_active_items,
         max_user_active_payload: service_conf.max_user_active_payload,
     };
     let core_ref = Core::new(runner_conf, pool).await?;

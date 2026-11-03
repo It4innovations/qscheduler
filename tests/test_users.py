@@ -120,9 +120,9 @@ def test_user_consumption_name_in_path_is_decoded(qscheduler_test):
     assert r.status_code == 404
 
 
-def test_user_active_task_limit(qscheduler_test):
+def test_user_active_item_limit(qscheduler_test):
     qs = qscheduler_test
-    qs.config(max_user_active_tasks=3)
+    qs.config(max_user_active_items=3)
     qs.start()
 
     tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(3)]
@@ -140,9 +140,10 @@ def test_user_active_task_limit(qscheduler_test):
     qs.submit(TT(), user="alice", expect_error=429)
 
 
-def test_user_active_task_limit_counts_session_tasks(qscheduler_test):
+def test_user_active_item_limit_counts_session_tasks(qscheduler_test):
+    """The session and the tasks in it are separate items."""
     qs = qscheduler_test
-    qs.config(max_user_active_tasks=2)
+    qs.config(max_user_active_items=3)
     qs.start()
 
     session_id = qs.new_session(time_limit=30, owner="alice")
@@ -152,9 +153,9 @@ def test_user_active_task_limit_counts_session_tasks(qscheduler_test):
     qs.submit(TT(), session_id=session_id, user="alice", expect_error=429)
 
 
-def test_user_active_task_limit_after_restart(qscheduler_test):
+def test_user_active_item_limit_after_restart(qscheduler_test):
     qs = qscheduler_test
-    qs.config(queue_size=1, max_user_active_tasks=3)
+    qs.config(queue_size=1, max_user_active_items=3)
     qs.start()
 
     tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(3)]
@@ -219,7 +220,7 @@ def test_user_payload_over_limit_is_too_large(qscheduler_test):
 
 def test_user_limits_reject_upload_before_reading_it(qscheduler_test):
     qs = qscheduler_test
-    qs.config(max_user_active_payload="1M", max_user_active_tasks=3)
+    qs.config(max_user_active_payload="1M", max_user_active_items=3)
     qs.start()
 
     # None of these sends a body: without the rejection they would wait for it.
@@ -256,3 +257,121 @@ def test_user_payload_limit_without_content_length(qscheduler_test):
     qs.submit(None, payload=iter([_long_task()]), user="alice")
     qs.submit(None, payload=iter([_long_task()]), user="alice")
     qs.submit(None, payload=iter([_long_task()]), user="alice", expect_error=429)
+
+
+def test_user_active_item_limit_counts_sessions(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=3)
+    qs.start()
+
+    # Waiting and open sessions both count.
+    opened = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(opened)
+    waiting = qs.new_session(time_limit=60, owner="alice")
+    assert qs.get_session_state(waiting) == "waiting"
+    qs.new_session(time_limit=60, owner="alice")
+
+    r = qs.new_session(time_limit=60, owner="alice", expect_error=429)
+    assert "alice" in r.text and "3" in r.text
+    qs.new_session(time_limit=60, owner="bob")
+
+
+def test_user_active_items_are_shared_by_tasks_and_sessions(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=2)
+    qs.start()
+
+    # A session doesn't leave room for more tasks than the limit, and vice versa.
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.submit(TT().compute_time(60), user="alice")
+    qs.submit(TT(), user="alice", expect_error=429)
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+    # It is the owner who is counted for the session, and the user for a task in it.
+    qs.cancel_session(session_id)
+    qs.wait_for_session_closed(session_id)
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def _session_cancelled_open(qs):
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+    qs.cancel_session(session_id)
+    return session_id
+
+
+def _session_cancelled_waiting(qs):
+    qs.wait_for_running(qs.submit(TT().compute_time(60), user="bob"))
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    assert qs.get_session_state(session_id) == "waiting"
+    qs.cancel_session(session_id)
+    return session_id
+
+
+def _session_expired(qs):
+    return qs.new_session(time_limit=1, owner="alice")
+
+
+def _session_suspended_open(qs):
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+    qs.suspend_machine("maintenance", cancel="all")
+    return session_id
+
+
+def _session_suspended_waiting(qs):
+    qs.wait_for_running(qs.submit(TT().compute_time(60), user="bob"))
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    assert qs.get_session_state(session_id) == "waiting"
+    qs.suspend_machine("maintenance", cancel="waiting")
+    return session_id
+
+
+@pytest.mark.parametrize(
+    "close",
+    [
+        _session_cancelled_open,
+        _session_cancelled_waiting,
+        _session_expired,
+        _session_suspended_open,
+        _session_suspended_waiting,
+    ],
+    ids=[
+        "cancelled_open",
+        "cancelled_waiting",
+        "expired",
+        "suspended_open",
+        "suspended_waiting",
+    ],
+)
+def test_closed_session_releases_its_owner_item(qscheduler_test, close):
+    qs = qscheduler_test
+    qs.config(queue_size=1, max_user_active_items=1)
+    qs.start()
+
+    session_id = close(qs)
+    qs.wait_for_session_closed(session_id)
+    if close in (_session_suspended_open, _session_suspended_waiting):
+        qs.resume_machine()
+
+    # Exactly the one item is free again.
+    qs.new_session(time_limit=60, owner="alice")
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+
+def test_session_owner_stays_counted_past_user_eviction(qscheduler_test):
+    """An owner whose only active item is a session stays in memory: if it were evicted, the count
+    would be lost, and closing the session would have no user to uncount it from."""
+    qs = qscheduler_test
+    qs.config(task_retention="1s", max_user_active_items=1)
+    qs.start()
+
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+    time.sleep(3)
+    qs.new_session(time_limit=60, owner="alice", expect_error=429)
+
+    qs.cancel_session(session_id)
+    qs.wait_for_session_closed(session_id)
+    qs.new_session(time_limit=60, owner="alice")

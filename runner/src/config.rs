@@ -15,7 +15,7 @@ pub const DEFAULT_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
 /// Default maximum clock skew between this host and a backend (4 seconds).
 pub const DEFAULT_MAX_CLOCK_SKEW_MS: u64 = 4 * 1000;
 /// Default maximum number of non-final tasks a single user may have.
-pub const DEFAULT_MAX_USER_ACTIVE_TASKS: u32 = 2000;
+pub const DEFAULT_MAX_USER_ACTIVE_ITEMS: u32 = 2000;
 
 /// For machines whose stored configuration predates the `max_session_time_ms` field.
 fn default_max_session_time_ms() -> u64 {
@@ -96,8 +96,9 @@ pub struct RunnerConfiguration {
     pub notifiers: Vec<(NotifierId, NotifierConfiguration)>,
     /// How long a terminal task stays in memory; afterwards it is served from the DB.
     pub task_retention: std::time::Duration,
-    /// Maximum number of non-final tasks a single user may have; further submits are rejected.
-    pub max_user_active_tasks: u32,
+    /// Maximum number of non-final tasks plus unclosed owned sessions a single user may have;
+    /// further tasks and sessions are rejected.
+    pub max_user_active_items: u32,
     /// Maximum total size of the payloads of a single user's non-final tasks, in bytes; submits
     /// that would exceed it are rejected.
     pub max_user_active_payload: u64,

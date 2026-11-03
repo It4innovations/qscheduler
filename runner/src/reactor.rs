@@ -238,7 +238,7 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
     let result = core_ref
         .lock()
         .unwrap()
-        .add_session(session_id, created_at, config);
+        .add_session(session_id, created_at, owner_id, config);
     if result.is_err() {
         tracing::debug!("Deleting session after failed submit");
         db::delete_session(&pool, session_id).await;

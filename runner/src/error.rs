@@ -76,8 +76,8 @@ pub enum RunnerError {
     InvalidNotifierUrl(String),
     #[error("Notifier '{0}' not found")]
     NotifierNotFound(String),
-    #[error("User '{user}' has reached the limit of {limit} active tasks")]
-    UserActiveTaskLimitExceeded { user: String, limit: u32 },
+    #[error("User '{user}' has reached the limit of {limit} active tasks and sessions")]
+    UserActiveItemLimitExceeded { user: String, limit: u32 },
     #[error(
         "Payload of {requested} bytes rejected for user '{user}': active tasks use {active} of the {limit} bytes allowed"
     )]
