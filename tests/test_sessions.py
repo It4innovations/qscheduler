@@ -1,3 +1,4 @@
+import os
 import time
 
 from utils import TEST_MACHINE_NAME, TEST_PROJECT
@@ -153,6 +154,77 @@ def test_session_cancel_already_closed(qscheduler):
     qscheduler.wait_for_session_open(s)
     qscheduler.wait_for_session_closed(s)
     qscheduler.cancel_session(s, expect_error=409)
+
+
+def _wait_for_log(qs, text, log_name="qscheduler.log"):
+    log_path = os.path.join(qs.working_dir, log_name)
+    deadline = time.monotonic() + 5.0
+    while True:
+        with open(log_path) as f:
+            if text in f.read():
+                return
+        assert time.monotonic() < deadline, f"not logged: {text}"
+        time.sleep(0.2)
+
+
+def test_closed_session_evicted_from_memory(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(task_retention="1s")
+    qs.start()
+
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+    time.sleep(0.1)
+    qs.cancel_session(session_id)
+    qs.wait_for_session_closed(session_id)
+    info = qs.get_session(session_id)
+    assert info["owner"] == "alice"
+
+    # With the owner gone too, so nothing in memory could have answered.
+    _wait_for_log(qs, "Evicted closed sessions from memory")
+    _wait_for_log(qs, "Evicted idle users from memory")
+
+    # Served from the DB now, and it makes no difference.
+    assert qs.get_session(session_id) == info
+    qs.cancel_session(session_id, expect_error=409)
+    qs.new_session(time_limit=60, owner="alice")
+
+
+def test_session_not_evicted_before_closing(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(queue_size=1, task_retention="1s")
+    qs.start()
+
+    opened = qs.new_session(time_limit=60)
+    qs.wait_for_session_open(opened)
+    waiting = qs.new_session(time_limit=60)
+    time.sleep(2.5)
+
+    assert qs.get_session_state(opened) == "open"
+    assert qs.get_session_state(waiting) == "waiting"
+    t = qs.submit(TT().compute_time(60), session_id=opened)
+    qs.wait_for_running(t)
+
+    # A waiting session opens fine once the one before it is gone.
+    qs.cancel_session(opened)
+    qs.wait_for_session_closed(opened)
+    qs.wait_for_session_open(waiting)
+
+
+def test_session_closed_by_restart_evicted_from_memory(qscheduler_test):
+    qs = qscheduler_test
+    qs.config(task_retention="1s")
+    qs.start()
+
+    session_id = qs.new_session(time_limit=60, owner="alice")
+    qs.wait_for_session_open(session_id)
+    qs.restart()
+    qs.wait_for_session_closed(session_id)
+    assert qs.get_session(session_id)["owner"] == "alice"
+
+    _wait_for_log(qs, "Evicted closed sessions from memory", "qscheduler-restart.log")
+    assert qs.get_session(session_id)["owner"] == "alice"
+    qs.cancel_session(session_id, expect_error=409)
 
 
 def test_cancel_nonexistent_session(qscheduler):

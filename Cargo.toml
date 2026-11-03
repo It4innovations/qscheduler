@@ -30,3 +30,4 @@ futures-util = "0.3"
 dotenvy = "0.15"
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 chrono = { version = "0.4", features = ["serde"] }
+typed_floats = { version = "1" }

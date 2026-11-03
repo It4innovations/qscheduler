@@ -5,7 +5,8 @@ use axum::{
 };
 use runner::error::RunnerError;
 use runner::reactor::{
-    cancel_session, create_session, get_project_id_by_name, get_session_info, resolve_notifier,
+    cancel_session, check_new_session, create_session, get_or_create_user, get_project_id_by_name,
+    get_session_info, resolve_notifier,
 };
 use runner::{SessionConfig, SessionId, SessionInfo};
 use serde::Deserialize;
@@ -93,32 +94,50 @@ pub(crate) async fn create_session_handler(
     let project_id = get_project_id_by_name(&state.core_ref, &params.project)
         .await
         .map_err(|e| client_error(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let time_limit = Duration::from_millis(params.time_limit_ms);
+    // Before the owner gets created, so a rejected request doesn't create it.
+    check_new_session(
+        &state.core_ref.lock().unwrap(),
+        &params.owner,
+        machine_id,
+        project_id,
+        time_limit,
+    )
+    .map_err(create_session_error)?;
+    let owner_id = get_or_create_user(&state.core_ref, &params.owner)
+        .await
+        .map_err(|e| internal_error(&e))?;
     let config = SessionConfig {
         machine_id,
         project_id,
-        owner: params.owner,
-        time_limit: Duration::from_millis(params.time_limit_ms),
+        owner_id,
+        time_limit,
         notifier,
     };
     let session_id = create_session(&state.core_ref, config)
         .await
-        .map_err(|e| match &e {
-            RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
-                client_warn(StatusCode::PAYMENT_REQUIRED, e)
-            }
-            RunnerError::SessionDurationExceedsLimit { .. } => {
-                client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
-            }
-            RunnerError::UserActiveItemLimitExceeded { .. } => {
-                client_warn(StatusCode::TOO_MANY_REQUESTS, e)
-            }
-            RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
-                client_error(StatusCode::CONFLICT, e)
-            }
-            _ => internal_error(&e),
-        })?;
+        .map_err(create_session_error)?;
     tracing::info!(session_id = session_id.as_u64(), "session created");
     Ok((StatusCode::CREATED, Json(session_id.as_u64())))
+}
+
+/// Maps a rejected session creation to its HTTP status.
+fn create_session_error(e: RunnerError) -> (StatusCode, String) {
+    match &e {
+        RunnerError::ProjectLimitExceeded(_) | RunnerError::ProjectNotActive(_) => {
+            client_warn(StatusCode::PAYMENT_REQUIRED, e)
+        }
+        RunnerError::SessionDurationExceedsLimit { .. } => {
+            client_error(StatusCode::UNPROCESSABLE_ENTITY, e)
+        }
+        RunnerError::UserActiveItemLimitExceeded { .. } => {
+            client_warn(StatusCode::TOO_MANY_REQUESTS, e)
+        }
+        RunnerError::MachineSuspended { .. } | RunnerError::MachineUnavailable(_) => {
+            client_error(StatusCode::CONFLICT, e)
+        }
+        _ => internal_error(&e),
+    }
 }
 
 /// Request cancellation of a session. Cancellation is asynchronous: a queued (`"waiting"`)

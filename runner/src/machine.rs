@@ -12,6 +12,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use typed_floats::PositiveFinite;
+use crate::UserId;
 
 define_id!(MachineId);
 
@@ -69,9 +71,16 @@ pub(crate) struct ResumeTask {
     pub project_id: Option<ProjectId>,
 }
 
+#[derive(Default)]
+struct UserQueue {
+    usage: PositiveFinite<f64>,
+    queue: VecDeque<QueueItem>,
+}
+
 pub(crate) struct Machine {
     machine_id: MachineId,
     queue: VecDeque<QueueItem>,
+    queues: HashMap<UserId, UserQueue>,
     running_session: Option<RunningSession>,
     config: MachineConfig,
     notifier: Arc<Notify>,
@@ -100,6 +109,7 @@ impl Machine {
         Machine {
             machine_id,
             queue: VecDeque::new(),
+            queues: HashMap::new(),
             running_session: None,
             config,
             notifier: Arc::new(Notify::new()),

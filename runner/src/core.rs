@@ -249,12 +249,11 @@ impl Core {
                 let config = SessionConfig {
                     machine_id,
                     project_id,
-                    owner: s.owner.clone(),
+                    owner_id: UserId::from_db(s.user_id),
                     time_limit: Duration::from_millis(s.time_limit_ms as u64),
                     notifier: restore_notifier(s.notifier_id),
                 };
-                let mut session =
-                    Session::new(session_id, s.created_at, UserId::from_db(s.user_id), config);
+                let mut session = Session::new(session_id, s.created_at, config);
                 session.consumed = Duration::from_millis(s.exec_time_ms.unwrap_or(0) as u64);
                 if let Some(opened_at) = s.opened_at {
                     // Was opened but crashed before (or without) a clean close: prefer the DB's
@@ -263,10 +262,7 @@ impl Core {
                     // back to the last checkpoint (`updated_at`) rather than the restart time,
                     // which would overstate how long the session was actually open.
                     let closed_at = s.closed_at.or(s.updated_at).unwrap_or(now);
-                    session.state = SessionState::Closed {
-                        opened_at: Some(opened_at),
-                        closed_at,
-                    };
+                    session.set_restored_closed(opened_at, closed_at, &s.owner, user_map);
                     session_map.insert(session);
                     if s.closed_at.is_none() {
                         dead_sessions.push((session_id, closed_at));
@@ -293,6 +289,7 @@ impl Core {
                             );
                         }
                     }
+                    user_map.insert(session.config.owner_id, &s.owner);
                     keep_active_session(session_map, user_map, session);
                 }
             }
@@ -502,7 +499,7 @@ impl Core {
         self.session_map.retain(|s| {
             let keep = s.config.machine_id != machine_id;
             if !keep && !matches!(s.state, SessionState::Closed { .. }) {
-                user_map.session_deactivated(s.owner_id);
+                user_map.session_deactivated(s.config.owner_id);
             }
             keep
         });
@@ -548,32 +545,58 @@ impl Core {
     }
 
     pub(crate) fn validate_session_config(&self, config: &SessionConfig) -> crate::Result<()> {
-        let machine = self.machine_map.find_machine(config.machine_id)?;
+        self.check_session_params(config.machine_id, config.project_id, config.time_limit)?;
+        self.check_session_owner_limit(config.owner_id)
+    }
+
+    /// Like `validate_session_config`, for an owner named `owner`, who may not be known yet.
+    pub(crate) fn check_new_session(
+        &self,
+        owner: &str,
+        machine_id: MachineId,
+        project_id: ProjectId,
+        time_limit: Duration,
+    ) -> crate::Result<()> {
+        self.check_session_params(machine_id, project_id, time_limit)?;
+        self.check_item_limit(owner, self.user_map.find_by_name(owner))
+    }
+
+    fn check_session_params(
+        &self,
+        machine_id: MachineId,
+        project_id: ProjectId,
+        time_limit: Duration,
+    ) -> crate::Result<()> {
+        let machine = self.machine_map.find_machine(machine_id)?;
         machine.check_not_suspended()?;
         let limit = machine.config().max_session_time;
-        if config.time_limit > limit {
+        if time_limit > limit {
             return Err(RunnerError::SessionDurationExceedsLimit {
                 machine: machine.config().name.clone(),
                 limit,
-                requested: config.time_limit,
+                requested: time_limit,
             });
         }
         let project = self
             .project_map
-            .find_project(config.project_id)
-            .ok_or_else(|| RunnerError::ProjectNotFound(config.project_id.to_string()))?;
+            .find_project(project_id)
+            .ok_or_else(|| RunnerError::ProjectNotFound(project_id.to_string()))?;
         if !project.active {
             return Err(RunnerError::ProjectNotActive(project.name.clone()));
         }
-        if !project.has_time_for(config.time_limit) {
+        if !project.has_time_for(time_limit) {
             return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
         }
-        self.check_session_owner_limit(&config.owner)
+        Ok(())
     }
 
-    /// Fails if the user named `owner`, who may not be known yet, can't own another session.
-    fn check_session_owner_limit(&self, owner: &str) -> crate::Result<()> {
-        self.check_item_limit(owner, self.user_map.find_by_name(owner))
+    /// Fails if the user can't own another session. A user that isn't loaded passes here;
+    /// `add_session` reports it.
+    fn check_session_owner_limit(&self, owner_id: UserId) -> crate::Result<()> {
+        match self.user_map.find_user(owner_id) {
+            Some(user) => self.check_item_limit(&user.name, Some(user)),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn validate_task_config(&self, config: &TaskConfig) -> crate::Result<()> {
@@ -684,12 +707,11 @@ impl Core {
         &mut self,
         session_id: SessionId,
         created_at: DateTime<Utc>,
-        owner_id: UserId,
         config: SessionConfig,
     ) -> crate::Result<SessionId> {
         // Re-checked: concurrent requests of the owner may have been added while the session row
         // was inserted.
-        self.check_session_owner_limit(&config.owner)?;
+        self.check_session_owner_limit(config.owner_id)?;
         let CoreSplitMut {
             machine_map,
             session_map,
@@ -699,7 +721,15 @@ impl Core {
         let machine = machine_map.find_machine_mut(config.machine_id)?;
         // Re-checked: the machine may have been suspended while the session row was inserted.
         machine.check_not_suspended()?;
-        let session = Session::new(session_id, created_at, owner_id, config);
+        // Fails only if the owner was evicted while the session row was inserted, which takes far
+        // less than the eviction's idle period.
+        if user_map.find_user(config.owner_id).is_none() {
+            return Err(RunnerError::GenericError(format!(
+                "user {} is not loaded",
+                config.owner_id
+            )));
+        }
+        let session = Session::new(session_id, created_at, config);
         machine.queue_session(&session)?;
         keep_active_session(session_map, user_map, session);
         machine.wake_launcher();
@@ -732,6 +762,7 @@ impl Core {
 
     pub fn session_info(&self, session_id: SessionId) -> Option<SessionInfo> {
         let session = self.session_map.find_session(session_id)?;
+        let owner = self.user_map.get_user(session.config.owner_id).name.clone();
         let machine = self
             .machine_map
             .get_machine(session.config.machine_id)
@@ -747,6 +778,7 @@ impl Core {
             session,
             machine,
             project,
+            owner,
             &self.notifiers,
         ))
     }
@@ -821,13 +853,13 @@ impl Core {
 }
 
 /// Creates a machine and its backend from a stored configuration.
-/// Keeps a session that isn't closed in memory and counts it as its owner's active item. As with
-/// `keep_restored_task`, doing both in one place keeps the count matching what can release it.
+/// Keeps a session that isn't closed in memory and counts it as its owner's active item; the
+/// owner has to be loaded. As with `keep_restored_task`, doing both in one place keeps the count
+/// matching what can release it.
 fn keep_active_session(session_map: &mut SessionMap, user_map: &mut UserMap, session: Session) {
-    user_map.insert(session.owner_id, &session.config.owner);
     user_map
-        .session_activated(session.owner_id)
-        .expect("user was just inserted");
+        .session_activated(session.config.owner_id)
+        .expect("owner is loaded");
     session_map.insert(session);
 }
 
@@ -865,8 +897,8 @@ fn create_machine(
     (machine, backend_receiver)
 }
 
-/// Periodically drops terminal tasks older than `retention` from memory; `GET /tasks/{id}`
-/// and friends then fall back to the DB. Users idle for `retention` are dropped as well; they
+/// Periodically drops terminal tasks and closed sessions older than `retention` from memory;
+/// `GET /tasks/{id}` and friends then fall back to the DB. Users idle for `retention` are dropped as well; they
 /// are reloaded from the DB when they submit again.
 fn start_eviction(core_ref: &CoreRef, retention: Duration) {
     let core_ref = Arc::downgrade(core_ref);
@@ -880,11 +912,15 @@ fn start_eviction(core_ref: &CoreRef, retention: Duration) {
                 break;
             };
             let mut core = core_ref.lock().unwrap();
-            // One `now` for both, so no user of a task still in memory is evicted.
+            // One `now` for all, so no user of a task or a session still in memory is evicted.
             let now = Instant::now();
             let evicted = core.task_map.evict_finished(now, retention);
             if evicted > 0 {
                 tracing::debug!(evicted, "Evicted finished tasks from memory");
+            }
+            let evicted = core.session_map.evict_closed(now, retention);
+            if evicted > 0 {
+                tracing::debug!(evicted, "Evicted closed sessions from memory");
             }
             let evicted = core.user_map.evict_idle(now, retention);
             if evicted > 0 {
