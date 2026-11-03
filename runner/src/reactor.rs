@@ -689,6 +689,7 @@ async fn restart_machine(
         if let Some(mut old) = old {
             old.backend().stop();
             machine.inherit_cancel_requests(&mut old);
+            machine.inherit_usage(&mut old);
         }
         backend_receiver
     };

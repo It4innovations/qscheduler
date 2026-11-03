@@ -159,6 +159,11 @@ struct MachineConfigArgs {
     #[arg(long, value_parser = parse_human_time, default_value = "4s")]
     max_clock_skew: Duration,
 
+    /// Time after which a user's accumulated fair share usage drops to half; at least 1ms. A
+    /// longer time makes past usage count against a user for longer.
+    #[arg(long, value_parser = parse_human_time, default_value = "90m")]
+    decay_half_time: Duration,
+
     /// Allow pulse-level tasks (`kind=pulse`, e.g. IQM Pulla `RunDefinition`s) on this machine
     #[arg(long)]
     pulse_access: bool,
@@ -176,6 +181,7 @@ impl MachineConfigArgs {
             max_session_time_ms: self.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
+            decay_half_time_ms: self.decay_half_time.as_millis() as u64,
             pulse_access: self.pulse_access,
             backend: self.backend.into_config(),
         }

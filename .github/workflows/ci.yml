@@ -152,7 +152,7 @@ jobs:
       - name: Run pytest
         env:
           QSCHEDULER_BIN: ${{ github.workspace }}/artifact/qscheduler
-        run: .venv/bin/pytest -v
+        run: .venv/bin/pytest -v -n auto
 
       - name: Upload pytest artifacts on failure
         if: failure()

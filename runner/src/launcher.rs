@@ -250,7 +250,6 @@ fn pick_task(
                         continue;
                     };
                     assert!(running_session.is_none());
-
                     let project_id = session.config.project_id;
                     let now = Instant::now();
                     let opened_at = Utc::now();
@@ -420,15 +419,13 @@ fn close_running_session(
 
 /// Closes a session that never opened, already removed from the machine's queue.
 fn close_queued_session(
-    session_id: SessionId,
-    session_map: &mut SessionMap,
+    session: &mut Session,
     machine: &Machine,
     project_map: &ProjectMap,
     user_map: &mut UserMap,
     notifiers: &NotifierMap,
     db_updates: &mut Vec<DbUpdate>,
 ) {
-    let session = session_map.get_session_mut(session_id);
     let now = Utc::now();
     session.close(now, user_map);
     notify_session(
@@ -439,7 +436,7 @@ fn close_queued_session(
         user_map,
     );
     db_updates.push(DbUpdate::SessionClosed {
-        session_id,
+        session_id: session.id,
         exec_time: Duration::ZERO,
         timestamp: now,
         cancelled_tasks: Vec::new(),
@@ -467,10 +464,12 @@ impl FailContext<'_> {
     /// Fails a task handed to the backend right away, without waiting for the backend to
     /// confirm its cancellation (it may be unreachable), and asks the backend to cancel it. The
     /// task stops being tracked, so the backend's later reports about it are ignored. A project
-    /// task is charged the estimated running time (a lower bound of the true time).
+    /// task is charged the estimated running time (a lower bound of the true time). The same
+    /// estimate settles the fair share usage of a task outside a session.
     fn fail_submitted_task(
         &mut self,
         task_id: TaskId,
+        machine: &mut Machine,
         backend: &Arc<dyn Backend>,
         submitted_tasks: &mut HashMap<TaskId, bool>,
         running_tasks: &mut HashMap<TaskId, RunningTask>,
@@ -489,6 +488,9 @@ impl FailContext<'_> {
         if !cancelling && let Some(backend_id) = self.task_map.get_task_mut(task_id).backend_id() {
             Arc::clone(backend).cancel_task(task_id, backend_id);
         }
+        let config = self.task_map.get_task_mut(task_id).config();
+        machine.decay_update(Instant::now());
+        machine.record_finished_task_in_backend(config.user_id, consumed);
         let completed = CompletedState {
             consumed,
             timestamp: Utc::now(),
@@ -791,90 +793,82 @@ async fn launcher_main(
                         debug!(%task_id, "Ignoring state change of no longer tracked task");
                     }
                     FromBackendMessage::TaskStateChange { task_id, mut state } => {
-                        // In-flight time charged to the project so far; replaced by the exact
-                        // exec time below.
-                        let mut charged = Duration::ZERO;
-                        if state.is_final() {
-                            if let Some(rt) = running_tasks.remove(&task_id) {
-                                charged = rt.charged;
-                            }
-                            if let Some(reason) = fail_reasons.remove(&task_id)
-                                && let TaskState::Cancelled { completed } = state
-                            {
-                                state = TaskState::Failed {
-                                    completed,
-                                    error: reason.to_string(),
-                                };
-                            }
+                        if state.is_final()
+                            && let Some(reason) = fail_reasons.remove(&task_id)
+                            && let TaskState::Cancelled { completed } = state
+                        {
+                            state = TaskState::Failed {
+                                completed,
+                                error: reason.to_string(),
+                            };
                         }
-                        let mut update_state = true;
-                        let exec_time = match &state {
+                        let (db_update, exec_time) = match &state {
                             TaskState::Waiting => unreachable!(),
-                            TaskState::Running => Duration::ZERO,
+                            TaskState::Running => {
+                                let task = task_map.get_task_mut(task_id);
+                                task.set_state(state, user_map);
+                                continue;
+                            }
                             TaskState::Finished { completed } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
-                                notify_task(
-                                    notifiers,
-                                    task_map.find_task(task_id).unwrap(),
-                                    &state,
-                                    &machine_map.get_machine(machine_id).config().name,
-                                    project_map,
-                                    user_map,
-                                );
-                                db_updates.push(DbUpdate::TaskFinished {
-                                    task_id,
-                                    completed: *completed,
-                                });
-                                completed.consumed
+                                (
+                                    DbUpdate::TaskFinished {
+                                        task_id,
+                                        completed: *completed,
+                                    },
+                                    completed.consumed,
+                                )
                             }
                             TaskState::Failed { completed, error } => {
                                 assert!(submitted_tasks.remove(&task_id).is_some());
-                                notify_task(
-                                    notifiers,
-                                    task_map.find_task(task_id).unwrap(),
-                                    &state,
-                                    &machine_map.get_machine(machine_id).config().name,
-                                    project_map,
-                                    user_map,
-                                );
-                                db_updates.push(DbUpdate::TaskFailed {
-                                    task_id,
-                                    completed: *completed,
-                                    error: error.clone(),
-                                });
-                                completed.consumed
+                                (
+                                    DbUpdate::TaskFailed {
+                                        task_id,
+                                        completed: *completed,
+                                        error: error.clone(),
+                                    },
+                                    completed.consumed,
+                                )
                             }
                             TaskState::Cancelled { completed } => {
                                 if submitted_tasks.remove(&task_id).is_none() {
                                     debug!(%task_id, "Ignoring cancel of already-finished task");
-                                    update_state = false;
+                                    continue;
                                 } else {
-                                    notify_task(
-                                        notifiers,
-                                        task_map.find_task(task_id).unwrap(),
-                                        &state,
-                                        &machine_map.get_machine(machine_id).config().name,
-                                        project_map,
-                                        user_map,
-                                    );
-                                    db_updates.push(DbUpdate::TaskCancelled {
-                                        task_id,
-                                        completed: *completed,
-                                    });
+                                    (
+                                        DbUpdate::TaskCancelled {
+                                            task_id,
+                                            completed: *completed,
+                                        },
+                                        completed.consumed,
+                                    )
                                 }
-                                completed.consumed
                             }
                         };
-                        if update_state {
-                            let task = task_map.get_task_mut(task_id);
-                            task.set_state(state, user_map);
-                            if (!exec_time.is_zero() || !charged.is_zero())
-                                && let Some(project_id) = task.config().parent.project_id()
-                            {
-                                project_map
-                                    .get_project_mut(project_id)
-                                    .settle_in_flight(charged, exec_time);
-                            }
+                        db_updates.push(db_update);
+                        let task = task_map.get_task_mut(task_id);
+                        let machine = machine_map.get_machine_mut(machine_id);
+                        machine.decay_update(Instant::now());
+                        machine.record_finished_task_in_backend(task.config().user_id, exec_time);
+                        notify_task(
+                            notifiers,
+                            task,
+                            &state,
+                            &machine.config().name,
+                            project_map,
+                            user_map,
+                        );
+                        task.set_state(state, user_map);
+                        let charged = running_tasks
+                            .remove(&task_id)
+                            .map(|rt| rt.charged)
+                            .unwrap_or(Duration::ZERO);
+                        if (!exec_time.is_zero() || !charged.is_zero())
+                            && let Some(project_id) = task.config().parent.project_id()
+                        {
+                            project_map
+                                .get_project_mut(project_id)
+                                .settle_in_flight(charged, exec_time);
                         }
                     }
                 },
@@ -909,11 +903,11 @@ async fn launcher_main(
                     );
                 } else {
                     let machine = machine_map.get_machine_mut(machine_id);
-                    if machine.remove_queued_session(session_id) {
+                    let session = session_map.get_session_mut(session_id);
+                    if machine.remove_queued_session(session_id, session.config.owner_id) {
                         debug!(%session_id, "Cancelling queued session on request");
                         close_queued_session(
-                            session_id,
-                            session_map,
+                            session,
                             machine,
                             project_map,
                             user_map,
@@ -930,9 +924,9 @@ async fn launcher_main(
                     request_backend_cancel(task_map, &backend, task_id, cancelling);
                 } else {
                     let machine = machine_map.get_machine_mut(machine_id);
-                    if machine.remove_queued_task(task_id) {
+                    let task = task_map.get_task_mut(task_id);
+                    if machine.remove_queued_task(task_id, task.config().user_id) {
                         debug!(%task_id, "Cancelling queued task on request");
-                        let task = task_map.get_task_mut(task_id);
                         task.set_state(TaskState::simple_cancelled(), user_map);
                         notify_task(
                             notifiers,
@@ -968,20 +962,23 @@ async fn launcher_main(
                     SuspendCancel::None => {}
                     SuspendCancel::Waiting | SuspendCancel::All => {
                         let machine = machine_map.get_machine_mut(machine_id);
-                        for task_id in machine.take_queued_tasks() {
-                            ctx.fail_queued_task(task_id);
-                        }
-                        let queued_sessions = machine.take_queued_sessions();
-                        for session_id in queued_sessions {
-                            close_queued_session(
-                                session_id,
-                                session_map,
-                                machine_map.get_machine(machine_id),
-                                ctx.project_map,
-                                ctx.user_map,
-                                notifiers,
-                                ctx.db_updates,
-                            );
+                        for item in machine.take_queued_items() {
+                            match item {
+                                QueueItem::Task(task_id) => {
+                                    ctx.fail_queued_task(task_id);
+                                }
+                                QueueItem::Session(session_id) => {
+                                    let session = session_map.get_session_mut(session_id);
+                                    close_queued_session(
+                                        session,
+                                        machine,
+                                        ctx.project_map,
+                                        ctx.user_map,
+                                        notifiers,
+                                        ctx.db_updates,
+                                    );
+                                }
+                            }
                         }
                         if let Some(s) = running_session.take() {
                             let machine = machine_map.get_machine_mut(machine_id);
@@ -1002,6 +999,7 @@ async fn launcher_main(
                             for task_id in session_tasks {
                                 ctx.fail_submitted_task(
                                     task_id,
+                                    machine,
                                     &backend,
                                     &mut submitted_tasks,
                                     &mut running_tasks,
@@ -1031,9 +1029,11 @@ async fn launcher_main(
                         }
                         if cancel == SuspendCancel::All {
                             let task_ids: Vec<TaskId> = submitted_tasks.keys().copied().collect();
+                            let machine = machine_map.get_machine_mut(machine_id);
                             for task_id in task_ids {
                                 ctx.fail_submitted_task(
                                     task_id,
+                                    machine,
                                     &backend,
                                     &mut submitted_tasks,
                                     &mut running_tasks,
@@ -1091,6 +1091,15 @@ async fn launcher_main(
                         error,
                     });
                 } else {
+                    let split = core.split_mut();
+                    let task = split.task_map.get_task_mut(task_id);
+                    if task.config().parent.session_id().is_none() {
+                        // Only tasks outside session is under fair share.
+                        split
+                            .machine_map
+                            .get_machine_mut(machine_id)
+                            .record_new_task_in_backend(task.config().user_id);
+                    }
                     backend.clone().submit_task(task_id, kind, payload);
                     submitted_tasks.insert(task_id, false);
                 }

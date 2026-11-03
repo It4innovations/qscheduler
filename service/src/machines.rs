@@ -7,8 +7,9 @@ use axum::{
     response::Response,
 };
 use runner::config::{
-    DEFAULT_LIMIT_CHECK_INTERVAL_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_SESSION_TIME_MS,
-    DEFAULT_QUEUE_SIZE, DEFAULT_TASK_TIME_LIMIT_MS, MachineConfiguration,
+    DEFAULT_DECAY_HALF_TIME_MS, DEFAULT_LIMIT_CHECK_INTERVAL_MS, DEFAULT_MAX_CLOCK_SKEW_MS,
+    DEFAULT_MAX_SESSION_TIME_MS, DEFAULT_QUEUE_SIZE, DEFAULT_TASK_TIME_LIMIT_MS,
+    MachineConfiguration,
 };
 use runner::core::Core;
 use runner::error::RunnerError;
@@ -310,6 +311,10 @@ fn default_max_clock_skew_ms() -> u64 {
     DEFAULT_MAX_CLOCK_SKEW_MS
 }
 
+fn default_decay_half_time_ms() -> u64 {
+    DEFAULT_DECAY_HALF_TIME_MS
+}
+
 /// The backend a machine dispatches its tasks to.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -365,6 +370,12 @@ pub(crate) struct MachineSettings {
     #[serde(default = "default_max_clock_skew_ms")]
     #[schema(default = 4000)]
     max_clock_skew_ms: u64,
+    /// Time after which a user's accumulated fair share usage drops to half, in milliseconds;
+    /// must be at least 1. Users with less recent usage go first, so a longer time makes past
+    /// usage count against a user for longer.
+    #[serde(default = "default_decay_half_time_ms")]
+    #[schema(default = 5400000, minimum = 1)]
+    decay_half_time_ms: u64,
     /// Whether pulse-level tasks (`kind=pulse`) may be submitted to this machine.
     #[serde(default)]
     #[schema(default = false)]
@@ -381,6 +392,7 @@ impl MachineSettings {
             max_session_time_ms: self.max_session_time_ms,
             default_task_time_limit_ms: self.default_task_time_limit_ms,
             max_clock_skew_ms: self.max_clock_skew_ms,
+            decay_half_time_ms: self.decay_half_time_ms,
             pulse_access: self.pulse_access,
             backend: match self.backend {
                 BackendRequest::Test => BackendConfig::Test,
@@ -429,6 +441,7 @@ pub(crate) struct MachineResponse {
     max_session_time_ms: u64,
     default_task_time_limit_ms: u64,
     max_clock_skew_ms: u64,
+    decay_half_time_ms: u64,
     pulse_access: bool,
     backend: BackendResponse,
     /// The active suspension, if the machine is suspended.
@@ -445,6 +458,7 @@ impl MachineResponse {
             max_session_time_ms: config.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: config.default_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: config.max_clock_skew.as_millis() as u64,
+            decay_half_time_ms: config.decay_half_time.as_millis() as u64,
             pulse_access: config.pulse_access,
             backend: match config.backend {
                 BackendConfig::Test => BackendResponse::Test,

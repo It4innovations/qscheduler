@@ -1599,12 +1599,18 @@
           "max_session_time_ms",
           "default_task_time_limit_ms",
           "max_clock_skew_ms",
+          "decay_half_time_ms",
           "pulse_access",
           "backend"
         ],
         "properties": {
           "backend": {
             "$ref": "#/components/schemas/BackendResponse"
+          },
+          "decay_half_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           },
           "default_task_time_limit_ms": {
             "type": "integer",
@@ -1658,6 +1664,13 @@
         "properties": {
           "backend": {
             "$ref": "#/components/schemas/BackendRequest"
+          },
+          "decay_half_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time after which a user's accumulated fair share usage drops to half, in milliseconds;\nmust be at least 1. Users with less recent usage go first, so a longer time makes past\nusage count against a user for longer.",
+            "default": 5400000,
+            "minimum": 1
           },
           "default_task_time_limit_ms": {
             "type": "integer",
