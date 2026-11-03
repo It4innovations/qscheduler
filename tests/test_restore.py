@@ -29,7 +29,7 @@ def test_restore_running_task(qscheduler_test):
 def test_restore_task_time_limit(qscheduler_test):
     """A running task's time limit counts from its original start across a restart."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
 
     task_id = qs.submit(TT().compute_time(30), time_limit_ms=4_000)
@@ -50,7 +50,7 @@ def test_restore_running_project_task_accounted_once(qscheduler_test):
     persisted, so the resumed task is charged once from `started_at`, and only its exact exec
     time is ever confirmed."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start(add_test_project=False)
     # One charge from started_at (~1.5s before the crash + ~5s re-run by the test backend)
     # stays below the limit; charging it twice would exceed it and fail the task.
@@ -76,7 +76,7 @@ def test_restore_running_project_task_accounted_once(qscheduler_test):
 def test_restore_waiting_task(qscheduler_test):
     """A task still waiting in the queue is re-queued and runs after a restart."""
     qs = qscheduler_test
-    qs.queue_size = 1
+    qs.config(queue_size=1)
     qs.start()
 
     # t1 occupies the only slot; t2 stays queued and is never sent to the backend.
@@ -111,7 +111,7 @@ def test_restore_closes_running_session(qscheduler_test):
 def test_restore_waiting_session(qscheduler_test):
     """A session queued but never opened is re-queued and opens after a restart."""
     qs = qscheduler_test
-    qs.queue_size = 1
+    qs.config(queue_size=1)
     qs.start()
 
     # Keep the machine busy so the session stays queued (waiting), not opened.
@@ -157,7 +157,7 @@ def test_restore_dangling_session_closed_at_last_checkpoint(qscheduler_test):
     restart time (which would overstate how long it was open by however long the
     process was down)."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
 
     session_id = qs.new_session(time_limit=60)

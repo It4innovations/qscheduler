@@ -114,7 +114,7 @@ def test_user_consumption_name_in_path_is_decoded(qscheduler_test):
 
 def test_user_active_task_limit(qscheduler_test):
     qs = qscheduler_test
-    qs.max_user_active_tasks = 3
+    qs.config(max_user_active_tasks=3)
     qs.start()
 
     tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(3)]
@@ -134,7 +134,7 @@ def test_user_active_task_limit(qscheduler_test):
 
 def test_user_active_task_limit_counts_session_tasks(qscheduler_test):
     qs = qscheduler_test
-    qs.max_user_active_tasks = 2
+    qs.config(max_user_active_tasks=2)
     qs.start()
 
     session_id = qs.new_session(time_limit=30, owner="alice")
@@ -146,8 +146,7 @@ def test_user_active_task_limit_counts_session_tasks(qscheduler_test):
 
 def test_user_active_task_limit_after_restart(qscheduler_test):
     qs = qscheduler_test
-    qs.queue_size = 1
-    qs.max_user_active_tasks = 3
+    qs.config(queue_size=1, max_user_active_tasks=3)
     qs.start()
 
     tasks = [qs.submit(TT().compute_time(60), user="alice") for _ in range(3)]

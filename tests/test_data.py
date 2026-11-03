@@ -23,7 +23,7 @@ def test_task_unknown_artifact_iqm(qscheduler_iqm):
 
 
 def test_task_result_not_submitted(qscheduler):
-    qscheduler.queue_size = 1
+    qscheduler.config(queue_size=1)
     qscheduler.start()
     t = qscheduler.submit(TT().compute_time(2))
     t1 = qscheduler.submit(TT())

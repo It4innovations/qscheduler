@@ -62,7 +62,7 @@ def test_submit_simple(qscheduler):
 
 
 def test_submit_parallel1(qscheduler):
-    qscheduler.queue_size = 1
+    qscheduler.config(queue_size=1)
     qscheduler.start()
     t = qscheduler.submit(TT().compute_time(2))
     t1 = qscheduler.submit(TT())
@@ -76,7 +76,7 @@ def test_submit_parallel1(qscheduler):
 
 
 def test_submit_parallel2(qscheduler):
-    qscheduler.queue_size = 2
+    qscheduler.config(queue_size=2)
     qscheduler.start()
     t0 = qscheduler.submit(TT().compute_time(2))
     t1 = qscheduler.submit(TT().compute_time(2))
@@ -127,7 +127,7 @@ def test_cancel_running_task(qscheduler):
 
 
 def test_cancel_queued_task(qscheduler_test):
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(queue_size=1)
     qscheduler_test.start()
     t = qscheduler_test.submit(TT().compute_time(2))
     t1 = qscheduler_test.submit(TT())
@@ -151,7 +151,7 @@ def test_cancel_nonexistent_task(qscheduler):
 
 
 def test_finished_task_evicted_from_memory(qscheduler):
-    qscheduler.task_retention = "1s"
+    qscheduler.config(task_retention="1s")
     qscheduler.start()
     t = qscheduler.submit(TT())
     qscheduler.wait_for_finished(t)
@@ -174,7 +174,7 @@ def test_finished_task_evicted_from_memory(qscheduler):
 
 
 def test_task_time_limit_exceeded(qscheduler):
-    qscheduler.limit_check_interval = 1
+    qscheduler.config(limit_check_interval=1)
     qscheduler.start()
     t = qscheduler.submit(TT().compute_time(30), time_limit_ms=1_000)
     qscheduler.wait_for_failed(t)
@@ -186,7 +186,7 @@ def test_task_time_limit_exceeded(qscheduler):
 
 
 def test_task_time_limit_not_exceeded(qscheduler_test):
-    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.config(limit_check_interval=1)
     qscheduler_test.start()
     t = qscheduler_test.submit(TT().compute_time(1), time_limit_ms=10_000)
     qscheduler_test.wait_for_finished(t)
@@ -194,8 +194,7 @@ def test_task_time_limit_not_exceeded(qscheduler_test):
 
 
 def test_task_time_limit_default(qscheduler_test):
-    qscheduler_test.limit_check_interval = 1
-    qscheduler_test.default_task_time_limit = 1
+    qscheduler_test.config(limit_check_interval=1, default_task_time_limit=1)
     qscheduler_test.start()
     t = qscheduler_test.submit(TT().compute_time(30))
     qscheduler_test.wait_for_failed(t)
@@ -212,8 +211,7 @@ def test_task_time_limit_zero_rejected(qscheduler_test):
 
 def test_task_time_limit_ignores_queue_wait(qscheduler_test):
     """The limit counts from when the backend runs the task, not from submission."""
-    qscheduler_test.queue_size = 1
-    qscheduler_test.limit_check_interval = 1
+    qscheduler_test.config(queue_size=1, limit_check_interval=1)
     qscheduler_test.start()
     t0 = qscheduler_test.submit(TT().compute_time(3))
     t1 = qscheduler_test.submit(TT().compute_time(1), time_limit_ms=2_000)

@@ -47,7 +47,7 @@ def test_iqm_cancel_retried_during_outage(qscheduler_iqm):
 
 def test_iqm_time_limit_during_outage_charge_capped(qscheduler_iqm):
     qs = qscheduler_iqm
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start(add_test_project=False)
     qs.add_project("p", limit_ms=3_000)
     task_id = qs.submit(TT().compute_time(60), project="p", time_limit_ms=1_500)

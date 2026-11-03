@@ -19,7 +19,7 @@ def _parse_ts(ts: str) -> datetime:
 def test_iqm_clock_skew_never_fails_task_early(qscheduler_iqm, monkeypatch, offset):
     monkeypatch.setattr(utils_iqm, "CLOCK_OFFSET", offset)
     qs = qscheduler_iqm
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
 
     task_id = qs.submit(TT().compute_time(30), time_limit_ms=2_000)

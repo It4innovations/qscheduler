@@ -41,7 +41,7 @@ def test_session_exectime_ms_updates_periodically(qscheduler_test):
     """exectime_ms is refreshed by the periodic checkpoint while a session is still
     open, not just once it closes."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
 
     s = qs.new_session(time_limit=30)
@@ -105,14 +105,14 @@ def test_session_submit_and_cancel(qscheduler):
 
 
 def test_session_max_duration_rejected(qscheduler):
-    qscheduler.max_session_time = 2
+    qscheduler.config(max_session_time=2)
     qscheduler.start()
     qscheduler.new_session(time_limit=2)
     qscheduler.new_session(time_limit=3, expect_error=422)
 
 
 def test_session_no_overlap(qscheduler):
-    qscheduler.queue_size = 2
+    qscheduler.config(queue_size=2)
     qscheduler.start()
     s1 = qscheduler.new_session(time_limit=1)
     s2 = qscheduler.new_session(time_limit=2)
@@ -136,7 +136,7 @@ def test_session_cancel_open(qscheduler):
 
 
 def test_session_cancel_waiting(qscheduler):
-    qscheduler.queue_size = 2
+    qscheduler.config(queue_size=2)
     qscheduler.start()
     s1 = qscheduler.new_session(time_limit=60)
     s2 = qscheduler.new_session(time_limit=60)
@@ -164,7 +164,7 @@ def test_session_task_time_charged_only_via_session(qscheduler_test):
     """A task in a session isn't charged to the project itself (the session is): the
     project's consumption equals the session's exec time, not session + task time."""
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
     s = qs.new_session(time_limit=30)
     qs.wait_for_session_open(s)

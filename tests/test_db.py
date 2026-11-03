@@ -37,7 +37,7 @@ def _wait_db_session_opened(cur, session_id, timeout=5.0):
 
 
 def test_task_inserted_in_db(qscheduler_test, db_connect):
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(queue_size=1)
     qscheduler_test.start()
     task_id = qscheduler_test.submit(TT().compute_time(5))
 
@@ -130,7 +130,7 @@ def _db_payload_is_null(cur, task_id) -> bool:
 
 
 def test_payload_cleared_when_task_terminal(qscheduler_test, db_connect):
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(queue_size=1)
     qscheduler_test.start()
     t_running = qscheduler_test.submit(TT().compute_time(2))
     t_queued = qscheduler_test.submit(TT())
@@ -186,7 +186,7 @@ def test_task_users_stored_once(qscheduler_test, db_connect):
 
 
 def test_idle_user_evicted_and_reloaded(qscheduler_test, db_connect):
-    qscheduler_test.task_retention = "1s"
+    qscheduler_test.config(task_retention="1s")
     qscheduler_test.start()
     t1 = qscheduler_test.submit(TT(), user="alice")
     qscheduler_test.wait_for_finished(t1)
@@ -315,7 +315,7 @@ def test_session_owner_charged_while_open_and_across_restart(
     qscheduler_test, db_connect
 ):
     qs = qscheduler_test
-    qs.limit_check_interval = 1
+    qs.config(limit_check_interval=1)
     qs.start()
     session_id = qs.new_session(time_limit=30, owner="dave")
     qs.wait_for_session_open(session_id)

@@ -59,7 +59,7 @@ def test_suspend_rejects_task_in_open_session(qscheduler_test):
 
 
 def test_suspend_none_keeps_existing_work(qscheduler_test):
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(queue_size=1)
     qscheduler_test.start()
     t1 = qscheduler_test.submit(TT().compute_time(1))
     t2 = qscheduler_test.submit(TT())
@@ -74,7 +74,7 @@ def test_suspend_none_keeps_existing_work(qscheduler_test):
 
 
 def test_suspend_waiting(qscheduler):
-    qscheduler.queue_size = 1
+    qscheduler.config(queue_size=1)
     qscheduler.start()
     t1 = qscheduler.submit(TT().compute_time(2))
     t2 = qscheduler.submit(TT())
@@ -91,7 +91,7 @@ def test_suspend_waiting(qscheduler):
 
 
 def test_suspend_waiting_closes_open_session(qscheduler_test):
-    qscheduler_test.queue_size = 1
+    qscheduler_test.config(queue_size=1)
     qscheduler_test.start()
     s = qscheduler_test.new_session(30)
     qscheduler_test.wait_for_session_open(s)
@@ -108,7 +108,7 @@ def test_suspend_waiting_closes_open_session(qscheduler_test):
 
 
 def test_suspend_all(qscheduler):
-    qscheduler.queue_size = 1
+    qscheduler.config(queue_size=1)
     qscheduler.start()
     t1 = qscheduler.submit(TT().compute_time(30))
     t2 = qscheduler.submit(TT())
