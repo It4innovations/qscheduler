@@ -2,12 +2,12 @@ use crate::callback::{NotifierId, NotifierMap};
 use crate::machine::MachineId;
 use crate::project::ProjectId;
 use crate::user::{UserId, UserMap};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::num::NonZeroU64;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SessionId(NonZeroU64);
@@ -114,8 +114,8 @@ impl From<&SessionState> for SessionStateKind {
 pub struct SessionConfig {
     pub machine_id: MachineId,
     pub project_id: ProjectId,
-    /// Name of the user owning the session.
-    pub owner: String,
+    /// The user owning the session, which counts it while it isn't closed.
+    pub owner_id: UserId,
     pub time_limit: Duration,
     /// Notifier that receives the session's open/close events, if any.
     pub notifier: Option<NotifierId>,
@@ -126,24 +126,19 @@ pub struct Session {
     pub state: SessionState,
     pub consumed: Duration,
     pub created_at: DateTime<Utc>,
-    /// Id of the user named by `config.owner`, which counts the session while it isn't closed.
-    pub owner_id: UserId,
+    /// When the session closed (monotonic clock); drives its eviction from memory.
+    closed: Option<Instant>,
     pub config: SessionConfig,
 }
 
 impl Session {
-    pub fn new(
-        id: SessionId,
-        created_at: DateTime<Utc>,
-        owner_id: UserId,
-        config: SessionConfig,
-    ) -> Self {
+    pub fn new(id: SessionId, created_at: DateTime<Utc>, config: SessionConfig) -> Self {
         Self {
             id,
             state: SessionState::Waiting,
             consumed: Duration::ZERO,
             created_at,
-            owner_id,
+            closed: None,
             config,
         }
     }
@@ -155,7 +150,26 @@ impl Session {
     /// Closes the session, which stops counting as its owner's active item.
     pub(crate) fn close(&mut self, closed_at: DateTime<Utc>, user_map: &mut UserMap) {
         self.state.close(closed_at);
-        user_map.session_deactivated(self.owner_id);
+        // Before the owner goes idle: see `UserMap::evict_idle`.
+        self.closed = Some(Instant::now());
+        user_map.session_deactivated(self.config.owner_id);
+    }
+
+    /// Marks a session being restored as closed. It was never counted as its owner's active item,
+    /// but the owner has to be loaded after this, as for any session in memory.
+    pub(crate) fn set_restored_closed(
+        &mut self,
+        opened_at: DateTime<Utc>,
+        closed_at: DateTime<Utc>,
+        owner_name: &str,
+        user_map: &mut UserMap,
+    ) {
+        self.state = SessionState::Closed {
+            opened_at: Some(opened_at),
+            closed_at,
+        };
+        self.closed = Some(Instant::now());
+        user_map.insert(self.config.owner_id, owner_name);
     }
 }
 
@@ -195,6 +209,7 @@ impl SessionInfo {
         session: &Session,
         machine: String,
         project: String,
+        owner: String,
         notifiers: &NotifierMap,
     ) -> SessionInfo {
         let (opened_at, closed_at) = match session.state {
@@ -205,12 +220,16 @@ impl SessionInfo {
                 closed_at,
             } => (opened_at, Some(closed_at)),
         };
+        // Truncated to the DB's precision, so the values don't change once the session is evicted
+        // from memory and served from the DB.
+        let opened_at = opened_at.map(|t| t.trunc_subsecs(6));
+        let closed_at = closed_at.map(|t| t.trunc_subsecs(6));
         SessionInfo {
             id: session.id().as_u64(),
             state: SessionStateKind::from(&session.state),
             machine,
             project,
-            owner: session.config.owner.clone(),
+            owner,
             time_limit_ms: session.config.time_limit.as_millis() as i64,
             created_at: session.created_at,
             opened_at,
@@ -249,6 +268,17 @@ impl SessionMap {
     pub fn insert(&mut self, session: Session) {
         let session_id = session.id;
         self.0.insert(session_id, session);
+    }
+
+    /// Removes sessions that have been closed for at least `retention` as of `now`. They remain
+    /// available from the DB.
+    pub fn evict_closed(&mut self, now: Instant, retention: Duration) -> usize {
+        let before = self.0.len();
+        self.0.retain(|_, s| {
+            s.closed
+                .is_none_or(|c| now.saturating_duration_since(c) < retention)
+        });
+        before - self.0.len()
     }
 
     /// Removes every entry for which `keep` returns `false`.

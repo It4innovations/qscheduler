@@ -16,3 +16,4 @@ futures-util = { workspace = true }
 sqlx = { workspace = true, features = ["macros", "uuid", "migrate", "chrono"] }
 chrono = { workspace = true }
 utoipa = { workspace = true }
+typed_floats = { workspace = true }

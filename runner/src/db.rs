@@ -559,7 +559,6 @@ pub async fn update_session_exec_time(pool: &PgPool, session_id: SessionId, exec
 pub async fn insert_session(
     pool: &PgPool,
     config: &SessionConfig,
-    owner_id: UserId,
 ) -> crate::Result<(SessionId, DateTime<Utc>)> {
     let row = sqlx::query(
         "INSERT INTO sessions (machine_id, project_id, user_id, time_limit_ms, notifier_id) \
@@ -567,7 +566,7 @@ pub async fn insert_session(
     )
     .bind(config.machine_id.as_i32())
     .bind(config.project_id.as_i32())
-    .bind(owner_id.as_i32())
+    .bind(config.owner_id.as_i32())
     .bind(config.time_limit.as_millis() as i64)
     .bind(config.notifier.map(|n| n.as_i32()))
     .fetch_one(pool)

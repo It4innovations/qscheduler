@@ -94,7 +94,8 @@ pub struct NotifierConfiguration {
 pub struct RunnerConfiguration {
     pub machines: Vec<(MachineId, MachineConfiguration)>,
     pub notifiers: Vec<(NotifierId, NotifierConfiguration)>,
-    /// How long a terminal task stays in memory; afterwards it is served from the DB.
+    /// How long a terminal task or a closed session stays in memory; afterwards it is served from
+    /// the DB.
     pub task_retention: std::time::Duration,
     /// Maximum number of non-final tasks plus unclosed owned sessions a single user may have;
     /// further tasks and sessions are rejected.

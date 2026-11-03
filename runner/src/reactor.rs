@@ -112,7 +112,7 @@ pub async fn get_task_info(core_ref: &CoreRef, task_id: TaskId) -> crate::Result
 }
 
 /// Looks up a session's public info, preferring `Core`'s in-memory state and falling back to
-/// the DB for closed sessions evicted from memory across a restart.
+/// the DB for closed sessions evicted from memory.
 pub async fn get_session_info(
     core_ref: &CoreRef,
     session_id: SessionId,
@@ -204,23 +204,43 @@ pub async fn get_task_artifact(
 
 #[tracing::instrument(skip(core_ref), fields(%session_id))]
 pub async fn cancel_session(core_ref: &CoreRef, session_id: SessionId) -> crate::Result<()> {
-    let mut core = core_ref.lock().unwrap();
-    let CoreSplitMut {
-        session_map,
-        machine_map,
-        ..
-    } = core.split_mut();
-    let session = session_map
-        .find_session(session_id)
-        .ok_or(RunnerError::InvalidSession(session_id))?;
-    if matches!(session.state, SessionState::Closed { .. }) {
-        return Err(RunnerError::SessionAlreadyClosed(session_id));
+    let pool = {
+        let mut core = core_ref.lock().unwrap();
+        let pool = core.pool().clone();
+        let CoreSplitMut {
+            session_map,
+            machine_map,
+            ..
+        } = core.split_mut();
+        if let Some(session) = session_map.find_session(session_id) {
+            if matches!(session.state, SessionState::Closed { .. }) {
+                return Err(RunnerError::SessionAlreadyClosed(session_id));
+            }
+            let machine_id = session.config.machine_id;
+            let machine = machine_map.get_machine_mut(machine_id);
+            machine.request_session_cancel(session_id);
+            machine.wake_launcher();
+            return Ok(());
+        }
+        pool
+    };
+    // Every session that isn't closed is in memory, so one found only in the DB is closed.
+    match db::find_session_info(&pool, session_id).await? {
+        Some(_) => Err(RunnerError::SessionAlreadyClosed(session_id)),
+        None => Err(RunnerError::InvalidSession(session_id)),
     }
-    let machine_id = session.config.machine_id;
-    let machine = machine_map.get_machine_mut(machine_id);
-    machine.request_session_cancel(session_id);
-    machine.wake_launcher();
-    Ok(())
+}
+
+/// Fails if a session with these parameters would be rejected. It lets a request be rejected
+/// before its owner, named `owner`, gets created; `create_session` makes the decision.
+pub fn check_new_session(
+    core: &Core,
+    owner: &str,
+    machine_id: MachineId,
+    project_id: ProjectId,
+    time_limit: Duration,
+) -> crate::Result<()> {
+    core.check_new_session(owner, machine_id, project_id, time_limit)
 }
 
 #[tracing::instrument(skip_all, fields(session_id = tracing::field::Empty))]
@@ -230,15 +250,13 @@ pub async fn create_session(core_ref: &CoreRef, config: SessionConfig) -> crate:
         core.validate_session_config(&config)?;
         core.pool().clone()
     };
-    // After the validation, so a rejected request doesn't create the user.
-    let owner_id = db::get_or_create_user(&pool, &config.owner).await?;
-    let (session_id, created_at) = db::insert_session(&pool, &config, owner_id).await?;
+    let (session_id, created_at) = db::insert_session(&pool, &config).await?;
     tracing::Span::current().record("session_id", tracing::field::display(session_id));
     tracing::debug!("New session");
     let result = core_ref
         .lock()
         .unwrap()
-        .add_session(session_id, created_at, owner_id, config);
+        .add_session(session_id, created_at, config);
     if result.is_err() {
         tracing::debug!("Deleting session after failed submit");
         db::delete_session(&pool, session_id).await;

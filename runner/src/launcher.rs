@@ -198,12 +198,14 @@ fn notify_session(
     session: &Session,
     machine_name: &str,
     project_map: &ProjectMap,
+    user_map: &UserMap,
 ) {
     let Some(notifier) = notifiers.get(session.config.notifier) else {
         return;
     };
     let project = project_name(project_map, session.config.project_id).unwrap_or_default();
-    let info = SessionInfo::build(session, machine_name.to_string(), project, notifiers);
+    let owner = user_map.get_user(session.config.owner_id).name.clone();
+    let info = SessionInfo::build(session, machine_name.to_string(), project, owner, notifiers);
     send_notify(notifier, NotifyEvent::Session { session: info });
 }
 
@@ -219,6 +221,7 @@ fn pick_task(
         task_map,
         session_map,
         project_map,
+        user_map,
         notifiers,
         ..
     } = core.split_mut();
@@ -250,9 +253,8 @@ fn pick_task(
 
                     let project_id = session.config.project_id;
                     let now = Instant::now();
-                    session.state = SessionState::Open {
-                        opened_at: Utc::now(),
-                    };
+                    let opened_at = Utc::now();
+                    session.state = SessionState::Open { opened_at };
                     machine.start_session(session_id);
                     *running_session = Some(RunningSession {
                         session_id,
@@ -261,10 +263,16 @@ fn pick_task(
                         opened_at: now,
                         exec_time: Duration::ZERO,
                     });
-                    notify_session(notifiers, session, &machine.config().name, project_map);
+                    notify_session(
+                        notifiers,
+                        session,
+                        &machine.config().name,
+                        project_map,
+                        user_map,
+                    );
                     db_updates.push(DbUpdate::SessionOpened {
                         session_id,
-                        timestamp: Utc::now(),
+                        timestamp: opened_at,
                     });
                     continue;
                 }
@@ -372,7 +380,6 @@ fn close_running_session(
     session.consumed = exec_time;
     let machine = machine_map.get_machine_mut(machine_id);
     let mut cancelled_tasks = Vec::new();
-    let now = Utc::now();
     while let Some(task_id) = machine.pop_session_task() {
         debug!(%task_id, "Cancelling unsubmitted task");
         let task = task_map.get_task_mut(task_id);
@@ -396,7 +403,13 @@ fn close_running_session(
         cancelled_tasks.push(task_id);
     }
     machine.close_session();
-    notify_session(notifiers, session, &machine.config().name, project_map);
+    notify_session(
+        notifiers,
+        session,
+        &machine.config().name,
+        project_map,
+        user_map,
+    );
     db_updates.push(DbUpdate::SessionClosed {
         session_id: s.session_id,
         exec_time,
@@ -418,7 +431,13 @@ fn close_queued_session(
     let session = session_map.get_session_mut(session_id);
     let now = Utc::now();
     session.close(now, user_map);
-    notify_session(notifiers, session, &machine.config().name, project_map);
+    notify_session(
+        notifiers,
+        session,
+        &machine.config().name,
+        project_map,
+        user_map,
+    );
     db_updates.push(DbUpdate::SessionClosed {
         session_id,
         exec_time: Duration::ZERO,

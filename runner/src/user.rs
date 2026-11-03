@@ -122,7 +122,7 @@ impl UserMap {
     /// Removes users without an active item that have been idle for at least `retention`
     /// as of `now`. With the same `now` and `retention` as `TaskMap::evict_finished`, no user
     /// of a task still in memory is removed: a user goes idle no earlier than its last task
-    /// finishes.
+    /// finishes. The same holds for `SessionMap::evict_closed` and the owner of a session.
     pub fn evict_idle(&mut self, now: Instant, retention: Duration) -> usize {
         let before = self.users.len();
         let users_by_name = &mut self.users_by_name;

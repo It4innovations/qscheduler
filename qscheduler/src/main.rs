@@ -83,8 +83,8 @@ struct ServeOpts {
     #[arg(long, default_value = "32M", value_parser = parse_max_payload)]
     pub max_payload: u64,
 
-    /// How long a finished task (with its state) is kept in memory for fast status queries,
-    /// e.g. `10m`. Afterwards it is read from the database.
+    /// How long a finished task or a closed session (with its state) is kept in memory for fast
+    /// status queries, e.g. `10m`. Afterwards it is read from the database.
     #[arg(long, value_parser = parse_human_time, default_value = "10m")]
     pub task_retention: Duration,
 
