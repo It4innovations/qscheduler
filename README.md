@@ -56,6 +56,9 @@ ADMIN_TOKEN=my-secret qscheduler serve --port 4300
 
 Request bodies are limited to 32 MiB by default; change the limit with `--max-payload-mb <N>`.
 
+Each user may have at most 2000 active (not yet finished, failed, or cancelled) tasks by default;
+further submits get HTTP 429. Change the limit with `--max-user-active-tasks <N>`.
+
 On `SIGTERM` (e.g. `docker stop`) or `Ctrl+C`, the service shuts down gracefully: it finishes
 in-flight requests, applies accepted cancel requests, writes all pending state (including the
 time of a running session) to the database, and exits without submitting new tasks. A crash or

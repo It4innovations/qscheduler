@@ -54,6 +54,7 @@ pub struct Core {
     session_map: SessionMap,
     project_map: ProjectMap,
     user_map: UserMap,
+    max_user_active_tasks: u32,
     notifiers: NotifierMap,
     pool: PgPool,
     core_ref: Option<CoreRef>,
@@ -91,6 +92,7 @@ impl Core {
             session_map: Default::default(),
             project_map: Default::default(),
             user_map: Default::default(),
+            max_user_active_tasks: config.max_user_active_tasks,
             notifiers: NotifierMap::start(config.notifiers),
             pool,
             core_ref: None,
@@ -590,6 +592,20 @@ impl Core {
                 return Err(RunnerError::ProjectLimitExceeded(project.name.clone()));
             }
         }
+        self.check_user_active_task_limit(config.user_id)
+    }
+
+    /// Fails if the user can't have another active task. A user that isn't loaded passes, as it
+    /// has no active tasks.
+    fn check_user_active_task_limit(&self, user_id: UserId) -> crate::Result<()> {
+        if let Some(user) = self.user_map.find_user(user_id)
+            && user.active_tasks >= self.max_user_active_tasks
+        {
+            return Err(RunnerError::UserActiveTaskLimitExceeded {
+                user: user.name.clone(),
+                limit: self.max_user_active_tasks,
+            });
+        }
         Ok(())
     }
 
@@ -599,6 +615,9 @@ impl Core {
         created_at: DateTime<Utc>,
         config: TaskConfig,
     ) -> crate::Result<TaskId> {
+        // Re-checked: concurrent submits of the user may have been added while the task row was
+        // inserted.
+        self.check_user_active_task_limit(config.user_id)?;
         let CoreSplitMut {
             machine_map,
             task_map,

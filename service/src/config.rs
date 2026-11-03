@@ -7,4 +7,6 @@ pub struct ServiceConfiguration {
     pub max_payload_mb: usize,
     /// How long a finished task stays in memory; afterwards it is served from the DB.
     pub task_retention: std::time::Duration,
+    /// Maximum number of non-final tasks a single user may have.
+    pub max_user_active_tasks: u32,
 }
