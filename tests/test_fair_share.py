@@ -433,7 +433,7 @@ def test_usage_is_execution_time_not_time_limit(qscheduler_test):
     qs = qscheduler_test
     _start(qs)
     _run(qs, "alice", 0.6, time_limit_ms=10_000)
-    _run(qs, "bob", 0.1, time_limit_ms=3_600_000)
+    _run(qs, "bob", 0.1, time_limit_ms=900_000)
     _bob_goes_before_alice(qs)
 
 

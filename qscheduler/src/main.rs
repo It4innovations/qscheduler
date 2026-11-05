@@ -150,12 +150,12 @@ struct MachineConfigArgs {
 
     /// Execution time limit for tasks submitted without an explicit `time_limit_ms`.
     /// Counted from when the backend starts running the task.
-    #[arg(long, value_parser = parse_human_time, default_value = "1h")]
+    #[arg(long, value_parser = parse_human_time, default_value = "15m")]
     default_task_time_limit: Duration,
 
     /// Maximum time limit a task may ask for; tasks asking for more are rejected at submit time.
     /// `--default-task-time-limit` must not exceed it.
-    #[arg(long, value_parser = parse_human_time, default_value = "1h")]
+    #[arg(long, value_parser = parse_human_time, default_value = "15m")]
     max_task_time_limit: Duration,
 
     /// Maximum assumed skew between this host's clock and the backend's. Running tasks' time

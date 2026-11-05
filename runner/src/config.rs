@@ -10,10 +10,10 @@ pub const DEFAULT_QUEUE_SIZE: usize = 4;
 pub const DEFAULT_LIMIT_CHECK_INTERVAL_MS: u32 = 2 * 1000;
 /// Default maximum session duration (2 hours).
 pub const DEFAULT_MAX_SESSION_TIME_MS: u64 = 2 * 60 * 60 * 1000;
-/// Default time limit of tasks submitted without one (1 hour).
-pub const DEFAULT_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
-/// Default maximum time limit a task may ask for (1 hour).
-pub const DEFAULT_MAX_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
+/// Default time limit of tasks submitted without one (15 minutes).
+pub const DEFAULT_TASK_TIME_LIMIT_MS: u64 = 15 * 60 * 1000;
+/// Default maximum time limit a task may ask for (15 minutes).
+pub const DEFAULT_MAX_TASK_TIME_LIMIT_MS: u64 = 15 * 60 * 1000;
 /// Default maximum clock skew between this host and a backend (4 seconds).
 pub const DEFAULT_MAX_CLOCK_SKEW_MS: u64 = 4 * 1000;
 /// Default half-time of the decay of users' fair share usage (90 minutes).

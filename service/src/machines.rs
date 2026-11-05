@@ -365,12 +365,12 @@ pub(crate) struct MachineSettings {
     /// Time limit of tasks submitted without an explicit `time_limit_ms`, in milliseconds. Must
     /// not exceed `max_task_time_limit_ms`.
     #[serde(default = "default_task_time_limit_ms")]
-    #[schema(default = 3600000)]
+    #[schema(default = 900000)]
     default_task_time_limit_ms: u64,
     /// Maximum `time_limit_ms` a task may ask for, in milliseconds. Tasks asking for more are
     /// rejected; tasks already accepted keep their limit when this is lowered.
     #[serde(default = "default_max_task_time_limit_ms")]
-    #[schema(default = 3600000)]
+    #[schema(default = 900000)]
     max_task_time_limit_ms: u64,
     /// Maximum assumed lag of the backend's clock behind ours, in milliseconds. Running tasks'
     /// time is estimated so that it never exceeds the true time while the skew stays within
