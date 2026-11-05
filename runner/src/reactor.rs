@@ -420,12 +420,26 @@ pub fn resolve_notifier(core: &Core, name: Option<&str>) -> crate::Result<Option
         .transpose()
 }
 
-pub fn get_machine_default_task_time_limit(core: &Core, machine_id: MachineId) -> Duration {
-    core.split()
-        .machine_map
-        .get_machine(machine_id)
-        .config()
-        .default_task_time_limit
+/// The time limit of a task asking for `requested`: the machine's default if it asks for none, an
+/// error if it asks for more than the machine's maximum.
+pub fn resolve_task_time_limit(
+    core: &Core,
+    machine_id: MachineId,
+    requested: Option<Duration>,
+) -> crate::Result<Duration> {
+    let split = core.split();
+    let config = split.machine_map.get_machine(machine_id).config();
+    let Some(requested) = requested else {
+        return Ok(config.default_task_time_limit);
+    };
+    if requested > config.max_task_time_limit {
+        return Err(RunnerError::TaskTimeLimitExceedsMax {
+            machine: config.name.clone(),
+            limit: config.max_task_time_limit,
+            requested,
+        });
+    }
+    Ok(requested)
 }
 
 pub async fn get_project_id_by_name(core_ref: &CoreRef, name: &str) -> crate::Result<ProjectId> {

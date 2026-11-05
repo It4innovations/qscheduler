@@ -56,6 +56,16 @@ pub enum RunnerError {
         limit: Duration,
         requested: Duration,
     },
+    #[error(
+        "Task time limit {}ms exceeds the maximum of {}ms on machine '{machine}'",
+        requested.as_millis(),
+        limit.as_millis()
+    )]
+    TaskTimeLimitExceedsMax {
+        machine: String,
+        limit: Duration,
+        requested: Duration,
+    },
     #[error("Machine '{machine}' is suspended: {message}")]
     MachineSuspended { machine: String, message: String },
     #[error("Machine '{0}' does not allow pulse-level tasks")]

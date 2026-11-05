@@ -136,7 +136,7 @@ curl -X POST http://localhost:4300/machines \
 ```
 
 ```json
-{"name":"TestMachine","queue_size":4,"limit_check_interval_ms":2000,"max_session_time_ms":7200000,"default_task_time_limit_ms":3600000,"max_clock_skew_ms":4000,"decay_half_time_ms":5400000,"backend":{"type":"test"},"suspension":null}
+{"name":"TestMachine","queue_size":4,"limit_check_interval_ms":2000,"max_session_time_ms":7200000,"default_task_time_limit_ms":3600000,"max_task_time_limit_ms":3600000,"max_clock_skew_ms":4000,"decay_half_time_ms":5400000,"backend":{"type":"test"},"suspension":null}
 ```
 
 **3. Create a project** with a one-hour budget to charge the task to:

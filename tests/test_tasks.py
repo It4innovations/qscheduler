@@ -209,6 +209,20 @@ def test_task_time_limit_zero_rejected(qscheduler_test):
     qscheduler_test.submit(TT(), time_limit_ms=0, expect_error=422)
 
 
+def test_task_time_limit_above_max_rejected(qscheduler_test):
+    qscheduler_test.config(default_task_time_limit=5, max_task_time_limit=10)
+    qscheduler_test.start()
+    qscheduler_test.submit(TT(), time_limit_ms=10_001, expect_error=422)
+
+    t = qscheduler_test.submit(TT(), time_limit_ms=10_000)
+    qscheduler_test.wait_for_finished(t)
+    assert qscheduler_test.get_task(t)["time_limit_ms"] == 10_000
+
+    t = qscheduler_test.submit(TT())
+    qscheduler_test.wait_for_finished(t)
+    assert qscheduler_test.get_task(t)["time_limit_ms"] == 5_000
+
+
 def test_task_time_limit_ignores_queue_wait(qscheduler_test):
     """The limit counts from when the backend runs the task, not from submission."""
     qscheduler_test.config(queue_size=1, limit_check_interval=1)

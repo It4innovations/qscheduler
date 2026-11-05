@@ -88,10 +88,11 @@ class Config:
     # (name, url, token) of notifiers registered by start()
     notifiers: Sequence[tuple[str, str, str | None]] = ()
     queue_size: int = 2
-    # In seconds, as are `limit_check_interval` and `default_task_time_limit`.
+    # In seconds, as are `limit_check_interval` and the task time limits.
     max_session_time: int | None = None
     limit_check_interval: int | None = None
     default_task_time_limit: int | None = None
+    max_task_time_limit: int | None = None
     # Half-time of the fair share usage decay (`--decay-half-time`, e.g. "90m").
     decay_half_time: str | None = None
     # Request body limit (`--max-payload`, e.g. "1M").
@@ -171,6 +172,8 @@ class QScheduler:
             args.append(
                 f"--default-task-time-limit={self.cfg.default_task_time_limit}s"
             )
+        if self.cfg.max_task_time_limit is not None:
+            args.append(f"--max-task-time-limit={self.cfg.max_task_time_limit}s")
         if self.cfg.decay_half_time is not None:
             args.append(f"--decay-half-time={self.cfg.decay_half_time}")
         if self.cfg.pulse_access:

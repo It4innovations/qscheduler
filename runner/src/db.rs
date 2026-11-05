@@ -615,9 +615,14 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
         let id: i32 = row.get("id");
         let machine_id = MachineId::from_db(id);
         let config_str: &str = row.get("config");
-        let config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
+        let mut config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
             RunnerError::GenericError("Cannot parse machine configuration from DB".into())
         })?;
+        // A configuration stored before `max_task_time_limit_ms` existed gets its default, which
+        // may be below the stored default limit; validation prevents that for newer ones.
+        config.max_task_time_limit_ms = config
+            .max_task_time_limit_ms
+            .max(config.default_task_time_limit_ms);
         machines.push((machine_id, config));
     }
     Ok(machines)
