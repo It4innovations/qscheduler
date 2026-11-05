@@ -20,6 +20,9 @@ pub const DEFAULT_MAX_CLOCK_SKEW_MS: u64 = 4 * 1000;
 pub const DEFAULT_DECAY_HALF_TIME_MS: u64 = 90 * 60 * 1000;
 /// Default maximum number of non-final tasks a single user may have.
 pub const DEFAULT_MAX_USER_ACTIVE_ITEMS: u32 = 2000;
+/// Format of the machine configurations written to the DB. Rows without a version predate
+/// versioning and are upgraded when loaded (see `MachineConfiguration::from_stored`).
+pub const MACHINE_CONFIG_VERSION: u32 = 1;
 
 /// For machines whose stored configuration predates the `max_session_time_ms` field.
 fn default_max_session_time_ms() -> u64 {
@@ -78,7 +81,65 @@ pub struct MachineConfiguration {
     pub backend: BackendConfig,
 }
 
+/// A machine configuration as written to the DB.
+#[derive(Serialize)]
+struct StoredMachineConfiguration<'a> {
+    version: u32,
+    #[serde(flatten)]
+    config: &'a MachineConfiguration,
+}
+
+/// The part of a stored machine configuration that decides how to read the rest.
+#[derive(Deserialize)]
+struct StoredVersion {
+    version: Option<u32>,
+}
+
 impl MachineConfiguration {
+    /// The JSON to store in the DB.
+    pub(crate) fn to_stored(&self) -> crate::Result<String> {
+        serde_json::to_string(&StoredMachineConfiguration {
+            version: MACHINE_CONFIG_VERSION,
+            config: self,
+        })
+        .map_err(|e| RunnerError::GenericError(e.to_string()))
+    }
+
+    /// Reads a configuration stored in the DB. The returned flag is set if it was unversioned and
+    /// got upgraded, so it should be stored again.
+    pub(crate) fn from_stored(stored: &str) -> crate::Result<(Self, bool)> {
+        // Serde errors may quote the stored values, which include the backend token.
+        let invalid =
+            |_| RunnerError::GenericError("Cannot parse machine configuration from DB".into());
+        let StoredVersion { version } = serde_json::from_str(stored).map_err(invalid)?;
+        match version {
+            None => {
+                let mut config: Self = serde_json::from_str(stored).map_err(invalid)?;
+                config.upgrade_legacy();
+                Ok((config, true))
+            }
+            Some(MACHINE_CONFIG_VERSION) => {
+                Ok((serde_json::from_str(stored).map_err(invalid)?, false))
+            }
+            Some(version) => Err(RunnerError::GenericError(format!(
+                "Unsupported machine configuration version {version}"
+            ))),
+        }
+    }
+
+    /// Upgrades a configuration stored before versioning: the default task time limit is reset to
+    /// the current default, and the maximum is raised if needed to stay above it.
+    fn upgrade_legacy(&mut self) {
+        tracing::warn!(
+            machine = %self.name,
+            old_ms = self.default_task_time_limit_ms,
+            new_ms = DEFAULT_TASK_TIME_LIMIT_MS,
+            "unversioned machine configuration: default task time limit reset"
+        );
+        self.default_task_time_limit_ms = DEFAULT_TASK_TIME_LIMIT_MS;
+        self.max_task_time_limit_ms = self.max_task_time_limit_ms.max(DEFAULT_TASK_TIME_LIMIT_MS);
+    }
+
     /// Rejects configurations a launcher cannot run with: an empty name, a zero queue size, a
     /// zero check/poll interval, a decay half-time below 1 ms, or a default task time limit above
     /// the maximum one.
@@ -182,6 +243,79 @@ mod tests {
             poll_interval: Duration::ZERO,
         });
         assert!(c.validate().is_err());
+    }
+
+    /// A stored configuration without a version, with the given extra JSON fields.
+    fn legacy_config(extra: &str) -> String {
+        format!(
+            r#"{{"name": "m", "queue_size": 1, "limit_check_interval_ms": 1000,
+                 "backend": {{"type": "test"}}{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn stored_config_round_trips_with_version() {
+        let mut c = test_config();
+        c.default_task_time_limit_ms = 500;
+        let stored = c.to_stored().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(json["version"], super::MACHINE_CONFIG_VERSION);
+        assert_eq!(json["queue_size"], 1);
+
+        let (parsed, upgraded) = MachineConfiguration::from_stored(&stored).unwrap();
+        assert!(!upgraded);
+        assert_eq!(parsed.default_task_time_limit_ms, 500);
+        assert_eq!(parsed.max_task_time_limit_ms, 1000);
+    }
+
+    #[test]
+    fn unversioned_config_gets_default_task_time_limits() {
+        let stored = legacy_config(r#", "default_task_time_limit_ms": 7200000"#);
+        let (parsed, upgraded) = MachineConfiguration::from_stored(&stored).unwrap();
+        assert!(upgraded);
+        assert_eq!(
+            parsed.default_task_time_limit_ms,
+            super::DEFAULT_TASK_TIME_LIMIT_MS
+        );
+        assert_eq!(
+            parsed.max_task_time_limit_ms,
+            super::DEFAULT_MAX_TASK_TIME_LIMIT_MS
+        );
+        assert_eq!(parsed.queue_size, 1);
+        assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn unversioned_config_max_task_time_limit_stays_valid() {
+        let stored = legacy_config(r#", "max_task_time_limit_ms": 7200000"#);
+        let (parsed, _) = MachineConfiguration::from_stored(&stored).unwrap();
+        assert_eq!(parsed.max_task_time_limit_ms, 7_200_000);
+
+        let stored = legacy_config(r#", "max_task_time_limit_ms": 1000"#);
+        let (parsed, _) = MachineConfiguration::from_stored(&stored).unwrap();
+        assert_eq!(
+            parsed.max_task_time_limit_ms,
+            super::DEFAULT_TASK_TIME_LIMIT_MS
+        );
+        assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn unsupported_config_version_is_rejected() {
+        let stored = legacy_config(r#", "version": 2"#);
+        let error = MachineConfiguration::from_stored(&stored)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("version 2"), "{error}");
+    }
+
+    #[test]
+    fn invalid_stored_config_error_hides_values() {
+        let stored = r#"{"version": 1, "name": "secret-value", "queue_size": "secret-value"}"#;
+        let error = MachineConfiguration::from_stored(stored)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret-value"), "{error}");
     }
 
     #[test]

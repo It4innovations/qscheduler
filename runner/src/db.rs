@@ -42,7 +42,7 @@ fn machine_type(config: &MachineConfiguration) -> &'static str {
 }
 
 fn serialize_machine_config(config: &MachineConfiguration) -> crate::Result<String> {
-    serde_json::to_string(config).map_err(|e| RunnerError::GenericError(e.to_string()))
+    config.to_stored()
 }
 
 pub async fn insert_machine(pool: &PgPool, config: &MachineConfiguration) -> crate::Result<i32> {
@@ -615,14 +615,13 @@ pub async fn load_machines(pool: &PgPool) -> crate::Result<Vec<(MachineId, Machi
         let id: i32 = row.get("id");
         let machine_id = MachineId::from_db(id);
         let config_str: &str = row.get("config");
-        let mut config: MachineConfiguration = serde_json::from_str(config_str).map_err(|_e| {
-            RunnerError::GenericError("Cannot parse machine configuration from DB".into())
-        })?;
-        // A configuration stored before `max_task_time_limit_ms` existed gets its default, which
-        // may be below the stored default limit; validation prevents that for newer ones.
-        config.max_task_time_limit_ms = config
-            .max_task_time_limit_ms
-            .max(config.default_task_time_limit_ms);
+        let (config, upgraded) = MachineConfiguration::from_stored(config_str)
+            .map_err(|e| RunnerError::GenericError(format!("Machine {machine_id}: {e}")))?;
+        if upgraded {
+            // Stored right away, so the upgrade happens once: a later change of the defaults
+            // doesn't affect this machine.
+            update_machine(pool, &config).await?;
+        }
         machines.push((machine_id, config));
     }
     Ok(machines)
