@@ -90,6 +90,10 @@ If `ADMIN_TOKEN` is unset or empty, the admin endpoints are disabled and return 
 or wrong token gets `401`. Backend and notifier tokens can be set but are never returned.
 See the OpenAPI spec for the request bodies and the exact behavior.
 
+`GET /debug/scheduler`, also protected by `ADMIN_TOKEN`, returns the scheduler's internal state:
+per machine, each user's queue, usage and task average. It serves internal debugging only, and its
+format is not guaranteed to be stable across versions.
+
 ### CLI alternative
 
 The same management is available from the command line. These commands write directly to the

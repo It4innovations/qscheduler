@@ -477,6 +477,19 @@ pub(crate) async fn list_user_names(pool: &PgPool) -> crate::Result<Vec<String>>
     )
 }
 
+/// Names of the users with the given IDs; IDs without a user are left out.
+pub(crate) async fn find_user_names(
+    pool: &PgPool,
+    user_ids: &[i32],
+) -> crate::Result<Vec<(i32, String)>> {
+    Ok(
+        sqlx::query_as("SELECT id, name FROM users WHERE id = ANY($1)")
+            .bind(user_ids)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
 /// Time consumed by the user named `name` per project and machine, or `None` if there is no such
 /// user.
 pub(crate) async fn find_user_consumption(

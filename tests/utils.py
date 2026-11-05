@@ -754,6 +754,9 @@ class QScheduler:
         )
         return r
 
+    def api_debug_scheduler(self) -> dict:
+        return self.admin_request("GET", "debug/scheduler").json()
+
     def api_list_machines(self) -> list[dict]:
         return self.admin_request("GET", "machines").json()
 
