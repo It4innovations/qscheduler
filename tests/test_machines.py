@@ -242,25 +242,93 @@ def test_default_task_time_limit_above_max_rejected(qscheduler_test):
     assert r.returncode == 0, r.stderr
 
 
-def test_stored_config_without_max_task_time_limit(qscheduler_test, db_connect):
-    """A longer default stored before the maximum existed keeps working."""
-    qs = qscheduler_test
-    qs.start()
-    qs.stop(kill=False)
+def _make_config_unversioned(db_connect, default_task_time_limit_ms=7_200_000):
+    """Rewrites the stored configuration into the format from before versioning."""
     with db_connect.cursor() as cur:
         _, config = _machine_row(cur)
+        del config["version"]
         del config["max_task_time_limit_ms"]
-        config["default_task_time_limit_ms"] = 7_200_000
+        config["default_task_time_limit_ms"] = default_task_time_limit_ms
         cur.execute(
-            "UPDATE machines SET config = %s WHERE name = %s",
+            "UPDATE machines SET config = %s::json WHERE name = %s",
             [json.dumps(config), TEST_MACHINE_NAME],
         )
 
+
+def test_unversioned_config_upgraded_on_load(qscheduler_test, db_connect):
+    qs = qscheduler_test
+    qs.config(queue_size=3)
+    qs.start()
+    qs.stop(kill=False)
+    _make_config_unversioned(db_connect)
+
     qs.restart()
-    assert qs.api_get_machine(TEST_MACHINE_NAME)["max_task_time_limit_ms"] == 7_200_000
+    info = qs.api_get_machine()
+    assert info["default_task_time_limit_ms"] == 900_000
+    assert info["max_task_time_limit_ms"] == 900_000
+    assert info["queue_size"] == 3
     t = qs.submit(TT())
     qs.wait_for_finished(t)
-    assert qs.get_task(t)["time_limit_ms"] == 7_200_000
+    assert qs.get_task(t)["time_limit_ms"] == 900_000
+    qs.submit(TT(), time_limit_ms=900_001, expect_error=422)
+
+    with db_connect.cursor() as cur:
+        _, config = _machine_row(cur)
+    assert config["version"] == 1
+    assert config["default_task_time_limit_ms"] == 900_000
+    assert config["max_task_time_limit_ms"] == 900_000
+    assert config["queue_size"] == 3
+
+
+def test_unversioned_config_upgraded_once(qscheduler_test, db_connect):
+    qs = qscheduler_test
+    qs.start()
+    qs.stop(kill=False)
+    _make_config_unversioned(db_connect)
+    qs.restart()
+
+    qs.api_update_machine(
+        default_task_time_limit_ms=7_200_000, max_task_time_limit_ms=7_200_000
+    )
+    qs.restart()
+    assert qs.api_get_machine()["default_task_time_limit_ms"] == 7_200_000
+
+
+def test_unversioned_config_upgrade_keeps_limit_of_accepted_tasks(
+    qscheduler_test, db_connect
+):
+    qs = qscheduler_test
+    qs.config(queue_size=1)
+    qs.start()
+    running = qs.submit(TT().compute_time(30))
+    qs.wait_for_running(running)
+    waiting = qs.submit(TT(), time_limit_ms=5_000)
+    qs.stop(kill=False)
+    _make_config_unversioned(db_connect)
+
+    qs.restart()
+    assert qs.api_get_machine()["default_task_time_limit_ms"] == 900_000
+    assert qs.get_task(waiting)["time_limit_ms"] == 5_000
+
+
+def test_machine_config_writes_are_versioned(qscheduler_test, db_connect):
+    qs = qscheduler_test
+    qs.start()
+
+    def assert_versioned(name=TEST_MACHINE_NAME):
+        with db_connect.cursor() as cur:
+            _, config = _machine_row(cur, name)
+        assert config["version"] == 1
+
+    assert_versioned()  # machine add
+    qs.api_add_machine("second")
+    assert_versioned("second")
+    qs.api_update_machine(queue_size=3)
+    assert_versioned()
+    qs.stop(kill=False)
+    r = qs.update_machine("--queue-size=7")
+    assert r.returncode == 0, r.stderr
+    assert_versioned()
 
 
 def test_api_update_machine(qscheduler_test, db_connect):
