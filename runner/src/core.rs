@@ -262,6 +262,12 @@ impl Core {
                     // back to the last checkpoint (`updated_at`) rather than the restart time,
                     // which would overstate how long the session was actually open.
                     let closed_at = s.closed_at.or(s.updated_at).unwrap_or(now);
+                    // A session with `closed_at` set was already charged when it closed.
+                    if s.closed_at.is_none()
+                        && let Ok(machine) = machine_map.find_machine_mut(machine_id)
+                    {
+                        machine.record_closed_session(session.config.owner_id, session.consumed);
+                    }
                     session.set_restored_closed(opened_at, closed_at, &s.owner, user_map);
                     session_map.insert(session);
                     if s.closed_at.is_none() {
@@ -349,9 +355,8 @@ impl Core {
                     if let Some(started_at) = t.started_at {
                         task.set_started_at(started_at);
                     }
-                    keep_restored_task(task_map, user_map, &t.user_name, task);
                     if let Ok(machine) = machine_map.find_machine_mut(machine_id) {
-                        machine.record_new_task_in_backend(UserId::from_db(t.user_id));
+                        machine.record_new_task_in_backend(task.config());
                         resume_tasks
                             .entry(machine_id)
                             .or_default()
@@ -371,6 +376,7 @@ impl Core {
                             "submitted task references unknown machine on restore, will never be re-attached for monitoring"
                         );
                     }
+                    keep_restored_task(task_map, user_map, &t.user_name, task);
                 } else if session_id.is_some() {
                     // Cancelled right away and never kept, so not counted as its user's.
                     orphan_cancels.push(task_id);

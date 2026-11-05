@@ -402,6 +402,8 @@ fn close_running_session(
         cancelled_tasks.push(task_id);
     }
     machine.close_session();
+    machine.decay_update(Instant::now());
+    machine.record_closed_session(session.config.owner_id, exec_time);
     notify_session(
         notifiers,
         session,
@@ -490,7 +492,7 @@ impl FailContext<'_> {
         }
         let config = self.task_map.get_task_mut(task_id).config();
         machine.decay_update(Instant::now());
-        machine.record_finished_task_in_backend(config.user_id, consumed);
+        machine.record_finished_task_in_backend(config, consumed);
         let completed = CompletedState {
             consumed,
             timestamp: Utc::now(),
@@ -849,7 +851,7 @@ async fn launcher_main(
                         let task = task_map.get_task_mut(task_id);
                         let machine = machine_map.get_machine_mut(machine_id);
                         machine.decay_update(Instant::now());
-                        machine.record_finished_task_in_backend(task.config().user_id, exec_time);
+                        machine.record_finished_task_in_backend(task.config(), exec_time);
                         notify_task(
                             notifiers,
                             task,
@@ -1093,13 +1095,10 @@ async fn launcher_main(
                 } else {
                     let split = core.split_mut();
                     let task = split.task_map.get_task_mut(task_id);
-                    if task.config().parent.session_id().is_none() {
-                        // Only tasks outside session is under fair share.
-                        split
-                            .machine_map
-                            .get_machine_mut(machine_id)
-                            .record_new_task_in_backend(task.config().user_id);
-                    }
+                    split
+                        .machine_map
+                        .get_machine_mut(machine_id)
+                        .record_new_task_in_backend(task.config());
                     backend.clone().submit_task(task_id, kind, payload);
                     submitted_tasks.insert(task_id, false);
                 }

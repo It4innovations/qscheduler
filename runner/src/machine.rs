@@ -6,7 +6,7 @@ use crate::id::define_id;
 use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
 use crate::suspension::{SuspendCancel, Suspension};
-use crate::task::{Task, TaskId};
+use crate::task::{Task, TaskConfig, TaskId};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
@@ -86,6 +86,17 @@ pub(crate) struct UserQueue {
     queue: VecDeque<QueueItem>,
 }
 
+impl UserQueue {
+    /// The usage that orders users for fair share: the time already charged, plus the expected
+    /// time of the user's tasks in the backend, which are charged only when they finish.
+    fn effective_usage(&self) -> Usage {
+        let average = self
+            .average_usage
+            .map_or(TASK_AVERAGE_PLACEHOLDER, |a| a.get());
+        Usage::new(self.usage.get() + average * self.submitted_tasks as f64).unwrap()
+    }
+}
+
 pub(crate) struct Machine {
     machine_id: MachineId,
     queues: HashMap<UserId, UserQueue>,
@@ -155,9 +166,9 @@ impl Machine {
         self.unavailable = unavailable;
     }
 
-    /// Takes over the users' decayed usage from `old`, a previous incarnation of this machine, so
-    /// a reconfiguration doesn't reset fair share. Queues and predictions are not inherited:
-    /// `Core::restore` rebuilds them.
+    /// Takes over the users' decayed usage and task averages from `old`, a previous incarnation of
+    /// this machine, so a reconfiguration doesn't reset fair share. Queues and counts of tasks in
+    /// the backend are not inherited: `Core::restore` rebuilds them.
     pub(crate) fn inherit_usage(&mut self, old: &mut Machine) {
         old.decay_update(Instant::now());
         self.last_decay_update = old.last_decay_update;
@@ -266,15 +277,7 @@ impl Machine {
             .values_mut()
             .filter(|uq| !uq.queue.is_empty())
             .min_by_key(|uq| {
-                let usage = Usage::new(
-                    uq.usage.get()
-                        + (uq
-                            .average_usage
-                            .map(|a| a.get())
-                            .unwrap_or(TASK_AVERAGE_PLACEHOLDER)
-                            * uq.submitted_tasks as f64),
-                )
-                .unwrap();
+                let usage = uq.effective_usage();
                 match uq.queue.front().unwrap() {
                     QueueItem::Task(task_id) => (usage, false, task_id.as_u64()),
                     QueueItem::Session(session_id) => (usage, true, session_id.as_u64()),
@@ -365,23 +368,41 @@ impl Machine {
         false
     }
 
-    pub fn record_new_task_in_backend(&mut self, user_id: UserId) {
-        let qu = self.queues.entry(user_id).or_default();
+    /// Charges the owner of a closed session for the time it held the machine. This goes to the
+    /// usage only: the task average predicts the cost of individual tasks.
+    pub fn record_closed_session(&mut self, owner_id: UserId, held_time: Duration) {
+        let qu = self.queues.entry(owner_id).or_default();
+        qu.usage = Usage::new(qu.usage.get() + held_time.as_secs_f64()).unwrap();
+    }
+
+    /// Records a task handed to the backend. Only tasks outside a session are under fair share.
+    pub fn record_new_task_in_backend(&mut self, config: &TaskConfig) {
+        if config.parent.session_id().is_some() {
+            return;
+        }
+        let qu = self.queues.entry(config.user_id).or_default();
         qu.submitted_tasks += 1;
     }
 
-    pub fn record_finished_task_in_backend(&mut self, user_id: UserId, exec_time: Duration) {
-        let qu = self.queues.get_mut(&user_id).unwrap();
+    /// Records a task leaving the backend. Only tasks outside a session are under fair share, so
+    /// a session task changes neither the user's usage nor their task average.
+    pub fn record_finished_task_in_backend(&mut self, config: &TaskConfig, exec_time: Duration) {
+        if config.parent.session_id().is_some() {
+            return;
+        }
+        let qu = self.queues.get_mut(&config.user_id).unwrap();
         qu.submitted_tasks -= 1;
         if !exec_time.is_zero() {
             let exec_time = exec_time.as_secs_f64();
             qu.average_usage = Some(
                 Usage::new(
                     qu.average_usage
-                        .map(|a| TASK_AVERAGE_ALPHA * exec_time + (1.0 - TASK_AVERAGE_ALPHA) * a.get())
+                        .map(|a| {
+                            TASK_AVERAGE_ALPHA * exec_time + (1.0 - TASK_AVERAGE_ALPHA) * a.get()
+                        })
                         .unwrap_or(exec_time),
                 )
-                    .unwrap(),
+                .unwrap(),
             );
             qu.usage = Usage::new(qu.usage.get() + exec_time).unwrap();
         }
@@ -440,6 +461,7 @@ impl MachineMap {
 mod tests {
     use super::*;
     use crate::backend_test::start_test_backend;
+    use crate::task::{TaskKind, TaskParent};
 
     const HALF_TIME: Duration = Duration::from_secs(100);
 
@@ -490,16 +512,56 @@ mod tests {
         m.queues.entry(u).or_default().queue.push_back(item);
     }
 
+    fn task_config(u: UserId, parent: TaskParent) -> TaskConfig {
+        TaskConfig {
+            machine_id: MachineId::try_from(1u32).unwrap(),
+            parent,
+            user_id: u,
+            kind: TaskKind::default(),
+            payload: Bytes::new(),
+            time_limit: Duration::from_secs(1),
+            notifier: None,
+        }
+    }
+
+    fn project_task(u: UserId) -> TaskConfig {
+        task_config(u, TaskParent::Project(ProjectId::try_from(1u32).unwrap()))
+    }
+
+    fn session_task(u: UserId) -> TaskConfig {
+        task_config(u, TaskParent::Session(SessionId::try_from(1u64).unwrap()))
+    }
+
+    /// Hands a task outside a session to the backend.
+    fn submit(m: &mut Machine, u: UserId) {
+        m.record_new_task_in_backend(&project_task(u));
+    }
+
+    /// Finishes a task outside a session that is in the backend.
+    fn finish(m: &mut Machine, u: UserId, seconds: f64) {
+        m.record_finished_task_in_backend(&project_task(u), Duration::from_secs_f64(seconds));
+    }
+
+    /// Runs a whole task outside a session, charging `seconds` to the user.
     fn charge(m: &mut Machine, u: UserId, seconds: f64) {
-        m.record_finished_task_in_backend(u, Duration::ZERO, Duration::from_secs_f64(seconds));
+        submit(m, u);
+        finish(m, u, seconds);
     }
 
     fn usage(m: &Machine, u: UserId) -> f64 {
         m.queues[&u].usage.get()
     }
 
-    fn predicted(m: &Machine, u: UserId) -> f64 {
-        m.queues[&u].predicted_usage.get()
+    fn in_backend(m: &Machine, u: UserId) -> u32 {
+        m.queues[&u].submitted_tasks
+    }
+
+    fn average(m: &Machine, u: UserId) -> Option<f64> {
+        m.queues[&u].average_usage.map(|a| a.get())
+    }
+
+    fn effective(m: &Machine, u: UserId) -> f64 {
+        m.queues[&u].effective_usage().get()
     }
 
     fn pop(m: &mut Machine) -> Option<(&'static str, u64)> {
@@ -610,11 +672,13 @@ mod tests {
     }
 
     #[test]
-    fn decay_leaves_predictions_alone() {
+    fn decay_leaves_tasks_in_backend_and_average_alone() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(8));
+        charge(&mut m, user(1), 8.0);
+        submit(&mut m, user(1));
         m.decay_update(m.last_decay_update + HALF_TIME * 10);
-        assert_eq!(predicted(&m, user(1)), 8.0);
+        assert_eq!(in_backend(&m, user(1)), 1);
+        assert_eq!(average(&m, user(1)), Some(8.0));
     }
 
     #[test]
@@ -662,16 +726,16 @@ mod tests {
     #[test]
     fn decay_keeps_user_with_running_task() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(1));
+        submit(&mut m, user(1));
         m.decay_update(m.last_decay_update + HALF_TIME * 100);
         assert!(m.queues.contains_key(&user(1)));
     }
 
     #[test]
-    fn decay_drops_user_after_prediction_is_released() {
+    fn decay_drops_user_after_last_task_left_backend() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(1));
-        m.record_finished_task_in_backend(user(1), Duration::from_secs(1), Duration::ZERO);
+        submit(&mut m, user(1));
+        finish(&mut m, user(1), 0.0);
         m.decay_update(m.last_decay_update + HALF_TIME);
         assert!(!m.queues.contains_key(&user(1)));
     }
@@ -699,20 +763,20 @@ mod tests {
     }
 
     #[test]
-    fn pop_counts_predictions_like_usage() {
+    fn pop_counts_tasks_in_backend_like_usage() {
         let mut m = machine();
-        charge(&mut m, user(1), 5.0);
-        m.add_predicted_time(user(2), Duration::from_secs(6));
+        charge(&mut m, user(1), TASK_AVERAGE_PLACEHOLDER - 1.0);
+        submit(&mut m, user(2));
         enqueue(&mut m, user(1), task(2));
         enqueue(&mut m, user(2), task(1));
         assert_eq!(pop(&mut m), Some(("task", 2)));
     }
 
     #[test]
-    fn pop_adds_usage_and_prediction_of_a_user() {
+    fn pop_adds_usage_and_tasks_in_backend_of_a_user() {
         let mut m = machine();
         charge(&mut m, user(1), 3.0);
-        m.add_predicted_time(user(1), Duration::from_secs(3));
+        submit(&mut m, user(1));
         charge(&mut m, user(2), 5.0);
         enqueue(&mut m, user(1), task(1));
         enqueue(&mut m, user(2), task(2));
@@ -795,43 +859,45 @@ mod tests {
     fn pop_does_not_change_fair_share_state() {
         let mut m = machine();
         charge(&mut m, user(1), 5.0);
-        m.add_predicted_time(user(1), Duration::from_secs(2));
+        submit(&mut m, user(1));
         enqueue(&mut m, user(1), task(1));
         pop(&mut m);
         assert_eq!(usage(&m, user(1)), 5.0);
-        assert_eq!(predicted(&m, user(1)), 2.0);
+        assert_eq!(in_backend(&m, user(1)), 1);
+        assert_eq!(average(&m, user(1)), Some(5.0));
     }
 
-    // Predictions and usage
+    // Tasks in the backend and usage
 
     #[test]
-    fn add_predicted_time_creates_user() {
+    fn new_task_creates_user() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(3));
-        assert_eq!(predicted(&m, user(1)), 3.0);
+        submit(&mut m, user(1));
+        assert_eq!(in_backend(&m, user(1)), 1);
         assert_eq!(usage(&m, user(1)), 0.0);
+        assert_eq!(average(&m, user(1)), None);
     }
 
     #[test]
-    fn predicted_times_add_up() {
+    fn tasks_in_backend_add_up() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(3));
-        m.add_predicted_time(user(1), Duration::from_secs(4));
-        assert_eq!(predicted(&m, user(1)), 7.0);
+        submit(&mut m, user(1));
+        submit(&mut m, user(1));
+        assert_eq!(in_backend(&m, user(1)), 2);
     }
 
     #[test]
-    fn update_usage_releases_prediction_and_charges_time() {
+    fn finished_task_leaves_backend_and_charges_time() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(10));
-        m.add_predicted_time(user(1), Duration::from_secs(5));
-        m.record_finished_task_in_backend(user(1), Duration::from_secs(10), Duration::from_secs(2));
-        assert_eq!(predicted(&m, user(1)), 5.0);
+        submit(&mut m, user(1));
+        submit(&mut m, user(1));
+        finish(&mut m, user(1), 2.0);
+        assert_eq!(in_backend(&m, user(1)), 1);
         assert_eq!(usage(&m, user(1)), 2.0);
     }
 
     #[test]
-    fn update_usage_adds_to_earlier_usage() {
+    fn finished_tasks_add_to_earlier_usage() {
         let mut m = machine();
         charge(&mut m, user(1), 2.0);
         charge(&mut m, user(1), 3.0);
@@ -839,28 +905,110 @@ mod tests {
     }
 
     #[test]
-    fn update_usage_of_unknown_user_creates_entry() {
-        let mut m = machine();
-        m.record_finished_task_in_backend(user(1), Duration::from_secs(10), Duration::from_secs(2));
-        assert_eq!(usage(&m, user(1)), 2.0);
-        assert_eq!(predicted(&m, user(1)), 0.0);
-    }
-
-    #[test]
-    fn update_usage_never_makes_prediction_negative() {
-        let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(1));
-        m.record_finished_task_in_backend(user(1), Duration::from_secs(10), Duration::ZERO);
-        assert_eq!(predicted(&m, user(1)), 0.0);
-    }
-
-    #[test]
     fn users_do_not_affect_each_other() {
         let mut m = machine();
-        m.add_predicted_time(user(1), Duration::from_secs(3));
-        m.record_finished_task_in_backend(user(2), Duration::from_secs(3), Duration::from_secs(1));
-        assert_eq!(predicted(&m, user(1)), 3.0);
+        submit(&mut m, user(1));
+        charge(&mut m, user(2), 1.0);
+        assert_eq!(in_backend(&m, user(1)), 1);
         assert_eq!(usage(&m, user(1)), 0.0);
+        assert_eq!(average(&m, user(1)), None);
+    }
+
+    // Task average
+
+    #[test]
+    fn first_finished_task_sets_average() {
+        let mut m = machine();
+        charge(&mut m, user(1), 10.0);
+        assert_eq!(average(&m, user(1)), Some(10.0));
+    }
+
+    #[test]
+    fn later_finished_tasks_blend_into_average() {
+        let mut m = machine();
+        charge(&mut m, user(1), 10.0);
+        charge(&mut m, user(1), 20.0);
+        let expected = TASK_AVERAGE_ALPHA * 20.0 + (1.0 - TASK_AVERAGE_ALPHA) * 10.0;
+        assert_close(average(&m, user(1)).unwrap(), expected);
+    }
+
+    #[test]
+    fn task_without_exec_time_changes_neither_average_nor_usage() {
+        let mut m = machine();
+        charge(&mut m, user(1), 0.0);
+        assert_eq!(average(&m, user(1)), None);
+        charge(&mut m, user(1), 10.0);
+        charge(&mut m, user(1), 0.0);
+        assert_eq!(average(&m, user(1)), Some(10.0));
+        assert_eq!(usage(&m, user(1)), 10.0);
+        assert_eq!(in_backend(&m, user(1)), 0);
+    }
+
+    // Effective usage
+
+    #[test]
+    fn effective_usage_of_idle_user_is_usage() {
+        let mut m = machine();
+        charge(&mut m, user(1), 5.0);
+        assert_eq!(effective(&m, user(1)), 5.0);
+    }
+
+    #[test]
+    fn effective_usage_prices_tasks_with_placeholder_before_any_average() {
+        let mut m = machine();
+        submit(&mut m, user(1));
+        submit(&mut m, user(1));
+        assert_eq!(effective(&m, user(1)), 2.0 * TASK_AVERAGE_PLACEHOLDER);
+    }
+
+    #[test]
+    fn effective_usage_prices_tasks_with_average() {
+        let mut m = machine();
+        charge(&mut m, user(1), 3.0);
+        submit(&mut m, user(1));
+        submit(&mut m, user(1));
+        assert_eq!(effective(&m, user(1)), 3.0 + 2.0 * 3.0);
+    }
+
+    // Sessions
+
+    #[test]
+    fn session_task_does_not_create_user() {
+        let mut m = machine();
+        m.record_new_task_in_backend(&session_task(user(1)));
+        m.record_finished_task_in_backend(&session_task(user(1)), Duration::from_secs(2));
+        assert!(!m.queues.contains_key(&user(1)));
+    }
+
+    #[test]
+    fn session_task_leaves_fair_share_state_alone() {
+        let mut m = machine();
+        charge(&mut m, user(1), 5.0);
+        submit(&mut m, user(1));
+        m.record_new_task_in_backend(&session_task(user(1)));
+        assert_eq!(in_backend(&m, user(1)), 1);
+        m.record_finished_task_in_backend(&session_task(user(1)), Duration::from_secs(2));
+        assert_eq!(in_backend(&m, user(1)), 1);
+        assert_eq!(usage(&m, user(1)), 5.0);
+        assert_eq!(average(&m, user(1)), Some(5.0));
+    }
+
+    #[test]
+    fn closed_session_charges_usage_but_not_average() {
+        let mut m = machine();
+        charge(&mut m, user(1), 5.0);
+        m.record_closed_session(user(1), Duration::from_secs(100));
+        assert_eq!(usage(&m, user(1)), 105.0);
+        assert_eq!(average(&m, user(1)), Some(5.0));
+        assert_eq!(in_backend(&m, user(1)), 0);
+    }
+
+    #[test]
+    fn closed_session_of_unknown_user_creates_entry() {
+        let mut m = machine();
+        m.record_closed_session(user(1), Duration::from_secs(2));
+        assert_eq!(usage(&m, user(1)), 2.0);
+        assert_eq!(average(&m, user(1)), None);
     }
 
     // Removing queued items
@@ -899,11 +1047,11 @@ mod tests {
     fn take_queued_items_keeps_fair_share_state() {
         let mut m = machine();
         charge(&mut m, user(1), 5.0);
-        m.add_predicted_time(user(1), Duration::from_secs(3));
+        submit(&mut m, user(1));
         enqueue(&mut m, user(1), task(1));
         m.take_queued_items();
         assert_eq!(usage(&m, user(1)), 5.0);
-        assert_eq!(predicted(&m, user(1)), 3.0);
+        assert_eq!(in_backend(&m, user(1)), 1);
     }
 
     #[test]
@@ -972,14 +1120,23 @@ mod tests {
     }
 
     #[test]
-    fn inherit_usage_skips_predictions_and_queues() {
+    fn inherit_usage_takes_over_task_average() {
         let mut old = machine();
         charge(&mut old, user(1), 5.0);
-        old.add_predicted_time(user(1), Duration::from_secs(3));
+        let mut new = machine();
+        new.inherit_usage(&mut old);
+        assert_eq!(average(&new, user(1)), Some(5.0));
+    }
+
+    #[test]
+    fn inherit_usage_skips_tasks_in_backend_and_queues() {
+        let mut old = machine();
+        charge(&mut old, user(1), 5.0);
+        submit(&mut old, user(1));
         enqueue(&mut old, user(1), task(1));
         let mut new = machine();
         new.inherit_usage(&mut old);
-        assert_eq!(predicted(&new, user(1)), 0.0);
+        assert_eq!(in_backend(&new, user(1)), 0);
         assert!(pop(&mut new).is_none());
     }
 
@@ -989,10 +1146,10 @@ mod tests {
         charge(&mut old, user(1), 5.0);
         let mut new = machine();
         new.inherit_usage(&mut old);
-        new.add_predicted_time(user(1), Duration::from_secs(3));
+        submit(&mut new, user(1));
         enqueue(&mut new, user(1), task(1));
         assert!((usage(&new, user(1)) - 5.0).abs() < 0.01);
-        assert_eq!(predicted(&new, user(1)), 3.0);
+        assert_eq!(in_backend(&new, user(1)), 1);
         assert_eq!(pop(&mut new), Some(("task", 1)));
     }
 
