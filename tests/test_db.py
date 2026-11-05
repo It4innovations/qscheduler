@@ -1,7 +1,7 @@
 import os
 import time
 
-from utils import TEST_MACHINE_NAME, TEST_PROJECT
+from utils import KIB, TEST_MACHINE_NAME, TEST_PROJECT, padded_payload
 from utils import TestTask as TT
 
 
@@ -152,6 +152,18 @@ def test_payload_cleared_when_task_terminal(qscheduler_test, db_connect):
         assert _db_payload_is_null(cur, t_running)
         assert _db_payload_is_null(cur, t_queued)
         assert _db_payload_is_null(cur, t_failed)
+
+
+def test_payload_size_kept_after_payload_cleared(qscheduler_test, db_connect):
+    qscheduler_test.start()
+    task = qscheduler_test.submit(None, payload=padded_payload(3 * KIB))
+    qscheduler_test.wait_for_finished(task)
+
+    with db_connect.cursor() as cur:
+        _wait_db_task(cur, task, "finished")
+        assert _db_payload_is_null(cur, task)
+        cur.execute("SELECT payload_size FROM tasks WHERE id = %s", [task])
+        assert cur.fetchone()[0] == 3 * KIB
 
 
 def _db_task_user(cur, task_id):

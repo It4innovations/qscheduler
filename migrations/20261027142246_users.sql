@@ -66,3 +66,9 @@ CREATE TRIGGER task_exec_time_changed_user
 CREATE TRIGGER session_exec_time_changed_user
     AFTER UPDATE OF exec_time_ms ON sessions
     FOR EACH ROW EXECUTE FUNCTION update_user_consumption();
+
+-- Size of the task's payload in bytes; it outlives the payload, which is cleared once the task ends.
+-- Payloads that are already cleared have an unknown size, recorded as 0.
+ALTER TABLE tasks ADD COLUMN payload_size BIGINT NOT NULL DEFAULT 0;
+UPDATE tasks SET payload_size = octet_length(payload) WHERE payload IS NOT NULL;
+ALTER TABLE tasks ALTER COLUMN payload_size DROP DEFAULT;
