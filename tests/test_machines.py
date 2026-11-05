@@ -180,6 +180,7 @@ def test_api_add_machine(qscheduler_test, db_connect):
         "limit_check_interval_ms": 2_000,
         "max_session_time_ms": 5_000,
         "default_task_time_limit_ms": 3_600_000,
+        "max_task_time_limit_ms": 3_600_000,
         "max_clock_skew_ms": 4_000,
         "decay_half_time_ms": 5_400_000,
         "pulse_access": False,
@@ -206,6 +207,53 @@ def test_api_add_machine(qscheduler_test, db_connect):
     assert qs.api_get_machine("second") == info
     task_id = qs.submit(TT(), machine="second")
     qs.wait_for_finished(task_id)
+
+
+def test_default_task_time_limit_above_max_rejected(qscheduler_test):
+    qs = qscheduler_test
+    qs.start()
+    qs.api_add_machine("m", default_task_time_limit_ms=3_600_001, expect_status=422)
+    qs.api_add_machine(
+        "m",
+        default_task_time_limit_ms=1_000,
+        max_task_time_limit_ms=999,
+        expect_status=422,
+    )
+    info = qs.api_add_machine(
+        "m", default_task_time_limit_ms=7_200_000, max_task_time_limit_ms=7_200_000
+    ).json()
+    assert info["max_task_time_limit_ms"] == 7_200_000
+    qs.api_update_machine(
+        name="m", default_task_time_limit_ms=7_200_000, expect_status=422
+    )
+    qs.stop(kill=False)
+
+    r = qs.update_machine("--default-task-time-limit=2h")
+    assert r.returncode == 1
+    assert "max_task_time_limit" in r.stderr
+    r = qs.update_machine("--default-task-time-limit=2h", "--max-task-time-limit=2h")
+    assert r.returncode == 0, r.stderr
+
+
+def test_stored_config_without_max_task_time_limit(qscheduler_test, db_connect):
+    """A longer default stored before the maximum existed keeps working."""
+    qs = qscheduler_test
+    qs.start()
+    qs.stop(kill=False)
+    with db_connect.cursor() as cur:
+        _, config = _machine_row(cur)
+        del config["max_task_time_limit_ms"]
+        config["default_task_time_limit_ms"] = 7_200_000
+        cur.execute(
+            "UPDATE machines SET config = %s WHERE name = %s",
+            [json.dumps(config), TEST_MACHINE_NAME],
+        )
+
+    qs.restart()
+    assert qs.api_get_machine(TEST_MACHINE_NAME)["max_task_time_limit_ms"] == 7_200_000
+    t = qs.submit(TT())
+    qs.wait_for_finished(t)
+    assert qs.get_task(t)["time_limit_ms"] == 7_200_000
 
 
 def test_api_update_machine(qscheduler_test, db_connect):

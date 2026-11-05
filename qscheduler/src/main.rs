@@ -153,6 +153,11 @@ struct MachineConfigArgs {
     #[arg(long, value_parser = parse_human_time, default_value = "1h")]
     default_task_time_limit: Duration,
 
+    /// Maximum time limit a task may ask for; tasks asking for more are rejected at submit time.
+    /// `--default-task-time-limit` must not exceed it.
+    #[arg(long, value_parser = parse_human_time, default_value = "1h")]
+    max_task_time_limit: Duration,
+
     /// Maximum assumed skew between this host's clock and the backend's. Running tasks' time
     /// is estimated so that it never exceeds the true time as long as the backend's clock
     /// lags ours by at most this much.
@@ -180,6 +185,7 @@ impl MachineConfigArgs {
             limit_check_interval_ms: self.limit_check_interval.as_millis() as u32,
             max_session_time_ms: self.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: self.default_task_time_limit.as_millis() as u64,
+            max_task_time_limit_ms: self.max_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: self.max_clock_skew.as_millis() as u64,
             decay_half_time_ms: self.decay_half_time.as_millis() as u64,
             pulse_access: self.pulse_access,

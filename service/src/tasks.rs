@@ -14,8 +14,8 @@ use runner::SessionId;
 use runner::core::CoreRef;
 use runner::error::RunnerError;
 use runner::reactor::{
-    cancel_task, check_user_upload, get_machine_default_task_time_limit, get_machine_id_by_name,
-    get_or_create_user, get_project_id_by_name, get_task_info, resolve_notifier, submit_task,
+    cancel_task, check_user_upload, get_machine_id_by_name, get_or_create_user,
+    get_project_id_by_name, get_task_info, resolve_notifier, resolve_task_time_limit, submit_task,
 };
 use runner::task::{TaskConfig, TaskId, TaskInfo, TaskKind, TaskParent};
 use serde::Deserialize;
@@ -40,7 +40,8 @@ pub(crate) struct CreateTaskParams {
     /// and ends `failed` with the error `Task time limit exceeded`. The limit is checked every
     /// machine `limit_check_interval_ms` against a running-time estimate that never exceeds the
     /// true time (see the machine's `max_clock_skew_ms`), so a task is never stopped early but
-    /// may overrun slightly. Defaults to the machine's `default_task_time_limit_ms`.
+    /// may overrun slightly. Defaults to the machine's `default_task_time_limit_ms`; at most the
+    /// machine's `max_task_time_limit_ms`.
     time_limit_ms: Option<u64>,
     /// Name of the notifier to send the task's completion event to. No notification is sent
     /// when omitted.
@@ -103,7 +104,7 @@ fn check_content_type(kind: TaskKind, headers: &HeaderMap) -> runner::Result<()>
         (status = 402, description = "The project has exceeded its time limit, or the project is not active."),
         (status = 409, description = "The machine is suspended (the body contains the suspension message), or is being reconfigured or removed."),
         (status = 413, description = "The payload is larger than the service's maximum request body size, or than the limit on the total size of a user's active task payloads. Retrying cannot succeed."),
-        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero, the session is invalid or not open, `kind=pulse` on a machine without pulse-level access, or a `Content-Type` that doesn't match `kind`."),
+        (status = 422, description = "Neither or both of `project`/`session_id` given, unknown `machine`/`project`/`notify`, `time_limit_ms` is zero or exceeds the machine's `max_task_time_limit_ms`, the session is invalid or not open, `kind=pulse` on a machine without pulse-level access, or a `Content-Type` that doesn't match `kind`."),
         (status = 429, description = "The user has reached the service's limit of active items (tasks not yet finished, failed, or cancelled, plus sessions not yet closed), or the payload does not fit into what remains of the limit on the total size of the user's active task payloads. Submit again once some of them end. A request with a `Content-Length` can be rejected this way before its body is read.")
     )
 )]
@@ -189,8 +190,8 @@ async fn create_task_config(
     let (machine_id, time_limit, notifier) = {
         let core = core_ref.lock().unwrap();
         let machine_id = get_machine_id_by_name(&core, &params.machine)?;
-        let default = get_machine_default_task_time_limit(&core, machine_id);
-        let time_limit = params.time_limit_ms.map_or(default, Duration::from_millis);
+        let requested = params.time_limit_ms.map(Duration::from_millis);
+        let time_limit = resolve_task_time_limit(&core, machine_id, requested)?;
         let notifier = resolve_notifier(&core, params.notify.as_deref())?;
         (machine_id, time_limit, notifier)
     };

@@ -12,6 +12,8 @@ pub const DEFAULT_LIMIT_CHECK_INTERVAL_MS: u32 = 2 * 1000;
 pub const DEFAULT_MAX_SESSION_TIME_MS: u64 = 2 * 60 * 60 * 1000;
 /// Default time limit of tasks submitted without one (1 hour).
 pub const DEFAULT_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
+/// Default maximum time limit a task may ask for (1 hour).
+pub const DEFAULT_MAX_TASK_TIME_LIMIT_MS: u64 = 60 * 60 * 1000;
 /// Default maximum clock skew between this host and a backend (4 seconds).
 pub const DEFAULT_MAX_CLOCK_SKEW_MS: u64 = 4 * 1000;
 /// Default half-time of the decay of users' fair share usage (90 minutes).
@@ -27,6 +29,11 @@ fn default_max_session_time_ms() -> u64 {
 /// For machines whose stored configuration predates the `default_task_time_limit_ms` field.
 fn default_task_time_limit_ms() -> u64 {
     DEFAULT_TASK_TIME_LIMIT_MS
+}
+
+/// For machines whose stored configuration predates the `max_task_time_limit_ms` field.
+fn default_max_task_time_limit_ms() -> u64 {
+    DEFAULT_MAX_TASK_TIME_LIMIT_MS
 }
 
 /// For machines whose stored configuration predates the `max_clock_skew_ms` field.
@@ -54,6 +61,10 @@ pub struct MachineConfiguration {
     /// Time limit applied to tasks submitted without an explicit `time_limit_ms`.
     #[serde(default = "default_task_time_limit_ms")]
     pub default_task_time_limit_ms: u64,
+    /// Maximum `time_limit_ms` a task may ask for; tasks asking for more are rejected at submit
+    /// time. `default_task_time_limit_ms` must not exceed it.
+    #[serde(default = "default_max_task_time_limit_ms")]
+    pub max_task_time_limit_ms: u64,
     /// Assumed upper bound of how far the backend's clock may lag behind ours; used to keep the
     /// running-time estimate of tasks from ever exceeding the true time.
     #[serde(default = "default_max_clock_skew_ms")]
@@ -69,7 +80,8 @@ pub struct MachineConfiguration {
 
 impl MachineConfiguration {
     /// Rejects configurations a launcher cannot run with: an empty name, a zero queue size, a
-    /// zero check/poll interval, or a decay half-time below 1 ms.
+    /// zero check/poll interval, a decay half-time below 1 ms, or a default task time limit above
+    /// the maximum one.
     pub fn validate(&self) -> crate::Result<()> {
         let invalid = |msg: &str| Err(RunnerError::InvalidMachineConfig(msg.to_string()));
         if self.name.trim().is_empty() {
@@ -83,6 +95,9 @@ impl MachineConfiguration {
         }
         if self.decay_half_time_ms == 0 {
             return invalid("decay_half_time must be at least 1 ms");
+        }
+        if self.default_task_time_limit_ms > self.max_task_time_limit_ms {
+            return invalid("default_task_time_limit must not exceed max_task_time_limit");
         }
         if let BackendConfig::Iqm(iqm) = &self.backend
             && iqm.poll_interval.is_zero()
@@ -132,6 +147,7 @@ mod tests {
             limit_check_interval_ms: 1000,
             max_session_time_ms: 1000,
             default_task_time_limit_ms: 1000,
+            max_task_time_limit_ms: 1000,
             max_clock_skew_ms: 0,
             decay_half_time_ms: 1000,
             pulse_access: false,
@@ -166,6 +182,29 @@ mod tests {
             poll_interval: Duration::ZERO,
         });
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_default_task_time_limit_within_max() {
+        let mut c = test_config();
+        c.default_task_time_limit_ms = c.max_task_time_limit_ms;
+        assert!(c.validate().is_ok());
+        c.default_task_time_limit_ms = c.max_task_time_limit_ms + 1;
+        let error = c.validate().unwrap_err().to_string();
+        assert!(error.contains("max_task_time_limit"), "{error}");
+    }
+
+    #[test]
+    fn stored_config_without_max_task_time_limit_gets_default() {
+        let parsed: MachineConfiguration = serde_json::from_str(
+            r#"{"name": "m", "queue_size": 1, "limit_check_interval_ms": 1000,
+                "backend": {"type": "test"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.max_task_time_limit_ms,
+            super::DEFAULT_MAX_TASK_TIME_LIMIT_MS
+        );
     }
 
     #[test]

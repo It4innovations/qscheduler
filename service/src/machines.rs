@@ -8,8 +8,8 @@ use axum::{
 };
 use runner::config::{
     DEFAULT_DECAY_HALF_TIME_MS, DEFAULT_LIMIT_CHECK_INTERVAL_MS, DEFAULT_MAX_CLOCK_SKEW_MS,
-    DEFAULT_MAX_SESSION_TIME_MS, DEFAULT_QUEUE_SIZE, DEFAULT_TASK_TIME_LIMIT_MS,
-    MachineConfiguration,
+    DEFAULT_MAX_SESSION_TIME_MS, DEFAULT_MAX_TASK_TIME_LIMIT_MS, DEFAULT_QUEUE_SIZE,
+    DEFAULT_TASK_TIME_LIMIT_MS, MachineConfiguration,
 };
 use runner::core::Core;
 use runner::error::RunnerError;
@@ -307,6 +307,10 @@ fn default_task_time_limit_ms() -> u64 {
     DEFAULT_TASK_TIME_LIMIT_MS
 }
 
+fn default_max_task_time_limit_ms() -> u64 {
+    DEFAULT_MAX_TASK_TIME_LIMIT_MS
+}
+
 fn default_max_clock_skew_ms() -> u64 {
     DEFAULT_MAX_CLOCK_SKEW_MS
 }
@@ -358,10 +362,16 @@ pub(crate) struct MachineSettings {
     #[serde(default = "default_max_session_time_ms")]
     #[schema(default = 7200000)]
     max_session_time_ms: u64,
-    /// Time limit of tasks submitted without an explicit `time_limit_ms`, in milliseconds.
+    /// Time limit of tasks submitted without an explicit `time_limit_ms`, in milliseconds. Must
+    /// not exceed `max_task_time_limit_ms`.
     #[serde(default = "default_task_time_limit_ms")]
     #[schema(default = 3600000)]
     default_task_time_limit_ms: u64,
+    /// Maximum `time_limit_ms` a task may ask for, in milliseconds. Tasks asking for more are
+    /// rejected; tasks already accepted keep their limit when this is lowered.
+    #[serde(default = "default_max_task_time_limit_ms")]
+    #[schema(default = 3600000)]
+    max_task_time_limit_ms: u64,
     /// Maximum assumed lag of the backend's clock behind ours, in milliseconds. Running tasks'
     /// time is estimated so that it never exceeds the true time while the skew stays within
     /// this bound, so time limits never fail a task early; the estimate may lag the true time
@@ -391,6 +401,7 @@ impl MachineSettings {
             limit_check_interval_ms: self.limit_check_interval_ms,
             max_session_time_ms: self.max_session_time_ms,
             default_task_time_limit_ms: self.default_task_time_limit_ms,
+            max_task_time_limit_ms: self.max_task_time_limit_ms,
             max_clock_skew_ms: self.max_clock_skew_ms,
             decay_half_time_ms: self.decay_half_time_ms,
             pulse_access: self.pulse_access,
@@ -440,6 +451,7 @@ pub(crate) struct MachineResponse {
     limit_check_interval_ms: u64,
     max_session_time_ms: u64,
     default_task_time_limit_ms: u64,
+    max_task_time_limit_ms: u64,
     max_clock_skew_ms: u64,
     decay_half_time_ms: u64,
     pulse_access: bool,
@@ -457,6 +469,7 @@ impl MachineResponse {
             limit_check_interval_ms: config.limit_check_interval.as_millis() as u64,
             max_session_time_ms: config.max_session_time.as_millis() as u64,
             default_task_time_limit_ms: config.default_task_time_limit.as_millis() as u64,
+            max_task_time_limit_ms: config.max_task_time_limit.as_millis() as u64,
             max_clock_skew_ms: config.max_clock_skew.as_millis() as u64,
             decay_half_time_ms: config.decay_half_time.as_millis() as u64,
             pulse_access: config.pulse_access,

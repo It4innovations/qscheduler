@@ -896,6 +896,7 @@ fn create_machine(
             limit_check_interval: Duration::from_millis(m.limit_check_interval_ms as u64),
             max_session_time: Duration::from_millis(m.max_session_time_ms),
             default_task_time_limit: Duration::from_millis(m.default_task_time_limit_ms),
+            max_task_time_limit: Duration::from_millis(m.max_task_time_limit_ms),
             max_clock_skew: Duration::from_millis(m.max_clock_skew_ms),
             pulse_access: m.pulse_access,
             backend: m.backend,
