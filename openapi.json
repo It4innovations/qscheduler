@@ -1900,7 +1900,7 @@
             "type": "integer",
             "format": "int64",
             "description": "Time limit of tasks submitted without an explicit `time_limit_ms`, in milliseconds. Must\nnot exceed `max_task_time_limit_ms`.",
-            "default": 3600000,
+            "default": 900000,
             "minimum": 0
           },
           "limit_check_interval_ms": {
@@ -1928,7 +1928,7 @@
             "type": "integer",
             "format": "int64",
             "description": "Maximum `time_limit_ms` a task may ask for, in milliseconds. Tasks asking for more are\nrejected; tasks already accepted keep their limit when this is lowered.",
-            "default": 3600000,
+            "default": 900000,
             "minimum": 0
           },
           "pulse_access": {

@@ -179,8 +179,8 @@ def test_api_add_machine(qscheduler_test, db_connect):
         "queue_size": 3,
         "limit_check_interval_ms": 2_000,
         "max_session_time_ms": 5_000,
-        "default_task_time_limit_ms": 3_600_000,
-        "max_task_time_limit_ms": 3_600_000,
+        "default_task_time_limit_ms": 900_000,
+        "max_task_time_limit_ms": 900_000,
         "max_clock_skew_ms": 4_000,
         "decay_half_time_ms": 5_400_000,
         "pulse_access": False,
@@ -209,10 +209,17 @@ def test_api_add_machine(qscheduler_test, db_connect):
     qs.wait_for_finished(task_id)
 
 
+def test_cli_task_time_limit_defaults(qscheduler_test):
+    qscheduler_test.start()
+    info = qscheduler_test.api_get_machine(TEST_MACHINE_NAME)
+    assert info["default_task_time_limit_ms"] == 900_000
+    assert info["max_task_time_limit_ms"] == 900_000
+
+
 def test_default_task_time_limit_above_max_rejected(qscheduler_test):
     qs = qscheduler_test
     qs.start()
-    qs.api_add_machine("m", default_task_time_limit_ms=3_600_001, expect_status=422)
+    qs.api_add_machine("m", default_task_time_limit_ms=900_001, expect_status=422)
     qs.api_add_machine(
         "m",
         default_task_time_limit_ms=1_000,
@@ -270,7 +277,8 @@ def test_api_update_machine(qscheduler_test, db_connect):
     assert info["max_session_time_ms"] == 10_000
     assert info["decay_half_time_ms"] == 60_000
     # Omitted fields get their defaults
-    assert info["default_task_time_limit_ms"] == 3_600_000
+    assert info["default_task_time_limit_ms"] == 900_000
+    assert info["max_task_time_limit_ms"] == 900_000
     with db_connect.cursor() as cur:
         _, config = _machine_row(cur)
     assert config["queue_size"] == 1
