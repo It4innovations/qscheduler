@@ -522,14 +522,15 @@ pub async fn insert_task(
     config: &TaskConfig,
 ) -> crate::Result<(TaskId, DateTime<Utc>)> {
     let row = sqlx::query(
-        "INSERT INTO tasks (machine_id, session_id, project_id, user_id, payload, time_limit_ms, notifier_id, kind) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::task_kind) RETURNING id, created_at",
+        "INSERT INTO tasks (machine_id, session_id, project_id, user_id, payload, payload_size, time_limit_ms, notifier_id, kind) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::task_kind) RETURNING id, created_at",
     )
     .bind(config.machine_id.as_i32())
     .bind(config.parent.session_id().map(|s| s.as_i64()))
     .bind(config.parent.project_id().map(|p| p.as_i32()))
     .bind(config.user_id.as_i32())
     .bind(config.payload.as_ref())
+    .bind(config.payload.len() as i64)
     .bind(config.time_limit.as_millis() as i64)
     .bind(config.notifier.map(|n| n.as_i32()))
     .bind(config.kind.as_str())
