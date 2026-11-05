@@ -1,4 +1,5 @@
 pub mod config;
+mod debug;
 mod machines;
 mod notifiers;
 mod projects;
@@ -31,8 +32,8 @@ struct AppState {
     admin_token: Option<String>,
 }
 
-/// Extractor guarding the admin endpoints (machine and notifier management): requires an
-/// `Authorization: Bearer <ADMIN_TOKEN>` header.
+/// Extractor guarding the admin endpoints (machine and notifier management, debugging): requires
+/// an `Authorization: Bearer <ADMIN_TOKEN>` header.
 pub(crate) struct AdminAuth;
 
 impl FromRequestParts<Arc<AppState>> for AdminAuth {
@@ -199,6 +200,7 @@ fn api_router() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(projects::update_project_handler))
         .routes(routes!(users::list_users_handler))
         .routes(routes!(users::get_user_consumption_handler))
+        .routes(routes!(debug::get_debug_scheduler_handler))
 }
 
 /// The OpenAPI spec of the REST API, as served at `/api-docs/openapi.json`. Needs no database.

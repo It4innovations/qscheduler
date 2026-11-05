@@ -7,6 +7,7 @@ use crate::project::ProjectId;
 use crate::session::{Session, SessionId};
 use crate::suspension::{SuspendCancel, Suspension};
 use crate::task::{Task, TaskConfig, TaskId};
+use crate::user::UserMap;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
@@ -74,6 +75,75 @@ pub(crate) struct ResumeTask {
     pub time_limit: Duration,
     /// Project charged for the task's time (`None` for session tasks).
     pub project_id: Option<ProjectId>,
+}
+
+/// Scheduler state returned by `GET /debug/scheduler`. For internal debugging only: the format can
+/// change between versions.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct DebugSchedulerState {
+    /// All machines, sorted by name.
+    pub machines: Vec<DebugMachineState>,
+}
+
+/// Scheduling state of one machine.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct DebugMachineState {
+    pub name: String,
+    /// Maximum number of tasks handed to the backend at once.
+    pub queue_size: usize,
+    /// Seconds since usage was last decayed; the usage values are as of that moment.
+    pub secs_since_decay: f64,
+    /// The machine has an active suspension.
+    pub suspended: bool,
+    /// The machine is being reconfigured or removed.
+    pub unavailable: bool,
+    /// The open session, if any.
+    pub running_session: Option<DebugRunningSession>,
+    /// Users the machine holds fair-share state for, sorted by name.
+    pub users: Vec<DebugUserState>,
+}
+
+/// The session currently open on a machine.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct DebugRunningSession {
+    pub id: u64,
+    /// IDs of the session's tasks waiting to be handed to the backend, in order.
+    pub queue: Vec<u64>,
+}
+
+/// Fair-share state of one user on one machine.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct DebugUserState {
+    pub user: String,
+    /// Decayed time charged to the user, in seconds.
+    pub usage_s: f64,
+    /// Moving average of the user's task execution time, in seconds; `null` before the first
+    /// task with an execution time finishes.
+    pub average_task_time_s: Option<f64>,
+    /// Number of the user's tasks in the backend, not counting tasks of a session.
+    pub tasks_in_backend: u32,
+    /// The value the scheduler orders users by: `usage_s` plus the expected time of the tasks in
+    /// the backend. The user with the lowest value and a non-empty queue goes next.
+    pub effective_usage_s: f64,
+    /// The user's queued items, in order. Tasks of an open session are not included.
+    pub queue: Vec<DebugQueueItem>,
+}
+
+/// An item waiting in a user's queue.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum DebugQueueItem {
+    Task { id: u64 },
+    Session { id: u64 },
+}
+
+impl From<QueueItem> for DebugQueueItem {
+    fn from(item: QueueItem) -> Self {
+        match item {
+            QueueItem::Task(id) => DebugQueueItem::Task { id: id.as_u64() },
+            QueueItem::Session(id) => DebugQueueItem::Session { id: id.as_u64() },
+        }
+    }
 }
 
 type Usage = PositiveFinite<f64>;
@@ -291,6 +361,52 @@ impl Machine {
 
     pub fn running_session_id(&self) -> Option<SessionId> {
         self.running_session.as_ref().map(|s| s.session_id)
+    }
+
+    /// A read-only snapshot of the machine's scheduling state; decays nothing. Also returns the
+    /// users missing from `user_map`, as indexes into `users`: their names are left empty.
+    pub(crate) fn debug_state(
+        &self,
+        user_map: &UserMap,
+    ) -> (DebugMachineState, Vec<(usize, UserId)>) {
+        let mut unknown_users = Vec::new();
+        let users = self
+            .queues
+            .iter()
+            .enumerate()
+            .map(|(index, (user_id, qu))| {
+                let user = match user_map.find_user(*user_id) {
+                    Some(user) => user.name.clone(),
+                    None => {
+                        unknown_users.push((index, *user_id));
+                        String::new()
+                    }
+                };
+                DebugUserState {
+                    user,
+                    usage_s: qu.usage.get(),
+                    average_task_time_s: qu.average_usage.map(|a| a.get()),
+                    tasks_in_backend: qu.submitted_tasks,
+                    effective_usage_s: qu.effective_usage().get(),
+                    queue: qu.queue.iter().copied().map(DebugQueueItem::from).collect(),
+                }
+            })
+            .collect();
+        let state = DebugMachineState {
+            name: self.config.name.clone(),
+            queue_size: self.config.queue_size,
+            secs_since_decay: Instant::now()
+                .saturating_duration_since(self.last_decay_update)
+                .as_secs_f64(),
+            suspended: self.suspension.is_some(),
+            unavailable: self.unavailable,
+            running_session: self.running_session.as_ref().map(|s| DebugRunningSession {
+                id: s.session_id.as_u64(),
+                queue: s.queue.iter().map(|t| t.as_u64()).collect(),
+            }),
+            users,
+        };
+        (state, unknown_users)
     }
 
     pub fn notifier(&self) -> &Arc<Notify> {
@@ -1161,6 +1277,47 @@ mod tests {
         let mut new = machine();
         new.inherit_usage(&mut old);
         assert!(!new.queues.contains_key(&user(1)));
+    }
+
+    // Debug state
+
+    #[test]
+    fn debug_state_reports_fair_share_state_without_changing_it() {
+        let mut m = machine();
+        let mut user_map = UserMap::default();
+        user_map.insert(user(1), "alice");
+        charge(&mut m, user(1), 4.0);
+        submit(&mut m, user(1));
+        enqueue(&mut m, user(1), task(7));
+        enqueue(&mut m, user(1), session(8));
+        let last_decay_update = m.last_decay_update;
+
+        let (state, unknown_users) = m.debug_state(&user_map);
+
+        assert!(unknown_users.is_empty());
+        let alice = &state.users[0];
+        assert_eq!(alice.user, "alice");
+        assert_eq!(alice.usage_s, 4.0);
+        assert_eq!(alice.average_task_time_s, Some(4.0));
+        assert_eq!(alice.tasks_in_backend, 1);
+        assert_eq!(alice.effective_usage_s, 8.0);
+        assert!(matches!(
+            alice.queue[..],
+            [
+                DebugQueueItem::Task { id: 7 },
+                DebugQueueItem::Session { id: 8 }
+            ]
+        ));
+        assert_eq!(m.last_decay_update, last_decay_update);
+    }
+
+    #[test]
+    fn debug_state_reports_users_missing_from_user_map() {
+        let mut m = machine();
+        charge(&mut m, user(1), 4.0);
+        let (state, unknown_users) = m.debug_state(&UserMap::default());
+        assert_eq!(state.users[0].user, "");
+        assert_eq!(unknown_users, [(0, user(1))]);
     }
 
     // Configuration

@@ -35,6 +35,13 @@ the `ADMIN_TOKEN` environment variable of the service. When `ADMIN_TOKEN` is uns
 the admin endpoints are disabled and return `403`; a missing or wrong token gets `401`. Backend
 and notifier tokens are accepted but never returned.
 
+## Debugging
+
+`GET /debug/scheduler` returns the scheduler's internal state: per machine, each user's queue,
+usage and task average. It serves internal debugging only and requires the admin token. **Its
+format is not guaranteed to be stable across versions**, and changing it is not considered a
+breaking API change.
+
 ## Notifications
 
 A task or session with `notify` makes the service `POST` a JSON event to that notifier's URL:

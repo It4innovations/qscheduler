@@ -3,7 +3,7 @@ use crate::callback::{NotifierId, NotifierInfo};
 use crate::config::{MachineConfiguration, NotifierConfiguration};
 use crate::core::{Core, CoreRef, CoreSplitMut};
 use crate::error::RunnerError;
-use crate::machine::MachineInfo;
+use crate::machine::{DebugSchedulerState, MachineInfo};
 use crate::project::{Project, ProjectId};
 use crate::session::{SessionConfig, SessionId, SessionInfo, SessionState};
 use crate::suspension::{
@@ -12,6 +12,7 @@ use crate::suspension::{
 use crate::task::{TaskConfig, TaskId, TaskInfo};
 use crate::user::{UserConsumption, UserId};
 use crate::{MachineId, db};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,6 +97,48 @@ pub async fn get_user_consumption(
 ) -> crate::Result<Option<Vec<UserConsumption>>> {
     let pool = core_ref.lock().unwrap().pool().clone();
     db::find_user_consumption(&pool, name).await
+}
+
+/// A snapshot of the scheduler's state, for debugging. Changes nothing. Idle users may have left
+/// memory while a machine still holds their usage, so their names come from the DB.
+pub async fn get_debug_state(core_ref: &CoreRef) -> crate::Result<DebugSchedulerState> {
+    let (snapshots, pool) = {
+        let core = core_ref.lock().unwrap();
+        let split = core.split();
+        let snapshots: Vec<_> = split
+            .machine_map
+            .iter()
+            .map(|m| m.debug_state(split.user_map))
+            .collect();
+        (snapshots, core.pool().clone())
+    };
+    let unknown_ids: Vec<i32> = snapshots
+        .iter()
+        .flat_map(|(_, unknown_users)| unknown_users.iter().map(|(_, id)| id.as_i32()))
+        .collect();
+    let names: HashMap<i32, String> = if unknown_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db::find_user_names(&pool, &unknown_ids)
+            .await?
+            .into_iter()
+            .collect()
+    };
+    let mut machines: Vec<_> = snapshots
+        .into_iter()
+        .map(|(mut machine, unknown_users)| {
+            for (index, user_id) in unknown_users {
+                machine.users[index].user = names
+                    .get(&user_id.as_i32())
+                    .cloned()
+                    .unwrap_or_else(|| format!("<unknown user {user_id}>"));
+            }
+            machine.users.sort_by(|a, b| a.user.cmp(&b.user));
+            machine
+        })
+        .collect();
+    machines.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(DebugSchedulerState { machines })
 }
 
 /// Looks up a task's public info, preferring `Core`'s in-memory state and falling back to the
