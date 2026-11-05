@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 - 2026-11-05
 
 ### Changed
 
@@ -8,9 +8,27 @@
   the session. Sessions created before this version get the user of their first task as the
   owner, or a user named `unknown` if they have no tasks.
 - Session info (`GET /sessions/{id}` and session notifications) contains the session's `owner`.
+- **Breaking:** service option `--max-payload-mb <N>` replaced by `--max-payload <SIZE>`: a whole
+  number with an optional `K`, `M`, `G` or `T` suffix, at most `4G`. The default stays 32 MiB.
+- **Breaking:** the default task time limit (`--default-task-time-limit`) changed from `1h` to
+  `15m`, and a task asking for more than the new per-machine maximum (see Added) gets `422`.
 
 ### Added
 
+- Machines schedule users by fair share instead of in submission order.
+- `--task-retention` also applies to closed sessions: they are evicted from memory afterwards and
+  served from the database.
+- Machine option `--decay-half-time` / `decay_half_time_ms` (default `90m`): the time after which a
+  user's fair share usage drops to half.
+- Machine option `--max-task-time-limit` / `max_task_time_limit_ms` (default `15m`): the maximum
+  time limit a task may ask for. Tasks already accepted keep their limit when it is lowered.
+- Per-user limits on active work: `--max-user-active-items` (default 2000) on tasks not yet
+  finished, failed or cancelled plus owned sessions not yet closed, and `--max-user-active-payload`
+  (default `200M`) on the total payload size of the active tasks. `POST /tasks` and `POST /sessions`
+  answer `429` over a limit, `POST /tasks` answers `413` if the payload alone is larger than the
+  limit. A task submit with a `Content-Length` is rejected before its body is read.
+- `GET /debug/scheduler` (admin token) returns the scheduler's state per machine, for internal
+  debugging only. Its format is not guaranteed to be stable across versions.
 - Consumed time is tracked per user, project and machine: a user is charged the time of the
   sessions it owns and of its tasks outside a session, but not of its tasks inside a session.
   Existing tasks and sessions are included. Removing a machine removes its entries.
