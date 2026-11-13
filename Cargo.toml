@@ -18,12 +18,9 @@ clap               = { version = "4", features = ["derive"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde              = { version = "1", features = ["derive"] }
-anyhow             = "1"
 reqwest            = { version = "0.13", default-features = false, features = ["rustls"] }
-base64             = "0.23"
 utoipa             = { version = "6", features = ["axum_extras", "chrono"] }
 utoipa-axum        = "0.3"
-utoipa-swagger-ui  = { version = "9", features = ["axum"] }
 thiserror = "2.0"
 bytes = "1"
 futures-util = "0.3"
