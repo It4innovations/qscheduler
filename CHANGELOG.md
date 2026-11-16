@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.3 - 2026-11-16
+
+### Fixed
+
+- Secrets no longer appear in logs at any level.
+
 ## v0.2.2 - 2026-10-27
 
 ### Added

@@ -662,7 +662,7 @@ pub async fn add_notifier(
     };
     let _guard = lock.lock().await;
     let notifier_id = db::insert_notifier(&pool, &config).await?;
-    tracing::info!(%notifier_id, url = config.url, "Notifier added");
+    tracing::info!(%notifier_id, name = %config.name, "Notifier added");
     let info = NotifierInfo {
         name: config.name.clone(),
         url: config.url.clone(),

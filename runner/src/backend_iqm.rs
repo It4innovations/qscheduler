@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{Instrument, debug, error, warn};
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 pub struct IqmBackendConfig {
     pub url: String,
     pub token: String,
@@ -24,6 +24,18 @@ pub struct IqmBackendConfig {
     /// Accepts the pre-rename `check_interval` key of stored configurations.
     #[serde(alias = "check_interval")]
     pub poll_interval: Duration,
+}
+
+// Written by hand so the bearer token never reaches a log through `{:?}`.
+impl std::fmt::Debug for IqmBackendConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IqmBackendConfig")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .field("machine_name", &self.machine_name)
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
 }
 
 enum MonitorCommand {
@@ -193,7 +205,10 @@ impl Backend for IqmBackend {
                 debug!(%url, "connecting to IQM backend");
                 let result = builder.body(payload).send().await;
                 match result {
-                    Err(e) => self.send_task_error(task_id, format!("IQM request failed: {}", e)),
+                    Err(e) => self.send_task_error(
+                        task_id,
+                        format!("IQM request failed: {}", e.without_url()),
+                    ),
                     Ok(resp) => {
                         let http_status = resp.status();
                         if !http_status.is_success() {
@@ -208,7 +223,7 @@ impl Backend for IqmBackend {
                             Err(e) => {
                                 self.send_task_error(
                                     task_id,
-                                    format!("Parsing IQM backend failed: {e}"),
+                                    format!("Parsing IQM backend failed: {}", e.without_url()),
                                 );
                             }
                             Ok(id_field) => {
@@ -385,10 +400,9 @@ impl IqmBackend {
 }
 
 async fn fetch_text(request: RequestBuilder) -> crate::Result<String> {
-    let resp = request
-        .send()
-        .await
-        .map_err(|e| RunnerError::GenericError(format!("IQM request failed: {e}")))?;
+    let resp = request.send().await.map_err(|e| {
+        RunnerError::GenericError(format!("IQM request failed: {}", e.without_url()))
+    })?;
     let http_status = resp.status();
     if !http_status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -396,19 +410,18 @@ async fn fetch_text(request: RequestBuilder) -> crate::Result<String> {
             "IQM backend HTTP {http_status}: {body}"
         )));
     }
-    resp.text()
-        .await
-        .map_err(|e| RunnerError::GenericError(format!("Failed to read IQM response: {e}")))
+    resp.text().await.map_err(|e| {
+        RunnerError::GenericError(format!("Failed to read IQM response: {}", e.without_url()))
+    })
 }
 
 async fn fetch_stream(
     request: RequestBuilder,
     not_found: Option<impl FnOnce() -> RunnerError>,
 ) -> crate::Result<BackendStream> {
-    let resp = request
-        .send()
-        .await
-        .map_err(|e| RunnerError::GenericError(format!("IQM request failed: {e}")))?;
+    let resp = request.send().await.map_err(|e| {
+        RunnerError::GenericError(format!("IQM request failed: {}", e.without_url()))
+    })?;
     let http_status = resp.status();
     if http_status == reqwest::StatusCode::NOT_FOUND
         && let Some(not_found) = not_found
@@ -427,7 +440,9 @@ async fn fetch_stream(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let stream = resp.bytes_stream().map(|chunk| {
-        chunk.map_err(|e| RunnerError::GenericError(format!("IQM stream error: {e}")))
+        chunk.map_err(|e| {
+            RunnerError::GenericError(format!("IQM stream error: {}", e.without_url()))
+        })
     });
     Ok(BackendStream {
         content_type,
@@ -513,8 +528,12 @@ fn spawn_cancel_attempt(backend: &Arc<IqmBackend>, task_id: TaskId, iqm_task_id:
                     debug!(status = %resp.status(), "cancel task succeeded");
                     true
                 }
-                result => {
-                    warn!(?result, "cancel attempt failed, will retry on next poll");
+                Ok(resp) => {
+                    warn!(status = %resp.status(), "cancel attempt failed, will retry on next poll");
+                    false
+                }
+                Err(e) => {
+                    warn!(error = %e.without_url(), "cancel attempt failed, will retry on next poll");
                     false
                 }
             };
@@ -651,14 +670,14 @@ async fn process_result(
     sender: &UnboundedSender<FromBackendMessage>,
 ) -> Result<Option<TaskState>, String> {
     match result {
-        Err(e) => Err(format!("request failed: {e}")),
+        Err(e) => Err(format!("request failed: {}", e.without_url())),
         Ok(resp) => {
             let http_status = resp.status();
             if !http_status.is_success() {
                 return Err(format!("HTTP status {http_status}"));
             }
             match resp.json::<JobStatusResponse>().await {
-                Err(e) => Err(format!("could not parse IQM response: {e}")),
+                Err(e) => Err(format!("could not parse IQM response: {}", e.without_url())),
                 Ok(data) => {
                     if !task.start_reported
                         && let Some(started_at) = data.execution_started()

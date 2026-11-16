@@ -79,13 +79,25 @@ impl MachineConfiguration {
 }
 
 /// An HTTP callback target. Tasks and sessions select it by `name`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NotifierConfiguration {
     pub name: String,
     /// URL to POST task/session events to.
     pub url: String,
     /// Included in every payload, if set.
     pub token: Option<String>,
+}
+
+// Written by hand so the token never reaches a log through `{:?}`. The URL is redacted as well:
+// webhook URLs commonly embed a secret.
+impl std::fmt::Debug for NotifierConfiguration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotifierConfiguration")
+            .field("name", &self.name)
+            .field("url", &"<redacted>")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -99,6 +111,7 @@ pub struct RunnerConfiguration {
 #[cfg(test)]
 mod tests {
     use super::MachineConfiguration;
+    use super::NotifierConfiguration;
     use crate::IqmBackendConfig;
     use crate::backend::BackendConfig;
     use std::time::Duration;
@@ -155,5 +168,25 @@ mod tests {
             panic!("expected IQM backend config");
         };
         assert_eq!(iqm.poll_interval, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let mut config = test_config();
+        config.backend = BackendConfig::Iqm(IqmBackendConfig {
+            url: "https://iqm.example".to_string(),
+            token: "iqm-secret-token".to_string(),
+            machine_name: "m".to_string(),
+            poll_interval: Duration::from_secs(1),
+        });
+        let notifier = NotifierConfiguration {
+            name: "n".to_string(),
+            url: "https://hooks.example/secret-path".to_string(),
+            token: Some("notifier-secret-token".to_string()),
+        };
+        let output = format!("{config:?} {:?} {notifier:?}", config.backend);
+        for secret in ["iqm-secret-token", "notifier-secret-token", "secret-path"] {
+            assert!(!output.contains(secret), "{output}");
+        }
     }
 }

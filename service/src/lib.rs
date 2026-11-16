@@ -211,12 +211,12 @@ pub async fn run(version: &'static str, service_conf: ServiceConfiguration) -> r
     } else {
         tracing::info!(count = machines.len(), "loaded machines from database");
         for (machine_id, m) in &machines {
-            tracing::info!(id = %machine_id, name = %m.name, backend = ?m.backend, "machine loaded");
+            tracing::info!(id = %machine_id, name = %m.name, backend = m.backend.kind(), "machine loaded");
         }
     }
     let notifiers = runner::db::load_notifiers(&pool).await?;
     for (notifier_id, n) in &notifiers {
-        tracing::info!(id = %notifier_id, name = %n.name, url = %n.url, "notifier loaded");
+        tracing::info!(id = %notifier_id, name = %n.name, "notifier loaded");
     }
     let runner_conf = RunnerConfiguration {
         machines,
