@@ -15,6 +15,16 @@ pub enum BackendConfig {
     Test,
 }
 
+impl BackendConfig {
+    /// Backend type name, safe to log (unlike the config itself, which holds credentials).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            BackendConfig::Iqm(_) => "iqm",
+            BackendConfig::Test => "test",
+        }
+    }
+}
+
 use crate::TaskId;
 use crate::backend_iqm::start_iqm_backend;
 use crate::backend_test::start_test_backend;
