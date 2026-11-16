@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "qscheduler"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "dotenvy",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "runner"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "chrono",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "service"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "runner",

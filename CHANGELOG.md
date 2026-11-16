@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.1 - 2026-11-16
+
+### Fixed
+
+- Secrets no longer appear in logs at any level: backend and notifier tokens (and notifier URLs)
+  are redacted from logged configurations, and request URLs are stripped from HTTP client errors.
+
 ## v0.3.0 - 2026-11-05
 
 ### Changed
